@@ -1,0 +1,20 @@
+file,use_for_baseline,rows,bad_lines,datasets,errors,finish_reason,length_rows,length_rate,max_total_tokens,notes
+qwen3vl8b_BLINK_len32768_maxtok128_raw.jsonl,yes,1124,0,"{""BLINK"": 1124}",0,"{""stop"": 1124}",0,0.0,4540,
+qwen3vl8b_DynaMath_Sample_len32768_maxtok2048_raw.jsonl,yes,501,0,"{""DynaMath_Sample"": 501}",0,"{""stop"": 501}",0,0.0,8400,
+qwen3vl8b_GQA_val_balanced_limit5000_len65536_maxtok128_raw.jsonl,yes,5000,0,"{""GQA"": 5000}",0,"{""stop"": 5000}",0,0.0,1329,
+qwen3vl8b_MMBench_dev_len65536_maxtok256_raw.jsonl,yes,4329,0,"{""MMBench"": 4329}",0,"{""stop"": 4327, ""length"": 2}",2,0.000462,601,length_rows=2
+qwen3vl8b_MMMU_Pro_10options_len65536_maxtok256_raw.jsonl,yes,1730,0,"{""MMMU_Pro_10"": 1730}",0,"{""stop"": 1725, ""length"": 5}",5,0.00289,6497,length_rows=5
+qwen3vl8b_MMMU_Pro_4options_len65536_maxtok256_raw.jsonl,yes,1730,0,"{""MMMU_Pro_4"": 1730}",0,"{""stop"": 1722, ""length"": 8}",8,0.004624,6473,length_rows=8
+qwen3vl8b_MMSI_Bench_len32768_maxtok256_raw.jsonl,yes,1000,0,"{""MMSI-Bench"": 1000}",0,"{""stop"": 1000}",0,0.0,12141,
+qwen3vl8b_MMVet_len32768_maxtok2048_raw.jsonl,yes,218,0,"{""MMVet"": 218}",0,"{""stop"": 218}",0,0.0,16295,
+qwen3vl8b_MV_MATH_len32768_maxtok256_raw.jsonl,no_superseded,2009,0,"{""MV-MATH"": 2009}",0,"{""stop"": 1560, ""length"": 449}",449,0.223494,2567,superseded_by_len65536_or_higher_maxtok;length_rows=449
+qwen3vl8b_MV_MATH_len65536_maxtok1024_raw.jsonl,yes,2009,0,"{""MV-MATH"": 2009}",0,"{""stop"": 1645, ""length"": 364}",364,0.181185,2567,length_rows=364
+qwen3vl8b_MathVerse_len32768_maxtok256_raw.jsonl,no_superseded,3940,0,"{""MathVerse"": 3940}",0,"{""stop"": 3576, ""length"": 364}",364,0.092386,16372,superseded_by_len65536_or_higher_maxtok;length_rows=364
+qwen3vl8b_MathVerse_len65536_maxtok1024_raw.jsonl,yes,3940,0,"{""MathVerse"": 3940}",0,"{""stop"": 3826, ""length"": 114}",114,0.028934,16372,length_rows=114
+qwen3vl8b_MathVista_len32768_maxtok2048_raw.jsonl,yes,1000,0,"{""MathVista"": 1000}",0,"{""stop"": 1000}",0,0.0,16314,
+qwen3vl8b_MindCube_Bench_len65536_maxtok256_raw.jsonl,yes,21154,0,"{""MindCube-Bench"": 21154}",0,"{""stop"": 21154}",0,0.0,47549,
+qwen3vl8b_ReMI_test_len65536_maxtok1024_raw.jsonl,yes,2600,0,"{""ReMI"": 2600}",0,"{""stop"": 2600}",0,0.0,29197,
+qwen3vl8b_ScienceQA_IMG_len32768_maxtok128_raw.jsonl,yes,2097,0,"{""ScienceQA-IMG"": 2097}",0,"{""stop"": 2097}",0,0.0,594,
+qwen3vl8b_VQAv2_val_limit5000_len65536_maxtok128_raw.jsonl,yes,5000,0,"{""VQAv2"": 5000}",0,"{""stop"": 5000}",0,0.0,477,
+qwen3vl8b_ViewSpatial_Bench_len32768_maxtok128_raw.jsonl,no_superseded,4865,0,"{""ViewSpatial-Bench"": 4865}",15,"{""stop"": 4850, ""null"": 15}",0,0.0,32548,superseded_by_len65536_or_higher_maxtok;errors=15
+qwen3vl8b_ViewSpatial_Bench_len65536_maxtok128_raw.jsonl,yes,5712,0,"{""ViewSpatial-Bench"": 5712}",0,"{""stop"": 5712}",0,0.0,38563,
