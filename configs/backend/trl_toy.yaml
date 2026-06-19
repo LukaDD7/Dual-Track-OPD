@@ -1,0 +1,7 @@
+backend:
+  name: trl_toy
+  engine: cpu_toy
+  purpose: local smoke tests only
+  batch_size: 2
+  max_steps: 5
+

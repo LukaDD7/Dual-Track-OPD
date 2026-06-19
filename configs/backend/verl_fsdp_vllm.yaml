@@ -1,0 +1,13 @@
+backend:
+  name: verl
+  engine: fsdp_vllm
+  source_dir: third_party/verl
+  patches_dir: patches/verl
+  tensor_parallel_size: 1
+  fsdp:
+    mixed_precision: bf16
+    cpu_offload: false
+  rollout:
+    temperature: 1.0
+    top_p: 0.95
+

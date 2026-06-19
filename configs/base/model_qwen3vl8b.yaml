@@ -1,0 +1,8 @@
+model:
+  name: Qwen3-VL-8B-Instruct
+  provider: local_hf
+  model_path: ${DTOPD_MODEL_ROOT}/Qwen3-VL-8B-Instruct
+  dtype: bfloat16
+  max_model_len: 8192
+  trust_remote_code: true
+

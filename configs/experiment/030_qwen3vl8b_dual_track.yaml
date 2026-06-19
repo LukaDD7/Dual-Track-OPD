@@ -1,0 +1,10 @@
+experiment:
+  id: "030"
+  name: qwen3vl8b_dual_track
+  backend_config: configs/backend/verl_fsdp_vllm.yaml
+  model_config: configs/base/model_qwen3vl8b.yaml
+  loss:
+    type: dual_track_opd
+    alpha_text: 1.0
+    alpha_vision: 1.0
+

@@ -1,0 +1,10 @@
+backend:
+  name: verl
+  engine: fsdp_sglang
+  source_dir: third_party/verl
+  patches_dir: patches/verl
+  tensor_parallel_size: 1
+  rollout:
+    temperature: 1.0
+    top_p: 0.95
+

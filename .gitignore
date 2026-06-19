@@ -1,0 +1,42 @@
+# Secrets and local env
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.venv/
+venv/
+
+# Large research artifacts
+outputs/
+eval_runs/
+checkpoints/
+models/
+wandb/
+mlruns/
+.cache/
+*.ckpt
+*.pt
+*.pth
+*.safetensors
+*.bin
+
+# Raw outputs and datasets
+*.jsonl
+!data/manifests/*.jsonl
+!data/manifests/README.md
+data/raw/
+data/processed/
+data/downloads/
+
+# OS/editor
+.DS_Store
+.idea/
+.vscode/
+

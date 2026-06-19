@@ -1,0 +1,7 @@
+logging:
+  project: dual-track-opd
+  run_name: unset
+  log_level: INFO
+  write_env_report: true
+  write_git_state: true
+

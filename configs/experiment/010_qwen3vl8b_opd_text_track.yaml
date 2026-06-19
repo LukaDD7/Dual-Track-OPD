@@ -1,0 +1,10 @@
+experiment:
+  id: "010"
+  name: qwen3vl8b_opd_text_track
+  backend_config: configs/backend/verl_fsdp_vllm.yaml
+  model_config: configs/base/model_qwen3vl8b.yaml
+  loss:
+    type: opd_kl
+    text_weights: uniform
+    vision_weights: none
+

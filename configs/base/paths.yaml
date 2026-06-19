@@ -1,0 +1,7 @@
+paths:
+  repo_root: ${DTOPD_ROOT}
+  data_root: ${DTOPD_DATA_ROOT}
+  model_root: ${DTOPD_MODEL_ROOT}
+  output_root: ${DTOPD_OUTPUT_ROOT}
+  manifest_root: ${DTOPD_DATA_ROOT}/manifests
+

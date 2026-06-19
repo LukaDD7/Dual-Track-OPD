@@ -1,0 +1,10 @@
+experiment:
+  id: "040"
+  name: qwen3vl8b_chunk_anchor
+  backend_config: configs/backend/verl_fsdp_sglang.yaml
+  model_config: configs/base/model_qwen3vl8b.yaml
+  loss:
+    type: dual_track_opd
+    vision_anchor: chunk_proxy
+    chunk_reduce: mean
+

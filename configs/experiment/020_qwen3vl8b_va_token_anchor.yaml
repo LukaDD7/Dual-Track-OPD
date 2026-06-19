@@ -1,0 +1,10 @@
+experiment:
+  id: "020"
+  name: qwen3vl8b_va_token_anchor
+  backend_config: configs/backend/verl_fsdp_vllm.yaml
+  model_config: configs/base/model_qwen3vl8b.yaml
+  loss:
+    type: dual_track_opd
+    vision_anchor: token_topk_proxy
+    topk_ratio: 0.1
+

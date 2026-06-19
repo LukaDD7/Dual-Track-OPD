@@ -1,0 +1,7 @@
+data:
+  train_manifest: ${DTOPD_DATA_ROOT}/manifests/qwen3vl_opd_smoke.jsonl
+  eval_manifest: ${DTOPD_DATA_ROOT}/manifests/benchmark_eval_manifest.jsonl
+  image_root: ${DTOPD_DATA_ROOT}/images
+  max_prompt_tokens: 4096
+  max_response_tokens: 1024
+

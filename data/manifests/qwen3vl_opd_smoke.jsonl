@@ -1,0 +1,2 @@
+{"id":"smoke-001","dataset":"smoke","image_path":"${DTOPD_DATA_ROOT}/images/smoke-001.jpg","question":"What is visible in the image?","answer":"placeholder"}
+

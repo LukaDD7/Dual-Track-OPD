@@ -1,0 +1,11 @@
+experiment:
+  id: "000"
+  name: smoke_toy_opd
+  backend_config: configs/backend/trl_toy.yaml
+  data_config: configs/base/data_vlm.yaml
+  loss:
+    type: dual_track_opd
+    alpha_text: 1.0
+    alpha_vision: 0.5
+    temperature: 1.0
+
