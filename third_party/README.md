@@ -1,12 +1,7 @@
-# Third-Party Backends
+# third_party
 
-Use this directory for pinned third-party backends such as `verl`.
+This directory holds pinned external backends.
 
-Recommended future setup:
-
-```bash
-git submodule add <verl-url> third_party/verl
-```
-
-Do not vendor large checkpoints, datasets, or generated outputs here.
-
+- `verl/`: pinned upstream verl checkout used as the primary OPD/RL backend.
+- Research logic should live in `src/dual_track_opd/`.
+- Minimal framework patches should be stored under `patches/verl/` and documented.
