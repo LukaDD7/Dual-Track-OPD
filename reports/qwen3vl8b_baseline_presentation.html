@@ -1,0 +1,328 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <title>Qwen3-VL-8B Baseline Briefing</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 40px; color: #202124; }
+    h1 { font-size: 34px; margin-bottom: 6px; }
+    h2 { margin-top: 36px; border-bottom: 1px solid #ddd; padding-bottom: 6px; }
+    .subtitle { color: #5f6368; margin-top: 0; }
+    .metrics { display: grid; grid-template-columns: repeat(5, minmax(120px, 1fr)); gap: 12px; margin: 24px 0; }
+    .metric { border: 1px solid #ddd; border-radius: 8px; padding: 14px; background: #fafafa; }
+    .metric strong { display: block; font-size: 24px; margin-top: 6px; }
+    table { width: 100%; border-collapse: collapse; font-size: 14px; }
+    th, td { border-bottom: 1px solid #e6e6e6; padding: 8px; text-align: left; }
+    th { background: #f6f8fa; }
+    .figure svg { max-width: 100%; height: auto; }
+    .cards { display: grid; grid-template-columns: repeat(2, minmax(320px, 1fr)); gap: 16px; }
+    .card { border: 1px solid #ddd; border-radius: 8px; padding: 16px; background: white; }
+    .card img { max-width: 100%; border: 1px solid #ddd; border-radius: 6px; margin: 8px 0; }
+    .meta { color: #5f6368; }
+    pre { white-space: pre-wrap; word-break: break-word; background: #f6f8fa; padding: 10px; border-radius: 6px; }
+    .note { color: #5f6368; }
+  </style>
+</head>
+<body>
+  <h1>Qwen3-VL-8B Baseline 内部诊断汇报</h1>
+  <p class="subtitle">Conservative deterministic scorer. Internal diagnostic, not official benchmark metric.</p>
+  <div class="metrics">
+    <div class="metric">Datasets<strong>16</strong></div>
+    <div class="metric">Examples<strong>59,144</strong></div>
+    <div class="metric">Scored / Coverage<strong>50,200 / 84.9%</strong></div>
+    <div class="metric">Parser-cond. Acc<strong>49.6%</strong></div>
+    <div class="metric">Unparsed / Length<strong>8,233 / 493</strong></div>
+  </div>
+
+  <h2>结果趋势图</h2>
+  <p class="note">柱子是 parser-conditional accuracy，黑点是 coverage。低覆盖数据集的 accuracy 只能作解析成功样本上的诊断。</p>
+  <div class="figure"><svg xmlns="http://www.w3.org/2000/svg" width="1500" height="760" viewBox="0 0 1500 760">
+<style>
+text { font-family: Helvetica, Arial, sans-serif; fill: #202124; }
+.title { font-size: 28px; font-weight: 700; }
+.subtitle { font-size: 16px; fill: #5f6368; }
+.axis { stroke: #3c4043; stroke-width: 1.2; }
+.grid { stroke: #dadce0; stroke-width: 1; }
+.tick { font-size: 13px; fill: #5f6368; }
+.label { font-size: 13px; }
+.legend { font-size: 14px; fill: #3c4043; }
+.note { font-size: 13px; fill: #5f6368; }
+</style>
+<rect width="100%" height="100%" fill="white"/>
+<text x="90" y="38" class="title">Qwen3-VL-8B Baseline Diagnostic Scores</text>
+<text x="90" y="62" class="subtitle">Bars show parser-conditional accuracy; black dots show scoring coverage. Internal diagnostic, not official benchmark accuracy.</text>
+<line x1="90" x2="1440" y1="570.0" y2="570.0" class="grid"/>
+<text x="78" y="574.0" text-anchor="end" class="tick">0%</text>
+<line x1="90" x2="1440" y1="447.5" y2="447.5" class="grid"/>
+<text x="78" y="451.5" text-anchor="end" class="tick">25%</text>
+<line x1="90" x2="1440" y1="325.0" y2="325.0" class="grid"/>
+<text x="78" y="329.0" text-anchor="end" class="tick">50%</text>
+<line x1="90" x2="1440" y1="202.5" y2="202.5" class="grid"/>
+<text x="78" y="206.5" text-anchor="end" class="tick">75%</text>
+<line x1="90" x2="1440" y1="80.0" y2="80.0" class="grid"/>
+<text x="78" y="84.0" text-anchor="end" class="tick">100%</text>
+<line x1="90" x2="90" y1="80" y2="570" class="axis"/>
+<line x1="90" x2="1440" y1="570" y2="570" class="axis"/>
+<rect x="106.0" y="185.5" width="52.3" height="384.5" fill="#c9792b" opacity="0.92"/>
+<text x="132.2" y="179.5" text-anchor="middle" class="tick">78</text>
+<circle cx="132.2" cy="325.0" r="5.5" fill="#111111" stroke="white" stroke-width="1.4"/>
+<text transform="translate(132.2,596) rotate(42)" text-anchor="start" class="label">BLINK</text>
+<rect x="190.4" y="442.8" width="52.3" height="127.2" fill="#c9792b" opacity="0.92"/>
+<text x="216.6" y="436.8" text-anchor="middle" class="tick">26</text>
+<circle cx="216.6" cy="291.3" r="5.5" fill="#111111" stroke="white" stroke-width="1.4"/>
+<text transform="translate(216.6,596) rotate(42)" text-anchor="start" class="label">DynaMath_Sample</text>
+<rect x="274.8" y="224.3" width="52.3" height="345.7" fill="#78a641" opacity="0.92"/>
+<text x="300.9" y="218.3" text-anchor="middle" class="tick">71</text>
+<circle cx="300.9" cy="80.0" r="5.5" fill="#111111" stroke="white" stroke-width="1.4"/>
+<text transform="translate(300.9,596) rotate(42)" text-anchor="start" class="label">GQA</text>
+<rect x="359.2" y="130.4" width="52.3" height="439.6" fill="#2f6f9f" opacity="0.92"/>
+<text x="385.3" y="124.4" text-anchor="middle" class="tick">90</text>
+<circle cx="385.3" cy="80.2" r="5.5" fill="#111111" stroke="white" stroke-width="1.4"/>
+<text transform="translate(385.3,596) rotate(42)" text-anchor="start" class="label">MMBench</text>
+<rect x="443.5" y="422.5" width="52.3" height="147.5" fill="#c9792b" opacity="0.92"/>
+<text x="469.7" y="416.5" text-anchor="middle" class="tick">30</text>
+<circle cx="469.7" cy="482.5" r="5.5" fill="#111111" stroke="white" stroke-width="1.4"/>
+<text transform="translate(469.7,596) rotate(42)" text-anchor="start" class="label">MMMU_Pro_10</text>
+<rect x="527.9" y="314.2" width="52.3" height="255.8" fill="#c9792b" opacity="0.92"/>
+<text x="554.1" y="308.2" text-anchor="middle" class="tick">52</text>
+<circle cx="554.1" cy="383.9" r="5.5" fill="#111111" stroke="white" stroke-width="1.4"/>
+<text transform="translate(554.1,596) rotate(42)" text-anchor="start" class="label">MMMU_Pro_4</text>
+<rect x="612.3" y="411.2" width="52.3" height="158.8" fill="#2f6f9f" opacity="0.92"/>
+<text x="638.4" y="405.2" text-anchor="middle" class="tick">32</text>
+<circle cx="638.4" cy="80.0" r="5.5" fill="#111111" stroke="white" stroke-width="1.4"/>
+<text transform="translate(638.4,596) rotate(42)" text-anchor="start" class="label">MMSI-Bench</text>
+<line x1="696.7" x2="749.0" y1="566.0" y2="566.0" stroke="#7a7a7a" stroke-width="4"/>
+<text x="722.8" y="556.0" text-anchor="middle" class="tick">n/a</text>
+<circle cx="722.8" cy="570.0" r="5.5" fill="#111111" stroke="white" stroke-width="1.4"/>
+<text transform="translate(722.8,596) rotate(42)" text-anchor="start" class="label">MMVet</text>
+<rect x="781.0" y="186.5" width="52.3" height="383.5" fill="#c9792b" opacity="0.92"/>
+<text x="807.2" y="180.5" text-anchor="middle" class="tick">78</text>
+<circle cx="807.2" cy="564.4" r="5.5" fill="#111111" stroke="white" stroke-width="1.4"/>
+<text transform="translate(807.2,596) rotate(42)" text-anchor="start" class="label">MV-MATH</text>
+<rect x="865.4" y="425.3" width="52.3" height="144.7" fill="#c9792b" opacity="0.92"/>
+<text x="891.6" y="419.3" text-anchor="middle" class="tick">30</text>
+<circle cx="891.6" cy="489.5" r="5.5" fill="#111111" stroke="white" stroke-width="1.4"/>
+<text transform="translate(891.6,596) rotate(42)" text-anchor="start" class="label">MathVerse</text>
+<rect x="949.8" y="271.5" width="52.3" height="298.5" fill="#78a641" opacity="0.92"/>
+<text x="975.9" y="265.5" text-anchor="middle" class="tick">61</text>
+<circle cx="975.9" cy="92.3" r="5.5" fill="#111111" stroke="white" stroke-width="1.4"/>
+<text transform="translate(975.9,596) rotate(42)" text-anchor="start" class="label">MathVista</text>
+<rect x="1034.2" y="406.0" width="52.3" height="164.0" fill="#2f6f9f" opacity="0.92"/>
+<text x="1060.3" y="400.0" text-anchor="middle" class="tick">33</text>
+<circle cx="1060.3" cy="80.0" r="5.5" fill="#111111" stroke="white" stroke-width="1.4"/>
+<text transform="translate(1060.3,596) rotate(42)" text-anchor="start" class="label">MindCube-Bench</text>
+<rect x="1118.5" y="453.5" width="52.3" height="116.5" fill="#78a641" opacity="0.92"/>
+<text x="1144.7" y="447.5" text-anchor="middle" class="tick">24</text>
+<circle cx="1144.7" cy="107.0" r="5.5" fill="#111111" stroke="white" stroke-width="1.4"/>
+<text transform="translate(1144.7,596) rotate(42)" text-anchor="start" class="label">ReMI</text>
+<rect x="1202.9" y="130.0" width="52.3" height="440.0" fill="#2f6f9f" opacity="0.92"/>
+<text x="1229.1" y="124.0" text-anchor="middle" class="tick">90</text>
+<circle cx="1229.1" cy="80.2" r="5.5" fill="#111111" stroke="white" stroke-width="1.4"/>
+<text transform="translate(1229.1,596) rotate(42)" text-anchor="start" class="label">ScienceQA-IMG</text>
+<rect x="1287.3" y="216.1" width="52.3" height="353.9" fill="#78a641" opacity="0.92"/>
+<text x="1313.4" y="210.1" text-anchor="middle" class="tick">72</text>
+<circle cx="1313.4" cy="80.4" r="5.5" fill="#111111" stroke="white" stroke-width="1.4"/>
+<text transform="translate(1313.4,596) rotate(42)" text-anchor="start" class="label">VQAv2</text>
+<rect x="1371.7" y="375.5" width="52.3" height="194.5" fill="#2f6f9f" opacity="0.92"/>
+<text x="1397.8" y="369.5" text-anchor="middle" class="tick">40</text>
+<circle cx="1397.8" cy="80.0" r="5.5" fill="#111111" stroke="white" stroke-width="1.4"/>
+<text transform="translate(1397.8,596) rotate(42)" text-anchor="start" class="label">ViewSpatial-Bench</text>
+<rect x="90" y="686" width="16" height="16" fill="#2f6f9f"/>
+<text x="114" y="699" class="legend">High-coverage MCQ diagnostic</text>
+<rect x="415" y="686" width="16" height="16" fill="#78a641"/>
+<text x="439" y="699" class="legend">Rough exact-match diagnostic</text>
+<rect x="740" y="686" width="16" height="16" fill="#c9792b"/>
+<text x="764" y="699" class="legend">Low-coverage diagnostic</text>
+<rect x="1065" y="686" width="16" height="16" fill="#7a7a7a"/>
+<text x="1089" y="699" class="legend">Needs judge</text>
+<circle cx="90" cy="728" r="5.5" fill="#111111"/>
+<text x="114" y="733" class="legend">Coverage marker</text>
+<text x="1440" y="742" text-anchor="end" class="note">Generated from qwen3vl8b_baseline_score_diagnostics.csv</text>
+</svg></div>
+
+  <h2>数据集概览</h2>
+  <table>
+    <thead><tr><th>Dataset</th><th>Tier</th><th>Coverage</th><th>Accuracy</th><th>Unparsed</th><th>Length</th></tr></thead>
+    <tbody><tr><td>BLINK</td><td>low_coverage_diagnostic</td><td>50.0%</td><td>78.5%</td><td>562</td><td>0</td></tr>
+<tr><td>DynaMath_Sample</td><td>low_coverage_diagnostic</td><td>56.9%</td><td>26.0%</td><td>216</td><td>0</td></tr>
+<tr><td>GQA</td><td>rough_exact_match_diagnostic</td><td>100.0%</td><td>70.6%</td><td>0</td><td>0</td></tr>
+<tr><td>MMBench</td><td>high_coverage_deterministic_mcq</td><td>100.0%</td><td>89.7%</td><td>0</td><td>2</td></tr>
+<tr><td>MMMU_Pro_10</td><td>low_coverage_diagnostic</td><td>17.9%</td><td>30.1%</td><td>1416</td><td>5</td></tr>
+<tr><td>MMMU_Pro_4</td><td>low_coverage_diagnostic</td><td>38.0%</td><td>52.2%</td><td>1065</td><td>8</td></tr>
+<tr><td>MMSI-Bench</td><td>high_coverage_deterministic_mcq</td><td>100.0%</td><td>32.4%</td><td>0</td><td>0</td></tr>
+<tr><td>MMVet</td><td>needs_judge</td><td>0.0%</td><td>n/a</td><td>0</td><td>0</td></tr>
+<tr><td>MV-MATH</td><td>low_coverage_diagnostic</td><td>1.1%</td><td>78.3%</td><td>1622</td><td>364</td></tr>
+<tr><td>MathVerse</td><td>low_coverage_diagnostic</td><td>16.4%</td><td>29.5%</td><td>3179</td><td>114</td></tr>
+<tr><td>MathVista</td><td>rough_exact_match_diagnostic</td><td>97.5%</td><td>60.9%</td><td>25</td><td>0</td></tr>
+<tr><td>MindCube-Bench</td><td>high_coverage_deterministic_mcq</td><td>100.0%</td><td>33.5%</td><td>0</td><td>0</td></tr>
+<tr><td>ReMI</td><td>rough_exact_match_diagnostic</td><td>94.5%</td><td>23.8%</td><td>143</td><td>0</td></tr>
+<tr><td>ScienceQA-IMG</td><td>high_coverage_deterministic_mcq</td><td>100.0%</td><td>89.8%</td><td>1</td><td>0</td></tr>
+<tr><td>VQAv2</td><td>rough_exact_match_diagnostic</td><td>99.9%</td><td>72.2%</td><td>4</td><td>0</td></tr>
+<tr><td>ViewSpatial-Bench</td><td>high_coverage_deterministic_mcq</td><td>100.0%</td><td>39.7%</td><td>0</td><td>0</td></tr></tbody>
+  </table>
+
+  <h2>适合汇报的内部趋势</h2>
+  <ul>
+    <li>高覆盖任务：GQA, MMBench, MMSI-Bench, MathVista, MindCube-Bench, ReMI, ScienceQA-IMG, VQAv2, ViewSpatial-Bench</li>
+    <li>低覆盖任务：BLINK, DynaMath_Sample, MMMU_Pro_10, MMMU_Pro_4, MV-MATH, MathVerse</li>
+    <li>MMVet 需要 judge，不进入 deterministic aggregate。</li>
+  </ul>
+
+  <h2>VLMEvalKit vs 当前 scorer</h2>
+  <p>VLMEvalKit 是完整 VLM benchmark 评测框架，覆盖数据准备、推理、后处理、官方或社区 metric，以及 MMBench 等任务的 LLM-based answer extraction / CircularEval。当前 scorer 只做 post-hoc 保守解析，输出 coverage、unparsed 和 parser-conditional accuracy，因此适合内部审计，不适合作为 paper official metric。</p>
+
+  <h2>样题与模型输出</h2>
+  <p class="note">以下样例来自 sampled raw responses。若 image 字段为空，说明当前 raw JSONL 未暴露可识别图片路径；可用增强后的抽样脚本在 CPU 实例重跑。</p>
+  <div class="cards">
+            <section class="card">
+              <h3>BLINK / val_Relative_Depth_1</h3>
+              <p class="meta">type=mcq · finish=stop</p>
+              
+              <h4>Question</h4>
+              <pre>Two points are circled on the image, labeled by A and B beside each circle. Which point is closer to the camera?
+Select from the following choices.
+(A) A is closer
+(B) B is closer</pre>
+              <h4>Prediction</h4>
+              <pre>(B) B is closer</pre>
+              <h4>Ground Truth</h4>
+              <pre>[&quot;(B)&quot;]</pre>
+              <h4>Reasoning / Explanation</h4>
+              <pre>(not found in recognized fields)</pre>
+            </section>
+            
+            <section class="card">
+              <h3>BLINK / val_Relative_Depth_2</h3>
+              <p class="meta">type=mcq · finish=stop</p>
+              
+              <h4>Question</h4>
+              <pre>Two points are circled on the image, labeled by A and B beside each circle. Which point is closer to the camera?
+Select from the following choices.
+(A) A is closer
+(B) B is closer</pre>
+              <h4>Prediction</h4>
+              <pre>(B) B is closer</pre>
+              <h4>Ground Truth</h4>
+              <pre>[&quot;(B)&quot;]</pre>
+              <h4>Reasoning / Explanation</h4>
+              <pre>(not found in recognized fields)</pre>
+            </section>
+            
+            <section class="card">
+              <h3>DynaMath_Sample / 1</h3>
+              <p class="meta">type=numeric_exact · finish=stop</p>
+              
+              <h4>Question</h4>
+              <pre>What is the period of this function y = a*sin(b*x), where both a and b are integers? Answer the question with a floating-point number.
+
+Answer briefly. If numeric, give only the final value.</pre>
+              <h4>Prediction</h4>
+              <pre>3.141592653589793</pre>
+              <h4>Ground Truth</h4>
+              <pre>[&quot;2.0944&quot;]</pre>
+              <h4>Reasoning / Explanation</h4>
+              <pre>(not found in recognized fields)</pre>
+            </section>
+            
+            <section class="card">
+              <h3>DynaMath_Sample / 2</h3>
+              <p class="meta">type=numeric_exact · finish=stop</p>
+              
+              <h4>Question</h4>
+              <pre>Use the graph to answer the question below. Which month is the hottest on average in Cape Town?
+
+Answer briefly. If numeric, give only the final value.</pre>
+              <h4>Prediction</h4>
+              <pre>Sep</pre>
+              <h4>Ground Truth</h4>
+              <pre>[&quot;Sep&quot;]</pre>
+              <h4>Reasoning / Explanation</h4>
+              <pre>(not found in recognized fields)</pre>
+            </section>
+            
+            <section class="card">
+              <h3>GQA / 05515938</h3>
+              <p class="meta">type=normalized_exact · finish=stop</p>
+              
+              <h4>Question</h4>
+              <pre>What is this bird called?
+
+Answer briefly.</pre>
+              <h4>Prediction</h4>
+              <pre>cockatoo</pre>
+              <h4>Ground Truth</h4>
+              <pre>[&quot;parrot&quot;]</pre>
+              <h4>Reasoning / Explanation</h4>
+              <pre>(not found in recognized fields)</pre>
+            </section>
+            
+            <section class="card">
+              <h3>GQA / 17197213</h3>
+              <p class="meta">type=normalized_exact · finish=stop</p>
+              
+              <h4>Question</h4>
+              <pre>What color is the helmet in the middle of the image?
+
+Answer briefly.</pre>
+              <h4>Prediction</h4>
+              <pre>blue</pre>
+              <h4>Ground Truth</h4>
+              <pre>[&quot;light blue&quot;]</pre>
+              <h4>Reasoning / Explanation</h4>
+              <pre>(not found in recognized fields)</pre>
+            </section>
+            
+            <section class="card">
+              <h3>MMBench / 241</h3>
+              <p class="meta">type=mcq · finish=stop</p>
+              
+              <h4>Question</h4>
+              <pre>The passage below describes an experiment. Read the passage and then follow the instructions below.
+
+Madelyn applied a thin layer of wax to the underside of her snowboard and rode the board straight down a hill. Then, she removed the wax and rode the snowboard straight down the hill again. She repeated the rides four more times, alternating whether she rode with a thin layer of wax on the board or not. Her friend Tucker timed each ride. Madelyn and Tucker calculated the average time it took to slide straight down the hill on the snowboard with wax compared to the average time on the snowboard without wax.
+Figure: snowboarding down a hill.
+
+Identify the question that Madelyn and Tucker&#x27;s experiment can best answer.
+
+Options:
+A. Does Madelyn&#x27;s snowboard slide down a hill in less time when it has a thin layer of wax or a thick layer of wax?
+B. Does Madelyn&#x27;s snowboard slide down a hill in less time when it has a layer of wax or when it does not have a layer of wax?
+
+Return only the final option letter.</pre>
+              <h4>Prediction</h4>
+              <pre>B</pre>
+              <h4>Ground Truth</h4>
+              <pre>[&quot;B&quot;]</pre>
+              <h4>Reasoning / Explanation</h4>
+              <pre>(not found in recognized fields)</pre>
+            </section>
+            
+            <section class="card">
+              <h3>MMBench / 252</h3>
+              <p class="meta">type=mcq · finish=stop</p>
+              
+              <h4>Question</h4>
+              <pre>People can use the engineering-design process to develop solutions to problems. One step in the process is testing if a potential solution meets the requirements of the design.
+The passage below describes how the engineering-design process was used to test a solution to a problem. Read the passage. Then answer the question below.
+
+Laura and Isabella were making batches of concrete for a construction project. To make the concrete, they mixed together dry cement powder, gravel, and water. Then, they checked if each batch was firm enough using a test called a slump test.
+They poured some of the fresh concrete into an upside-down metal cone. They left the concrete in the metal cone for 30 seconds. Then, they lifted the cone to see if the concrete stayed in a cone shape or if it collapsed. If the concrete in a batch collapsed, they would know the batch should not be used.
+Figure: preparing a concrete slump test.
+
+Which of the following could Laura and Isabella&#x27;s test show?
+
+Options:
+A. if the concrete from each batch took the same amount of time to dry
+B. if a new batch of concrete was firm enough to use
+
+Return only the final option letter.</pre>
+              <h4>Prediction</h4>
+              <pre>B</pre>
+              <h4>Ground Truth</h4>
+              <pre>[&quot;B&quot;]</pre>
+              <h4>Reasoning / Explanation</h4>
+              <pre>(not found in recognized fields)</pre>
+            </section>
+            </div>
+</body>
+</html>
