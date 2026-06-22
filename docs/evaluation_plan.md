@@ -23,7 +23,7 @@ Use small, auditable scripts in this repository for conservative failure analysi
 Current Tier 3 scorer:
 
 - `dual_track_opd.eval.score_raw_responses`
-- `parser_version=conservative_v1`
+- `parser_version=conservative_v2`
 - outputs `coverage`, `unparsed_rows`, `length_rows`, and `needs_judge`
 
 ## Benchmark Notes
@@ -36,7 +36,7 @@ For paper reporting:
 
 - Use official GQA evaluation where possible.
 - Report at least official accuracy.
-- Treat `conservative_v1` normalized exact match as an internal diagnostic only.
+- Treat `conservative_v2` normalized exact match as an internal diagnostic only.
 
 References:
 
@@ -51,7 +51,7 @@ For paper reporting:
 
 - Use the official VQA evaluator or a faithful implementation of the VQA accuracy rule.
 - Preserve all human reference answers needed by the evaluator.
-- Treat `conservative_v1` normalized exact match as an internal diagnostic only.
+- Treat `conservative_v2` normalized exact match as an internal diagnostic only.
 
 References:
 
@@ -65,7 +65,7 @@ For paper reporting:
 
 - Use VLMEvalKit or the current official MMBench evaluation path.
 - Record whether CircularEval is enabled and which helper model extracts choices.
-- Do not compare `conservative_v1` MCQ accuracy directly against official MMBench numbers.
+- Do not compare `conservative_v2` MCQ accuracy directly against official MMBench numbers.
 
 References:
 
@@ -81,7 +81,8 @@ For paper reporting:
 
 - Use MathVerse's official path or lmms-eval integration where appropriate.
 - Record judge model, prompt, and whether outcome accuracy or CoT step scoring is reported.
-- Treat numeric exact match from `conservative_v1` as a low-coverage internal signal only.
+- For the current preferred Qwen3-VL-8B baseline run, use `conservative_v2` MCQ extraction for MathVerse rows that ask for option letters.
+- Treat remaining MathVerse free-form or judge-style cases as internal diagnostics until an official/community-standard evaluator is connected.
 
 References:
 
@@ -96,7 +97,7 @@ For paper reporting:
 
 - Use the official MathVista repository/evaluator or a documented community-standard path.
 - Record any answer extraction, execution, or judge settings.
-- Treat `conservative_v1` normalized exact match as rough internal tracking.
+- Treat `conservative_v2` normalized exact match as rough internal tracking.
 
 References:
 
@@ -144,4 +145,3 @@ Internal deterministic tables should include:
 - `parser_version`
 
 When coverage is low, the accuracy should be interpreted as parser-conditional accuracy, not dataset accuracy.
-

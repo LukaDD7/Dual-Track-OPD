@@ -87,3 +87,60 @@ def test_score_raw_responses_synthetic(tmp_path: Path):
     with scores.open(newline="", encoding="utf-8") as handle:
         persisted = list(csv.DictReader(handle))
     assert len(persisted) == 3
+
+
+def test_score_raw_responses_scores_mathverse_style_mcq_letters(tmp_path: Path):
+    raw_dir = tmp_path / "raw"
+    raw_dir.mkdir()
+    manifest = tmp_path / "manifest.jsonl"
+    scores = tmp_path / "scores.csv"
+    audit = tmp_path / "audit.csv"
+
+    _write_jsonl(
+        raw_dir / "mathverse.jsonl",
+        [
+            {"id": "correct_letter", "prediction": "B", "answer": "B", "finish_reason": "stop"},
+            {"id": "wrong_letter", "prediction": "C", "answer": "D", "finish_reason": "stop"},
+            {
+                "id": "explicit_sentence",
+                "prediction": "The answer is F.",
+                "answer": "F",
+                "finish_reason": "stop",
+            },
+        ],
+    )
+    manifest.write_text(
+        json.dumps(
+            {
+                "dataset": "MathVerse",
+                "file": "mathverse.jsonl",
+                "scoring_type": "mcq",
+                "notes": "test",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    score_rows, audit_rows = score_raw_responses(raw_dir, manifest, scores, audit)
+
+    assert score_rows == [
+        {
+            "dataset": "MathVerse",
+            "file": "mathverse.jsonl",
+            "scoring_type": "mcq",
+            "n": 3,
+            "scored_n": 3,
+            "correct": 2,
+            "accuracy": "0.666667",
+            "errors": 0,
+            "length_rows": 0,
+            "unparsed_rows": 0,
+            "needs_judge": "false",
+            "parser_version": "conservative_v2",
+            "notes": "test",
+        }
+    ]
+    assert len(audit_rows) == 1
+    assert audit_rows[0]["row_id"] == "wrong_letter"
+    assert audit_rows[0]["audit_reason"] == "incorrect"

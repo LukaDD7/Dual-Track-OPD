@@ -7,7 +7,7 @@
 {"dataset":"MMSI-Bench","file":"qwen3vl8b_MMSI_Bench_len32768_maxtok256_raw.jsonl","scoring_type":"mcq","notes":"preferred baseline raw file; deterministic score only when explicit option labels are present"}
 {"dataset":"MMVet","file":"qwen3vl8b_MMVet_len32768_maxtok2048_raw.jsonl","scoring_type":"needs_judge","notes":"preferred baseline raw file; open-ended benchmark requires judge and is excluded from deterministic aggregate"}
 {"dataset":"MV-MATH","file":"qwen3vl8b_MV_MATH_len65536_maxtok1024_raw.jsonl","scoring_type":"numeric_exact","notes":"preferred baseline raw file; rough conservative numeric exact match; selected over superseded len32768 run"}
-{"dataset":"MathVerse","file":"qwen3vl8b_MathVerse_len65536_maxtok1024_raw.jsonl","scoring_type":"numeric_exact","notes":"preferred baseline raw file; rough conservative numeric exact match; selected over superseded len32768 run"}
+{"dataset":"MathVerse","file":"qwen3vl8b_MathVerse_len65536_maxtok1024_raw.jsonl","scoring_type":"mcq","notes":"preferred baseline raw file; MCQ option-letter exact match; selected over superseded len32768 run"}
 {"dataset":"MathVista","file":"qwen3vl8b_MathVista_len32768_maxtok2048_raw.jsonl","scoring_type":"normalized_exact","notes":"preferred baseline raw file; rough normalized exact match for mixed short-answer outputs"}
 {"dataset":"MindCube-Bench","file":"qwen3vl8b_MindCube_Bench_len65536_maxtok256_raw.jsonl","scoring_type":"mcq","notes":"preferred baseline raw file; deterministic score only when explicit option labels are present"}
 {"dataset":"ReMI","file":"qwen3vl8b_ReMI_test_len65536_maxtok1024_raw.jsonl","scoring_type":"normalized_exact","notes":"preferred baseline raw file; rough normalized exact match"}

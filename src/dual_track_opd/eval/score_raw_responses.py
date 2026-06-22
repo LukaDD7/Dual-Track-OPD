@@ -15,7 +15,7 @@ from .answer_extractors import (
     normalize_text_answer,
 )
 
-PARSER_VERSION = "conservative_v1"
+PARSER_VERSION = "conservative_v2"
 
 PREDICTION_KEYS = (
     "prediction",
