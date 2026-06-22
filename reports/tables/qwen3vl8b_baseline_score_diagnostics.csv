@@ -8,7 +8,7 @@ MMMU_Pro_4,mcq,low_coverage_diagnostic,1730,657,0.379769,0.522070,1065,0.615607,
 MMSI-Bench,mcq,high_coverage_deterministic_mcq,1000,1000,1.000000,0.324000,0,0.000000,0,0.000000,false
 MMVet,needs_judge,needs_judge,218,0,0.000000,,0,0.000000,0,0.000000,true
 MV-MATH,numeric_exact,low_coverage_diagnostic,2009,23,0.011448,0.782609,1622,0.807367,364,0.181185,false
-MathVerse,numeric_exact,low_coverage_diagnostic,3940,647,0.164213,0.295209,3179,0.806853,114,0.028934,false
+MathVerse,mcq,low_coverage_diagnostic,3940,2103,0.533756,0.557299,1723,0.437310,114,0.028934,false
 MathVista,normalized_exact,rough_exact_match_diagnostic,1000,975,0.975000,0.609231,25,0.025000,0,0.000000,false
 MindCube-Bench,mcq,high_coverage_deterministic_mcq,21154,21154,1.000000,0.334594,0,0.000000,0,0.000000,false
 ReMI,normalized_exact,rough_exact_match_diagnostic,2600,2457,0.945000,0.237688,143,0.055000,0,0.000000,false

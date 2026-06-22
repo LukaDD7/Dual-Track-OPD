@@ -6,11 +6,11 @@ This report summarizes the conservative deterministic baseline scorer outputs. I
 
 - Datasets: 16
 - Total examples: 59144
-- Scored examples: 50200 (84.9%)
-- Correct among scored examples: 24907
-- Parser-conditional weighted accuracy: 49.6%
+- Scored examples: 51656 (87.3%)
+- Correct among scored examples: 25888
+- Parser-conditional weighted accuracy: 50.1%
 - Macro accuracy over non-low-coverage deterministic rows: 56.9%
-- Unparsed rows: 8233 (13.9%)
+- Unparsed rows: 6777 (11.5%)
 - Length rows: 493 (0.8%)
 - Error rows: 0
 
@@ -34,7 +34,7 @@ This report summarizes the conservative deterministic baseline scorer outputs. I
 | MMSI-Bench | mcq | high_coverage_deterministic_mcq | 1000 | 1000 | 100.0% | 32.4% | 0 | 0 |
 | MMVet | needs_judge | needs_judge | 218 | 0 | 0.0% | n/a | 0 | 0 |
 | MV-MATH | numeric_exact | low_coverage_diagnostic | 2009 | 23 | 1.1% | 78.3% | 1622 | 364 |
-| MathVerse | numeric_exact | low_coverage_diagnostic | 3940 | 647 | 16.4% | 29.5% | 3179 | 114 |
+| MathVerse | mcq | low_coverage_diagnostic | 3940 | 2103 | 53.4% | 55.7% | 1723 | 114 |
 | MathVista | normalized_exact | rough_exact_match_diagnostic | 1000 | 975 | 97.5% | 60.9% | 25 | 0 |
 | MindCube-Bench | mcq | high_coverage_deterministic_mcq | 21154 | 21154 | 100.0% | 33.5% | 0 | 0 |
 | ReMI | normalized_exact | rough_exact_match_diagnostic | 2600 | 2457 | 94.5% | 23.8% | 143 | 0 |
@@ -61,7 +61,7 @@ This report summarizes the conservative deterministic baseline scorer outputs. I
 - `MMMU_Pro_10`: coverage 17.9%; interpret only as a parser-conditional diagnostic.
 - `MMMU_Pro_4`: coverage 38.0%; interpret only as a parser-conditional diagnostic.
 - `MV-MATH`: coverage 1.1%; interpret only as a parser-conditional diagnostic.
-- `MathVerse`: coverage 16.4%; interpret only as a parser-conditional diagnostic.
+- `MathVerse`: coverage 53.4%; interpret only as a parser-conditional diagnostic.
 - `MMVet`: requires judge-based evaluation.
 
 ## Audit Sample Counts
@@ -75,7 +75,7 @@ This report summarizes the conservative deterministic baseline scorer outputs. I
 - `MMSI-Bench`: incorrect=200
 - `MMVet`: needs_judge=200
 - `MV-MATH`: unparsed=200
-- `MathVerse`: unparsed=200
+- `MathVerse`: incorrect=200
 - `MathVista`: incorrect=190, unparsed=10
 - `MindCube-Bench`: incorrect=200
 - `ReMI`: incorrect=186, unparsed=14
