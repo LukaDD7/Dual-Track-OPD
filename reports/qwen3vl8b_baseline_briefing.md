@@ -33,6 +33,8 @@ Repo 内当前保留的是可审计的 summary / score / analysis 产物：
 
 这个策略的优点是不会为了提高分数而过度猜测答案；缺点是覆盖率会偏低，特别是数学题、自由格式输出、隐藏答案或需要 judge 的任务。
 
+需要特别说明：高覆盖率不等于 official metric 可靠。覆盖率高只说明当前 raw response 里有 ground truth，且我们的 parser 能把 prediction 和 ground truth 都转成可比较的字符串或选项。错误样本仍然可能来自非模型能力因素，例如答案别名没有归一、数字/单位格式不一致、VQA 官方 soft-agreement 没有实现、URL/标点被 normalization 改坏、或者官方 evaluator 本来需要 LLM/judge 抽取答案。因此高覆盖数据集可以作为内部诊断信号，但论文主表仍需要官方或社区标准 evaluator。
+
 ## 总体结果
 
 | 指标 | 数值 |
@@ -96,21 +98,47 @@ Repo 内当前保留的是可审计的 summary / score / analysis 产物：
 | --- | --- | --- |
 | MMVet | `needs_judge` | 开放式回答，需要 judge-based evaluation，不进入 deterministic aggregate。 |
 
+## 数据集题型和样例解释
+
+下面的解释用于帮助理解这些 benchmark 大致在测什么。当前 repo 内的 audit CSV 不保存完整题面和图片，只保存 row_id、prediction、ground truth、解析结果和 audit_reason；因此这里的“样例”主要展示真实 audit 中的预测-答案形态，而不是完整原题。完整题面需要回到 HPC raw JSONL 或原始 benchmark 数据中抽样查看。
+
+| Dataset | 主要题型 | 当前 audit 中的真实样例形态 | 说明 |
+| --- | --- | --- | --- |
+| BLINK | 视觉感知/相对关系判断，常见二选一或多选一。 | row_id `val_Relative_Depth_16`: prediction `(A) A is closer`，ground truth `(B)`。 | 这类题很适合分析视觉依赖，但当前有 hidden label / unparsed 问题，覆盖率只有 50%。 |
+| DynaMath_Sample | 动态/几何/数学类短答案，常见数值输出。 | prediction `3.141592653589793`，ground truth `2.0944`。 | numeric exact 很保守，很多带推导、单位、表达式的答案会 unparsed。 |
+| GQA | 图像问答和组合式视觉推理，答案常为物体、属性、关系、yes/no。 | row_id `05515938`: prediction `cockatoo`，ground truth `parrot`。 | 覆盖率 100%，但官方 GQA 还有 consistency / validity / plausibility 等指标。 |
+| MMBench | 多选视觉理解 benchmark，模型输出通常是 A/B/C/D。 | row_id `449`: prediction `B`，ground truth `A`。 | 当前 MCQ 解析覆盖很高，但 official reporting 应用 VLMEvalKit / CircularEval。 |
+| MMMU_Pro_10 | 多学科、多选项、专业知识/图像理解任务。 | row_id `test_History_1`: prediction `Economic prosperity and population growth`，ground truth `B`，parsed_prediction 为空。 | 模型可能输出选项文本而不是字母，导致 conservative parser 无法计分。 |
+| MMMU_Pro_4 | 四选项版多学科专业任务。 | row_id `test_Art_113`: prediction `A`，ground truth `C`。 | 覆盖率比 10 options 高，但仍有大量 unparsed。 |
+| MMSI-Bench | 多模态/空间或结构相关选择题。 | row_id `0`: prediction `D`，ground truth `C`。 | 覆盖率高但准确率低，适合作为错误分析候选。 |
+| MMVet | 开放式多模态问答，需要 judge 判断语义等价。 | row_id `v1_0`: prediction `-1 or -5`，ground truth `-1<AND>-5`。 | deterministic scorer 不适合，必须 needs_judge。 |
+| MV-MATH | 视觉数学题，可能有选项、公式、推导或数值答案。 | row_id `1`: prediction `B`，ground truth `B`，但 numeric parser 没解析。 | 这个样例说明我们把它暂时设为 numeric_exact 不够合适，需要官方/专用 evaluator。 |
+| MathVerse | 视觉数学推理，包含多选和自由回答。 | row_id `1`: prediction `C`，ground truth `D`，numeric parser 没解析。 | MathVerse 不是纯数字输出，用 numeric exact 会严重低覆盖。 |
+| MathVista | mixed visual math，答案可能是数字、文本、选项或表达式。 | row_id `1`: prediction `0.023`，ground truth `1.2`。 | 当前 normalized exact 会把 `0.023` 归一成 `0 023`，这类数值格式应交给官方 evaluator 或更专门的 numeric parser。 |
+| MindCube-Bench | 结构/空间/立方体或方位推理，多为选择题。 | row_id `among_group002_q0_1_1`: prediction `D`，ground truth `C`。 | 覆盖率 100%、准确率低，可能是视觉空间推理短板。 |
+| ReMI | 多模态推理/匹配类短答案或选择式任务。 | row_id `0`: prediction `2`，ground truth `1`。 | 覆盖率较高但分数低，需要抽样判断是真错还是答案格式问题。 |
+| ScienceQA-IMG | 带图科学问答，多选题。 | row_id `2`: prediction `A. weather`，ground truth `B. climate`。 | 当前 choice parser 能处理 `A. text` 格式，适合做 regression anchor。 |
+| VQAv2 | 通用视觉问答，官方使用 10 个 annotator answer 的 soft agreement。 | row_id `393225000`: prediction `http://foodiebaker.com`，ground truth `foodiebakercom`。 | 这个样例显示 normalized exact 可能把 URL/标点处理成非官方形式，错误可能是 normalization mismatch。 |
+| ViewSpatial-Bench | 视角、方位、空间关系判断，多为选择题。 | row_id `1`: prediction `A. left`，ground truth `D. back`。 | 覆盖率高、分数低，是视觉侧 OPD 的重点候选任务。 |
+
 ## 关键观察
 
 1. **当前 baseline 对格式清晰的 MCQ/短答案任务比较稳定。**  
    MMBench、ScienceQA-IMG、GQA、VQAv2 的内部诊断分数较高，说明 Qwen3-VL-8B baseline 在常见 VQA/QA 任务上有可用基础。
 
-2. **空间/结构推理类任务暴露出明显弱点。**  
+2. **高覆盖数据集仍可能包含 evaluator mismatch。**  
+   GQA、VQAv2、MathVista 这类数据集虽然覆盖率高，但当前并非官方 evaluator。比如 VQAv2 官方是 10-answer soft agreement，我们这里只做单答案 normalization；MathVista 的数字/表达式答案也可能被普通文本 normalization 处理坏。因此这些结果应理解为“内部趋势信号”，不是 official accuracy。
+
+3. **空间/结构推理类任务暴露出明显弱点。**  
    ViewSpatial-Bench 为 39.7%，MindCube-Bench 为 33.5%，且二者覆盖率都是 100%。这类结果更像真实能力问题，而不是 parser 覆盖问题，适合成为视觉侧 OPD 的重点分析对象。
 
-3. **数学类任务当前主要受 evaluator 不匹配影响。**  
+4. **数学类任务当前主要受 evaluator 不匹配影响。**  
    MV-MATH 和 MathVerse 的 coverage 很低，不能直接说模型数学准确率就是表中数字。MathVerse 包含多选和自由回答，官方/社区评估通常需要更复杂的答案抽取或 judge。
 
-4. **低覆盖数据集不能用 accuracy 排名。**  
+5. **低覆盖数据集不能用 accuracy 排名。**  
    例如 MV-MATH 的 parser-conditional accuracy 是 78.3%，但只覆盖 23/2009 个样本，这个数字只表示少数被清晰解析的数字答案中正确率较高，不代表 MV-MATH 整体。
 
-5. **没有 error rows，说明 raw response 读取和基础 schema 可用。**  
+6. **没有 error rows，说明 raw response 读取和基础 schema 可用。**  
    当前问题集中在答案解析和 metric 对齐，而不是 raw generation pipeline 失败。
 
 ## 对 Dual-Track OPD 的启发
@@ -160,4 +188,3 @@ Repo 内当前保留的是可审计的 summary / score / analysis 产物：
    - 不写成 official accuracy。
    - 保留 coverage、unparsed、length rows。
    - 对低覆盖数据集只做定性或 parser-conditional 讨论。
-
