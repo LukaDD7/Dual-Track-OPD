@@ -17,6 +17,7 @@ def test_sample_raw_examples_extracts_fields(tmp_path: Path):
                         "options": ["A. red", "B. blue"],
                         "prediction": "A. red",
                         "explanation": "It appears red.",
+                        "metadata": {"assets": [{"path": "/tmp/example.png"}]},
                         "answer": "A",
                         "finish_reason": "stop",
                     }
@@ -45,4 +46,4 @@ def test_sample_raw_examples_extracts_fields(tmp_path: Path):
     assert rows[0]["question"] == "What color is the object?"
     assert rows[0]["prediction"] == "A. red"
     assert rows[0]["reasoning"] == "It appears red."
-
+    assert rows[0]["image"] == "/tmp/example.png"

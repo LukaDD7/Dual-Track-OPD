@@ -37,6 +37,7 @@ REASONING_KEYS = (
     "analysis",
 )
 IMAGE_KEYS = ("image", "image_path", "image_paths", "images")
+PATH_HINTS = ("image", "img", "path", "file")
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -71,6 +72,57 @@ def _field(item: dict[str, Any], keys: tuple[str, ...]) -> str:
     return _stringify(value) if value is not None else ""
 
 
+def _recursive_first_field(value: Any, keys: tuple[str, ...]) -> Any:
+    """Find the first non-empty value for keys, including nested records."""
+
+    if isinstance(value, dict):
+        direct = _first_present(value, keys)
+        if direct not in (None, ""):
+            return direct
+        for nested in value.values():
+            found = _recursive_first_field(nested, keys)
+            if found not in (None, ""):
+                return found
+    elif isinstance(value, list):
+        for nested in value:
+            found = _recursive_first_field(nested, keys)
+            if found not in (None, ""):
+                return found
+    return None
+
+
+def _looks_like_image_path(value: str) -> bool:
+    lowered = value.lower()
+    return any(
+        lowered.endswith(suffix)
+        for suffix in (".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif")
+    )
+
+
+def _recursive_image_path(value: Any) -> str:
+    found = _recursive_first_field(value, IMAGE_KEYS)
+    if found not in (None, ""):
+        return _stringify(found)
+
+    candidates: list[str] = []
+
+    def collect(nested: Any, key_name: str = "") -> None:
+        if isinstance(nested, dict):
+            for key, inner in nested.items():
+                collect(inner, key)
+        elif isinstance(nested, list):
+            for inner in nested:
+                collect(inner, key_name)
+        elif isinstance(nested, str):
+            lowered_key = key_name.lower()
+            if _looks_like_image_path(nested) or any(hint in lowered_key for hint in PATH_HINTS):
+                if _looks_like_image_path(nested):
+                    candidates.append(nested)
+
+    collect(value)
+    return candidates[0] if candidates else ""
+
+
 def sample_raw_examples(
     raw_dir: str | Path,
     manifest: str | Path,
@@ -95,7 +147,7 @@ def sample_raw_examples(
                     "scoring_type": entry.scoring_type,
                     "question": _field(item, QUESTION_KEYS),
                     "options": _field(item, OPTION_KEYS),
-                    "image": _field(item, IMAGE_KEYS),
+                    "image": _recursive_image_path(item),
                     "prediction": get_prediction(item),
                     "reasoning": _field(item, REASONING_KEYS),
                     "ground_truths": get_ground_truths(item),
@@ -182,4 +234,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
