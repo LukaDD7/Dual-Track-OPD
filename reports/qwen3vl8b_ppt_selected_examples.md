@@ -163,7 +163,7 @@ A
 - row_index: `1`
 - scoring_type: `numeric_exact`
 - finish_reason: `stop`
-- image: `/inspire/hdd/global_user/mengweicheng-240108120092/lzy/sampled_images/DynaMath_Sample_1.png`
+- image: `sampled_images/DynaMath_Sample_1.png`
 - image_paths: `["/inspire/hdd/global_user/mengweicheng-240108120092/lzy/sampled_images/DynaMath_Sample_1.png"]`
 - raw_response_file: `/inspire/hdd/global_user/mengweicheng-240108120092/lzy/eval_runs/qwen3vl8b_baseline/raw_responses/qwen3vl8b_DynaMath_Sample_len32768_maxtok2048_raw.jsonl`
 - raw_response_row_index: `1`
@@ -200,7 +200,7 @@ Answer briefly. If numeric, give only the final value.
 - row_index: `168`
 - scoring_type: `numeric_exact`
 - finish_reason: `stop`
-- image: `/inspire/hdd/global_user/mengweicheng-240108120092/lzy/sampled_images/DynaMath_Sample_168.png`
+- image: `sampled_images/DynaMath_Sample_168.png`
 - image_paths: `["/inspire/hdd/global_user/mengweicheng-240108120092/lzy/sampled_images/DynaMath_Sample_168.png"]`
 - raw_response_file: `/inspire/hdd/global_user/mengweicheng-240108120092/lzy/eval_runs/qwen3vl8b_baseline/raw_responses/qwen3vl8b_DynaMath_Sample_len32768_maxtok2048_raw.jsonl`
 - raw_response_row_index: `168`
@@ -237,7 +237,7 @@ Answer briefly. If numeric, give only the final value.
 - row_index: `334`
 - scoring_type: `numeric_exact`
 - finish_reason: `stop`
-- image: `/inspire/hdd/global_user/mengweicheng-240108120092/lzy/sampled_images/DynaMath_Sample_334.png`
+- image: `sampled_images/DynaMath_Sample_334.png`
 - image_paths: `["/inspire/hdd/global_user/mengweicheng-240108120092/lzy/sampled_images/DynaMath_Sample_334.png"]`
 - raw_response_file: `/inspire/hdd/global_user/mengweicheng-240108120092/lzy/eval_runs/qwen3vl8b_baseline/raw_responses/qwen3vl8b_DynaMath_Sample_len32768_maxtok2048_raw.jsonl`
 - raw_response_row_index: `334`
@@ -274,7 +274,7 @@ Answer briefly. If numeric, give only the final value.
 - row_index: `501`
 - scoring_type: `numeric_exact`
 - finish_reason: `stop`
-- image: `/inspire/hdd/global_user/mengweicheng-240108120092/lzy/sampled_images/DynaMath_Sample_501.png`
+- image: `sampled_images/DynaMath_Sample_501.png`
 - image_paths: `["/inspire/hdd/global_user/mengweicheng-240108120092/lzy/sampled_images/DynaMath_Sample_501.png"]`
 - raw_response_file: `/inspire/hdd/global_user/mengweicheng-240108120092/lzy/eval_runs/qwen3vl8b_baseline/raw_responses/qwen3vl8b_DynaMath_Sample_len32768_maxtok2048_raw.jsonl`
 - raw_response_row_index: `501`
@@ -311,7 +311,7 @@ Answer briefly. If numeric, give only the final value.
 - row_index: `1`
 - scoring_type: `normalized_exact`
 - finish_reason: `stop`
-- image: `/inspire/hdd/global_user/mengweicheng-240108120092/lzy/sampled_images/GQA_05515938.jpg`
+- image: `sampled_images/GQA_05515938.jpg`
 - image_paths: `["/inspire/hdd/global_user/mengweicheng-240108120092/lzy/sampled_images/GQA_05515938.jpg"]`
 - raw_response_file: `/inspire/hdd/global_user/mengweicheng-240108120092/lzy/eval_runs/qwen3vl8b_baseline/raw_responses/qwen3vl8b_GQA_val_balanced_limit5000_len65536_maxtok128_raw.jsonl`
 - raw_response_row_index: `1`
@@ -348,7 +348,7 @@ cockatoo
 - row_index: `1667`
 - scoring_type: `normalized_exact`
 - finish_reason: `stop`
-- image: `/inspire/hdd/global_user/mengweicheng-240108120092/lzy/sampled_images/GQA_03150110.jpg`
+- image: `sampled_images/GQA_03150110.jpg`
 - image_paths: `["/inspire/hdd/global_user/mengweicheng-240108120092/lzy/sampled_images/GQA_03150110.jpg"]`
 - raw_response_file: `/inspire/hdd/global_user/mengweicheng-240108120092/lzy/eval_runs/qwen3vl8b_baseline/raw_responses/qwen3vl8b_GQA_val_balanced_limit5000_len65536_maxtok128_raw.jsonl`
 - raw_response_row_index: `1667`
@@ -385,7 +385,7 @@ no
 - row_index: `3334`
 - scoring_type: `normalized_exact`
 - finish_reason: `stop`
-- image: `/inspire/hdd/global_user/mengweicheng-240108120092/lzy/sampled_images/GQA_17103719.jpg`
+- image: `sampled_images/GQA_17103719.jpg`
 - image_paths: `["/inspire/hdd/global_user/mengweicheng-240108120092/lzy/sampled_images/GQA_17103719.jpg"]`
 - raw_response_file: `/inspire/hdd/global_user/mengweicheng-240108120092/lzy/eval_runs/qwen3vl8b_baseline/raw_responses/qwen3vl8b_GQA_val_balanced_limit5000_len65536_maxtok128_raw.jsonl`
 - raw_response_row_index: `3334`
@@ -422,7 +422,7 @@ no
 - row_index: `5000`
 - scoring_type: `normalized_exact`
 - finish_reason: `stop`
-- image: `/inspire/hdd/global_user/mengweicheng-240108120092/lzy/sampled_images/GQA_13356908.jpg`
+- image: `sampled_images/GQA_13356908.jpg`
 - image_paths: `["/inspire/hdd/global_user/mengweicheng-240108120092/lzy/sampled_images/GQA_13356908.jpg"]`
 - raw_response_file: `/inspire/hdd/global_user/mengweicheng-240108120092/lzy/eval_runs/qwen3vl8b_baseline/raw_responses/qwen3vl8b_GQA_val_balanced_limit5000_len65536_maxtok128_raw.jsonl`
 - raw_response_row_index: `5000`
@@ -459,7 +459,7 @@ blue
 - row_index: `1`
 - scoring_type: `mcq`
 - finish_reason: `stop`
-- image: `/inspire/hdd/global_user/mengweicheng-240108120092/lzy/sampled_images/MMBench_241.jpg`
+- image: `sampled_images/MMBench_241.jpg`
 - image_paths: `["/inspire/hdd/global_user/mengweicheng-240108120092/lzy/sampled_images/MMBench_241.jpg"]`
 - raw_response_file: `/inspire/hdd/global_user/mengweicheng-240108120092/lzy/eval_runs/qwen3vl8b_baseline/raw_responses/qwen3vl8b_MMBench_dev_len65536_maxtok256_raw.jsonl`
 - raw_response_row_index: `1`
@@ -505,7 +505,7 @@ B
 - row_index: `1444`
 - scoring_type: `mcq`
 - finish_reason: `stop`
-- image: `/inspire/hdd/global_user/mengweicheng-240108120092/lzy/sampled_images/MMBench_1000086.jpg`
+- image: `sampled_images/MMBench_1000086.jpg`
 - image_paths: `["/inspire/hdd/global_user/mengweicheng-240108120092/lzy/sampled_images/MMBench_1000086.jpg"]`
 - raw_response_file: `/inspire/hdd/global_user/mengweicheng-240108120092/lzy/eval_runs/qwen3vl8b_baseline/raw_responses/qwen3vl8b_MMBench_dev_len65536_maxtok256_raw.jsonl`
 - raw_response_row_index: `1444`
@@ -548,7 +548,7 @@ A
 - row_index: `2886`
 - scoring_type: `mcq`
 - finish_reason: `stop`
-- image: `/inspire/hdd/global_user/mengweicheng-240108120092/lzy/sampled_images/MMBench_2000999.jpg`
+- image: `sampled_images/MMBench_2000999.jpg`
 - image_paths: `["/inspire/hdd/global_user/mengweicheng-240108120092/lzy/sampled_images/MMBench_2000999.jpg"]`
 - raw_response_file: `/inspire/hdd/global_user/mengweicheng-240108120092/lzy/eval_runs/qwen3vl8b_baseline/raw_responses/qwen3vl8b_MMBench_dev_len65536_maxtok256_raw.jsonl`
 - raw_response_row_index: `2886`
@@ -591,7 +591,7 @@ D. The laptop is on the small table
 - row_index: `4329`
 - scoring_type: `mcq`
 - finish_reason: `stop`
-- image: `/inspire/hdd/global_user/mengweicheng-240108120092/lzy/sampled_images/MMBench_3001988.jpg`
+- image: `sampled_images/MMBench_3001988.jpg`
 - image_paths: `["/inspire/hdd/global_user/mengweicheng-240108120092/lzy/sampled_images/MMBench_3001988.jpg"]`
 - raw_response_file: `/inspire/hdd/global_user/mengweicheng-240108120092/lzy/eval_runs/qwen3vl8b_baseline/raw_responses/qwen3vl8b_MMBench_dev_len65536_maxtok256_raw.jsonl`
 - raw_response_row_index: `4329`
@@ -954,7 +954,7 @@ NE
 - row_index: `1`
 - scoring_type: `mcq`
 - finish_reason: `stop`
-- image: `/inspire/hdd/global_user/mengweicheng-240108120092/lzy/sampled_images/MMSI-Bench_0_0.jpg`
+- image: `sampled_images/MMSI-Bench_0_0.jpg`
 - image_paths: `["/inspire/hdd/global_user/mengweicheng-240108120092/lzy/sampled_images/MMSI-Bench_0_0.jpg", "/inspire/hdd/global_user/mengweicheng-240108120092/lzy/sampled_images/MMSI-Bench_0_1.jpg"]`
 - raw_response_file: `/inspire/hdd/global_user/mengweicheng-240108120092/lzy/eval_runs/qwen3vl8b_baseline/raw_responses/qwen3vl8b_MMSI_Bench_len32768_maxtok256_raw.jsonl`
 - raw_response_row_index: `1`
@@ -992,7 +992,7 @@ D
 - row_index: `334`
 - scoring_type: `mcq`
 - finish_reason: `stop`
-- image: `/inspire/hdd/global_user/mengweicheng-240108120092/lzy/sampled_images/MMSI-Bench_333_0.jpg`
+- image: `sampled_images/MMSI-Bench_333_0.jpg`
 - image_paths: `["/inspire/hdd/global_user/mengweicheng-240108120092/lzy/sampled_images/MMSI-Bench_333_0.jpg", "/inspire/hdd/global_user/mengweicheng-240108120092/lzy/sampled_images/MMSI-Bench_333_1.jpg"]`
 - raw_response_file: `/inspire/hdd/global_user/mengweicheng-240108120092/lzy/eval_runs/qwen3vl8b_baseline/raw_responses/qwen3vl8b_MMSI_Bench_len32768_maxtok256_raw.jsonl`
 - raw_response_row_index: `334`
@@ -1030,7 +1030,7 @@ A
 - row_index: `667`
 - scoring_type: `mcq`
 - finish_reason: `stop`
-- image: `/inspire/hdd/global_user/mengweicheng-240108120092/lzy/sampled_images/MMSI-Bench_666_0.jpg`
+- image: `sampled_images/MMSI-Bench_666_0.jpg`
 - image_paths: `["/inspire/hdd/global_user/mengweicheng-240108120092/lzy/sampled_images/MMSI-Bench_666_0.jpg", "/inspire/hdd/global_user/mengweicheng-240108120092/lzy/sampled_images/MMSI-Bench_666_1.jpg"]`
 - raw_response_file: `/inspire/hdd/global_user/mengweicheng-240108120092/lzy/eval_runs/qwen3vl8b_baseline/raw_responses/qwen3vl8b_MMSI_Bench_len32768_maxtok256_raw.jsonl`
 - raw_response_row_index: `667`
@@ -1068,7 +1068,7 @@ C
 - row_index: `1000`
 - scoring_type: `mcq`
 - finish_reason: `stop`
-- image: `/inspire/hdd/global_user/mengweicheng-240108120092/lzy/sampled_images/MMSI-Bench_999_0.jpg`
+- image: `sampled_images/MMSI-Bench_999_0.jpg`
 - image_paths: `["/inspire/hdd/global_user/mengweicheng-240108120092/lzy/sampled_images/MMSI-Bench_999_0.jpg", "/inspire/hdd/global_user/mengweicheng-240108120092/lzy/sampled_images/MMSI-Bench_999_1.jpg"]`
 - raw_response_file: `/inspire/hdd/global_user/mengweicheng-240108120092/lzy/eval_runs/qwen3vl8b_baseline/raw_responses/qwen3vl8b_MMSI_Bench_len32768_maxtok256_raw.jsonl`
 - raw_response_row_index: `1000`
@@ -1106,7 +1106,7 @@ B
 - row_index: `1`
 - scoring_type: `needs_judge`
 - finish_reason: `stop`
-- image: `/inspire/hdd/global_user/mengweicheng-240108120092/lzy/sampled_images/MMVet_v1_0.png`
+- image: `sampled_images/MMVet_v1_0.png`
 - image_paths: `["/inspire/hdd/global_user/mengweicheng-240108120092/lzy/sampled_images/MMVet_v1_0.png"]`
 - raw_response_file: `/inspire/hdd/global_user/mengweicheng-240108120092/lzy/eval_runs/qwen3vl8b_baseline/raw_responses/qwen3vl8b_MMVet_len32768_maxtok2048_raw.jsonl`
 - raw_response_row_index: `1`
@@ -1143,7 +1143,7 @@ Answer briefly.
 - row_index: `73`
 - scoring_type: `needs_judge`
 - finish_reason: `stop`
-- image: `/inspire/hdd/global_user/mengweicheng-240108120092/lzy/sampled_images/MMVet_v1_72.png`
+- image: `sampled_images/MMVet_v1_72.png`
 - image_paths: `["/inspire/hdd/global_user/mengweicheng-240108120092/lzy/sampled_images/MMVet_v1_72.png"]`
 - raw_response_file: `/inspire/hdd/global_user/mengweicheng-240108120092/lzy/eval_runs/qwen3vl8b_baseline/raw_responses/qwen3vl8b_MMVet_len32768_maxtok2048_raw.jsonl`
 - raw_response_row_index: `73`
@@ -1180,7 +1180,7 @@ Pad Thai
 - row_index: `146`
 - scoring_type: `needs_judge`
 - finish_reason: `stop`
-- image: `/inspire/hdd/global_user/mengweicheng-240108120092/lzy/sampled_images/MMVet_v1_145.jpg`
+- image: `sampled_images/MMVet_v1_145.jpg`
 - image_paths: `["/inspire/hdd/global_user/mengweicheng-240108120092/lzy/sampled_images/MMVet_v1_145.jpg"]`
 - raw_response_file: `/inspire/hdd/global_user/mengweicheng-240108120092/lzy/eval_runs/qwen3vl8b_baseline/raw_responses/qwen3vl8b_MMVet_len32768_maxtok2048_raw.jsonl`
 - raw_response_row_index: `146`
@@ -1217,7 +1217,7 @@ Private school. Rationale: The boy is wearing a formal uniform consisting of a b
 - row_index: `218`
 - scoring_type: `needs_judge`
 - finish_reason: `stop`
-- image: `/inspire/hdd/global_user/mengweicheng-240108120092/lzy/sampled_images/MMVet_v1_217.png`
+- image: `sampled_images/MMVet_v1_217.png`
 - image_paths: `["/inspire/hdd/global_user/mengweicheng-240108120092/lzy/sampled_images/MMVet_v1_217.png"]`
 - raw_response_file: `/inspire/hdd/global_user/mengweicheng-240108120092/lzy/eval_runs/qwen3vl8b_baseline/raw_responses/qwen3vl8b_MMVet_len32768_maxtok2048_raw.jsonl`
 - raw_response_row_index: `218`
@@ -1484,7 +1484,7 @@ Point $ D $ is on $ AC
 - row_index: `1`
 - scoring_type: `numeric_exact`
 - finish_reason: `stop`
-- image: `/inspire/hdd/global_user/mengweicheng-240108120092/lzy/sampled_images/MathVerse_1.png`
+- image: `sampled_images/MathVerse_1.png`
 - image_paths: `["/inspire/hdd/global_user/mengweicheng-240108120092/lzy/sampled_images/MathVerse_1.png"]`
 - raw_response_file: `/inspire/hdd/global_user/mengweicheng-240108120092/lzy/eval_runs/qwen3vl8b_baseline/raw_responses/qwen3vl8b_MathVerse_len65536_maxtok1024_raw.jsonl`
 - raw_response_row_index: `1`
@@ -1525,7 +1525,7 @@ C
 - row_index: `1314`
 - scoring_type: `numeric_exact`
 - finish_reason: `stop`
-- image: `/inspire/hdd/global_user/mengweicheng-240108120092/lzy/sampled_images/MathVerse_1314.png`
+- image: `sampled_images/MathVerse_1314.png`
 - image_paths: `["/inspire/hdd/global_user/mengweicheng-240108120092/lzy/sampled_images/MathVerse_1314.png"]`
 - raw_response_file: `/inspire/hdd/global_user/mengweicheng-240108120092/lzy/eval_runs/qwen3vl8b_baseline/raw_responses/qwen3vl8b_MathVerse_len65536_maxtok1024_raw.jsonl`
 - raw_response_row_index: `1314`
@@ -1566,7 +1566,7 @@ B
 - row_index: `2627`
 - scoring_type: `numeric_exact`
 - finish_reason: `stop`
-- image: `/inspire/hdd/global_user/mengweicheng-240108120092/lzy/sampled_images/MathVerse_2627.png`
+- image: `sampled_images/MathVerse_2627.png`
 - image_paths: `["/inspire/hdd/global_user/mengweicheng-240108120092/lzy/sampled_images/MathVerse_2627.png"]`
 - raw_response_file: `/inspire/hdd/global_user/mengweicheng-240108120092/lzy/eval_runs/qwen3vl8b_baseline/raw_responses/qwen3vl8b_MathVerse_len65536_maxtok1024_raw.jsonl`
 - raw_response_row_index: `2627`
@@ -1609,7 +1609,7 @@ D
 - row_index: `3940`
 - scoring_type: `numeric_exact`
 - finish_reason: `stop`
-- image: `/inspire/hdd/global_user/mengweicheng-240108120092/lzy/sampled_images/MathVerse_3940.png`
+- image: `sampled_images/MathVerse_3940.png`
 - image_paths: `["/inspire/hdd/global_user/mengweicheng-240108120092/lzy/sampled_images/MathVerse_3940.png"]`
 - raw_response_file: `/inspire/hdd/global_user/mengweicheng-240108120092/lzy/eval_runs/qwen3vl8b_baseline/raw_responses/qwen3vl8b_MathVerse_len65536_maxtok1024_raw.jsonl`
 - raw_response_row_index: `3940`
@@ -1644,7 +1644,7 @@ B
 - row_index: `1`
 - scoring_type: `normalized_exact`
 - finish_reason: `stop`
-- image: `/inspire/hdd/global_user/mengweicheng-240108120092/lzy/sampled_images/MathVista_1.png`
+- image: `sampled_images/MathVista_1.png`
 - image_paths: `["/inspire/hdd/global_user/mengweicheng-240108120092/lzy/sampled_images/MathVista_1.png"]`
 - raw_response_file: `/inspire/hdd/global_user/mengweicheng-240108120092/lzy/eval_runs/qwen3vl8b_baseline/raw_responses/qwen3vl8b_MathVista_len32768_maxtok2048_raw.jsonl`
 - raw_response_row_index: `1`
@@ -1683,7 +1683,7 @@ Return only the final numeric value rounded to 1 decimal place(s). Do not provid
 - row_index: `334`
 - scoring_type: `normalized_exact`
 - finish_reason: `stop`
-- image: `/inspire/hdd/global_user/mengweicheng-240108120092/lzy/sampled_images/MathVista_334.png`
+- image: `sampled_images/MathVista_334.png`
 - image_paths: `["/inspire/hdd/global_user/mengweicheng-240108120092/lzy/sampled_images/MathVista_334.png"]`
 - raw_response_file: `/inspire/hdd/global_user/mengweicheng-240108120092/lzy/eval_runs/qwen3vl8b_baseline/raw_responses/qwen3vl8b_MathVista_len32768_maxtok2048_raw.jsonl`
 - raw_response_row_index: `334`
@@ -1723,7 +1723,7 @@ Yes
 - row_index: `667`
 - scoring_type: `normalized_exact`
 - finish_reason: `stop`
-- image: `/inspire/hdd/global_user/mengweicheng-240108120092/lzy/sampled_images/MathVista_667.png`
+- image: `sampled_images/MathVista_667.png`
 - image_paths: `["/inspire/hdd/global_user/mengweicheng-240108120092/lzy/sampled_images/MathVista_667.png"]`
 - raw_response_file: `/inspire/hdd/global_user/mengweicheng-240108120092/lzy/eval_runs/qwen3vl8b_baseline/raw_responses/qwen3vl8b_MathVista_len32768_maxtok2048_raw.jsonl`
 - raw_response_row_index: `667`
@@ -1760,7 +1760,7 @@ Return only the final integer. Do not provide reasoning.
 - row_index: `1000`
 - scoring_type: `normalized_exact`
 - finish_reason: `stop`
-- image: `/inspire/hdd/global_user/mengweicheng-240108120092/lzy/sampled_images/MathVista_1000.png`
+- image: `sampled_images/MathVista_1000.png`
 - image_paths: `["/inspire/hdd/global_user/mengweicheng-240108120092/lzy/sampled_images/MathVista_1000.png"]`
 - raw_response_file: `/inspire/hdd/global_user/mengweicheng-240108120092/lzy/eval_runs/qwen3vl8b_baseline/raw_responses/qwen3vl8b_MathVista_len32768_maxtok2048_raw.jsonl`
 - raw_response_row_index: `1000`
@@ -1945,7 +1945,7 @@ B
 - row_index: `1`
 - scoring_type: `normalized_exact`
 - finish_reason: `stop`
-- image: `/inspire/hdd/global_user/mengweicheng-240108120092/lzy/sampled_images/ReMI_0_0.png`
+- image: `sampled_images/ReMI_0_0.png`
 - image_paths: `["/inspire/hdd/global_user/mengweicheng-240108120092/lzy/sampled_images/ReMI_0_0.png", "/inspire/hdd/global_user/mengweicheng-240108120092/lzy/sampled_images/ReMI_0_1.png"]`
 - raw_response_file: `/inspire/hdd/global_user/mengweicheng-240108120092/lzy/eval_runs/qwen3vl8b_baseline/raw_responses/qwen3vl8b_ReMI_test_len65536_maxtok1024_raw.jsonl`
 - raw_response_row_index: `1`
@@ -1982,7 +1982,7 @@ Return only the final answer. Do not provide reasoning.
 - row_index: `867`
 - scoring_type: `normalized_exact`
 - finish_reason: `stop`
-- image: `/inspire/hdd/global_user/mengweicheng-240108120092/lzy/sampled_images/ReMI_866_0.png`
+- image: `sampled_images/ReMI_866_0.png`
 - image_paths: `["/inspire/hdd/global_user/mengweicheng-240108120092/lzy/sampled_images/ReMI_866_0.png", "/inspire/hdd/global_user/mengweicheng-240108120092/lzy/sampled_images/ReMI_866_1.png"]`
 - raw_response_file: `/inspire/hdd/global_user/mengweicheng-240108120092/lzy/eval_runs/qwen3vl8b_baseline/raw_responses/qwen3vl8b_ReMI_test_len65536_maxtok1024_raw.jsonl`
 - raw_response_row_index: `867`
@@ -2019,7 +2019,7 @@ Return only the final answer. Do not provide reasoning.
 - row_index: `1734`
 - scoring_type: `normalized_exact`
 - finish_reason: `stop`
-- image: `/inspire/hdd/global_user/mengweicheng-240108120092/lzy/sampled_images/ReMI_1733_0.png`
+- image: `sampled_images/ReMI_1733_0.png`
 - image_paths: `["/inspire/hdd/global_user/mengweicheng-240108120092/lzy/sampled_images/ReMI_1733_0.png", "/inspire/hdd/global_user/mengweicheng-240108120092/lzy/sampled_images/ReMI_1733_1.png", "/inspire/hdd/global_user/mengweicheng-240108120092/lzy/sampled_images/ReMI_1733_2.png", "/inspire/hdd/global_user/mengweicheng-240108120092/lzy/sampled_images/ReMI_1733_3.png", "/inspire/hdd/global_user/mengweicheng-240108120092/lzy/sampled_images/ReMI_1733_4.png"]`
 - raw_response_file: `/inspire/hdd/global_user/mengweicheng-240108120092/lzy/eval_runs/qwen3vl8b_baseline/raw_responses/qwen3vl8b_ReMI_test_len65536_maxtok1024_raw.jsonl`
 - raw_response_row_index: `1734`
@@ -2056,7 +2056,7 @@ D
 - row_index: `2600`
 - scoring_type: `normalized_exact`
 - finish_reason: `stop`
-- image: `/inspire/hdd/global_user/mengweicheng-240108120092/lzy/sampled_images/ReMI_2599_0.png`
+- image: `sampled_images/ReMI_2599_0.png`
 - image_paths: `["/inspire/hdd/global_user/mengweicheng-240108120092/lzy/sampled_images/ReMI_2599_0.png", "/inspire/hdd/global_user/mengweicheng-240108120092/lzy/sampled_images/ReMI_2599_1.png", "/inspire/hdd/global_user/mengweicheng-240108120092/lzy/sampled_images/ReMI_2599_2.png", "/inspire/hdd/global_user/mengweicheng-240108120092/lzy/sampled_images/ReMI_2599_3.png", "/inspire/hdd/global_user/mengweicheng-240108120092/lzy/sampled_images/ReMI_2599_4.png"]`
 - raw_response_file: `/inspire/hdd/global_user/mengweicheng-240108120092/lzy/eval_runs/qwen3vl8b_baseline/raw_responses/qwen3vl8b_ReMI_test_len65536_maxtok1024_raw.jsonl`
 - raw_response_row_index: `2600`
@@ -2263,7 +2263,7 @@ C. Europe
 - row_index: `1`
 - scoring_type: `normalized_exact`
 - finish_reason: `stop`
-- image: `/inspire/hdd/global_user/mengweicheng-240108120092/lzy/sampled_images/VQAv2_262148000.jpg`
+- image: `sampled_images/VQAv2_262148000.jpg`
 - image_paths: `["/inspire/hdd/global_user/mengweicheng-240108120092/lzy/sampled_images/VQAv2_262148000.jpg"]`
 - raw_response_file: `/inspire/hdd/global_user/mengweicheng-240108120092/lzy/eval_runs/qwen3vl8b_baseline/raw_responses/qwen3vl8b_VQAv2_val_limit5000_len65536_maxtok128_raw.jsonl`
 - raw_response_row_index: `1`
@@ -2300,7 +2300,7 @@ down
 - row_index: `1667`
 - scoring_type: `normalized_exact`
 - finish_reason: `stop`
-- image: `/inspire/hdd/global_user/mengweicheng-240108120092/lzy/sampled_images/VQAv2_757014.jpg`
+- image: `sampled_images/VQAv2_757014.jpg`
 - image_paths: `["/inspire/hdd/global_user/mengweicheng-240108120092/lzy/sampled_images/VQAv2_757014.jpg"]`
 - raw_response_file: `/inspire/hdd/global_user/mengweicheng-240108120092/lzy/eval_runs/qwen3vl8b_baseline/raw_responses/qwen3vl8b_VQAv2_val_limit5000_len65536_maxtok128_raw.jsonl`
 - raw_response_row_index: `1667`
@@ -2337,7 +2337,7 @@ water
 - row_index: `3334`
 - scoring_type: `normalized_exact`
 - finish_reason: `stop`
-- image: `/inspire/hdd/global_user/mengweicheng-240108120092/lzy/sampled_images/VQAv2_394840001.jpg`
+- image: `sampled_images/VQAv2_394840001.jpg`
 - image_paths: `["/inspire/hdd/global_user/mengweicheng-240108120092/lzy/sampled_images/VQAv2_394840001.jpg"]`
 - raw_response_file: `/inspire/hdd/global_user/mengweicheng-240108120092/lzy/eval_runs/qwen3vl8b_baseline/raw_responses/qwen3vl8b_VQAv2_val_limit5000_len65536_maxtok128_raw.jsonl`
 - raw_response_row_index: `3334`
@@ -2374,7 +2374,7 @@ yes
 - row_index: `5000`
 - scoring_type: `normalized_exact`
 - finish_reason: `stop`
-- image: `/inspire/hdd/global_user/mengweicheng-240108120092/lzy/sampled_images/VQAv2_2529009.jpg`
+- image: `sampled_images/VQAv2_2529009.jpg`
 - image_paths: `["/inspire/hdd/global_user/mengweicheng-240108120092/lzy/sampled_images/VQAv2_2529009.jpg"]`
 - raw_response_file: `/inspire/hdd/global_user/mengweicheng-240108120092/lzy/eval_runs/qwen3vl8b_baseline/raw_responses/qwen3vl8b_VQAv2_val_limit5000_len65536_maxtok128_raw.jsonl`
 - raw_response_row_index: `5000`
