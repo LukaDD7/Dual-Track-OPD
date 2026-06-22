@@ -1,0 +1,103 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1500" height="760" viewBox="0 0 1500 760">
+<style>
+text { font-family: Helvetica, Arial, sans-serif; fill: #202124; }
+.title { font-size: 28px; font-weight: 700; }
+.subtitle { font-size: 16px; fill: #5f6368; }
+.axis { stroke: #3c4043; stroke-width: 1.2; }
+.grid { stroke: #dadce0; stroke-width: 1; }
+.tick { font-size: 13px; fill: #5f6368; }
+.label { font-size: 13px; }
+.legend { font-size: 14px; fill: #3c4043; }
+.note { font-size: 13px; fill: #5f6368; }
+</style>
+<rect width="100%" height="100%" fill="white"/>
+<text x="90" y="38" class="title">Qwen3-VL-8B Baseline Diagnostic Scores</text>
+<text x="90" y="62" class="subtitle">Bars show parser-conditional accuracy; black dots show scoring coverage. Internal diagnostic, not official benchmark accuracy.</text>
+<line x1="90" x2="1440" y1="570.0" y2="570.0" class="grid"/>
+<text x="78" y="574.0" text-anchor="end" class="tick">0%</text>
+<line x1="90" x2="1440" y1="447.5" y2="447.5" class="grid"/>
+<text x="78" y="451.5" text-anchor="end" class="tick">25%</text>
+<line x1="90" x2="1440" y1="325.0" y2="325.0" class="grid"/>
+<text x="78" y="329.0" text-anchor="end" class="tick">50%</text>
+<line x1="90" x2="1440" y1="202.5" y2="202.5" class="grid"/>
+<text x="78" y="206.5" text-anchor="end" class="tick">75%</text>
+<line x1="90" x2="1440" y1="80.0" y2="80.0" class="grid"/>
+<text x="78" y="84.0" text-anchor="end" class="tick">100%</text>
+<line x1="90" x2="90" y1="80" y2="570" class="axis"/>
+<line x1="90" x2="1440" y1="570" y2="570" class="axis"/>
+<rect x="106.0" y="185.5" width="52.3" height="384.5" fill="#c9792b" opacity="0.92"/>
+<text x="132.2" y="179.5" text-anchor="middle" class="tick">78</text>
+<circle cx="132.2" cy="325.0" r="5.5" fill="#111111" stroke="white" stroke-width="1.4"/>
+<text transform="translate(132.2,596) rotate(42)" text-anchor="start" class="label">BLINK</text>
+<rect x="190.4" y="442.8" width="52.3" height="127.2" fill="#c9792b" opacity="0.92"/>
+<text x="216.6" y="436.8" text-anchor="middle" class="tick">26</text>
+<circle cx="216.6" cy="291.3" r="5.5" fill="#111111" stroke="white" stroke-width="1.4"/>
+<text transform="translate(216.6,596) rotate(42)" text-anchor="start" class="label">DynaMath_Sample</text>
+<rect x="274.8" y="224.3" width="52.3" height="345.7" fill="#78a641" opacity="0.92"/>
+<text x="300.9" y="218.3" text-anchor="middle" class="tick">71</text>
+<circle cx="300.9" cy="80.0" r="5.5" fill="#111111" stroke="white" stroke-width="1.4"/>
+<text transform="translate(300.9,596) rotate(42)" text-anchor="start" class="label">GQA</text>
+<rect x="359.2" y="130.4" width="52.3" height="439.6" fill="#2f6f9f" opacity="0.92"/>
+<text x="385.3" y="124.4" text-anchor="middle" class="tick">90</text>
+<circle cx="385.3" cy="80.2" r="5.5" fill="#111111" stroke="white" stroke-width="1.4"/>
+<text transform="translate(385.3,596) rotate(42)" text-anchor="start" class="label">MMBench</text>
+<rect x="443.5" y="422.5" width="52.3" height="147.5" fill="#c9792b" opacity="0.92"/>
+<text x="469.7" y="416.5" text-anchor="middle" class="tick">30</text>
+<circle cx="469.7" cy="482.5" r="5.5" fill="#111111" stroke="white" stroke-width="1.4"/>
+<text transform="translate(469.7,596) rotate(42)" text-anchor="start" class="label">MMMU_Pro_10</text>
+<rect x="527.9" y="314.2" width="52.3" height="255.8" fill="#c9792b" opacity="0.92"/>
+<text x="554.1" y="308.2" text-anchor="middle" class="tick">52</text>
+<circle cx="554.1" cy="383.9" r="5.5" fill="#111111" stroke="white" stroke-width="1.4"/>
+<text transform="translate(554.1,596) rotate(42)" text-anchor="start" class="label">MMMU_Pro_4</text>
+<rect x="612.3" y="411.2" width="52.3" height="158.8" fill="#2f6f9f" opacity="0.92"/>
+<text x="638.4" y="405.2" text-anchor="middle" class="tick">32</text>
+<circle cx="638.4" cy="80.0" r="5.5" fill="#111111" stroke="white" stroke-width="1.4"/>
+<text transform="translate(638.4,596) rotate(42)" text-anchor="start" class="label">MMSI-Bench</text>
+<line x1="696.7" x2="749.0" y1="566.0" y2="566.0" stroke="#7a7a7a" stroke-width="4"/>
+<text x="722.8" y="556.0" text-anchor="middle" class="tick">n/a</text>
+<circle cx="722.8" cy="570.0" r="5.5" fill="#111111" stroke="white" stroke-width="1.4"/>
+<text transform="translate(722.8,596) rotate(42)" text-anchor="start" class="label">MMVet</text>
+<rect x="781.0" y="186.5" width="52.3" height="383.5" fill="#c9792b" opacity="0.92"/>
+<text x="807.2" y="180.5" text-anchor="middle" class="tick">78</text>
+<circle cx="807.2" cy="564.4" r="5.5" fill="#111111" stroke="white" stroke-width="1.4"/>
+<text transform="translate(807.2,596) rotate(42)" text-anchor="start" class="label">MV-MATH</text>
+<rect x="865.4" y="425.3" width="52.3" height="144.7" fill="#c9792b" opacity="0.92"/>
+<text x="891.6" y="419.3" text-anchor="middle" class="tick">30</text>
+<circle cx="891.6" cy="489.5" r="5.5" fill="#111111" stroke="white" stroke-width="1.4"/>
+<text transform="translate(891.6,596) rotate(42)" text-anchor="start" class="label">MathVerse</text>
+<rect x="949.8" y="271.5" width="52.3" height="298.5" fill="#78a641" opacity="0.92"/>
+<text x="975.9" y="265.5" text-anchor="middle" class="tick">61</text>
+<circle cx="975.9" cy="92.3" r="5.5" fill="#111111" stroke="white" stroke-width="1.4"/>
+<text transform="translate(975.9,596) rotate(42)" text-anchor="start" class="label">MathVista</text>
+<rect x="1034.2" y="406.0" width="52.3" height="164.0" fill="#2f6f9f" opacity="0.92"/>
+<text x="1060.3" y="400.0" text-anchor="middle" class="tick">33</text>
+<circle cx="1060.3" cy="80.0" r="5.5" fill="#111111" stroke="white" stroke-width="1.4"/>
+<text transform="translate(1060.3,596) rotate(42)" text-anchor="start" class="label">MindCube-Bench</text>
+<rect x="1118.5" y="453.5" width="52.3" height="116.5" fill="#78a641" opacity="0.92"/>
+<text x="1144.7" y="447.5" text-anchor="middle" class="tick">24</text>
+<circle cx="1144.7" cy="107.0" r="5.5" fill="#111111" stroke="white" stroke-width="1.4"/>
+<text transform="translate(1144.7,596) rotate(42)" text-anchor="start" class="label">ReMI</text>
+<rect x="1202.9" y="130.0" width="52.3" height="440.0" fill="#2f6f9f" opacity="0.92"/>
+<text x="1229.1" y="124.0" text-anchor="middle" class="tick">90</text>
+<circle cx="1229.1" cy="80.2" r="5.5" fill="#111111" stroke="white" stroke-width="1.4"/>
+<text transform="translate(1229.1,596) rotate(42)" text-anchor="start" class="label">ScienceQA-IMG</text>
+<rect x="1287.3" y="216.1" width="52.3" height="353.9" fill="#78a641" opacity="0.92"/>
+<text x="1313.4" y="210.1" text-anchor="middle" class="tick">72</text>
+<circle cx="1313.4" cy="80.4" r="5.5" fill="#111111" stroke="white" stroke-width="1.4"/>
+<text transform="translate(1313.4,596) rotate(42)" text-anchor="start" class="label">VQAv2</text>
+<rect x="1371.7" y="375.5" width="52.3" height="194.5" fill="#2f6f9f" opacity="0.92"/>
+<text x="1397.8" y="369.5" text-anchor="middle" class="tick">40</text>
+<circle cx="1397.8" cy="80.0" r="5.5" fill="#111111" stroke="white" stroke-width="1.4"/>
+<text transform="translate(1397.8,596) rotate(42)" text-anchor="start" class="label">ViewSpatial-Bench</text>
+<rect x="90" y="686" width="16" height="16" fill="#2f6f9f"/>
+<text x="114" y="699" class="legend">High-coverage MCQ diagnostic</text>
+<rect x="415" y="686" width="16" height="16" fill="#78a641"/>
+<text x="439" y="699" class="legend">Rough exact-match diagnostic</text>
+<rect x="740" y="686" width="16" height="16" fill="#c9792b"/>
+<text x="764" y="699" class="legend">Low-coverage diagnostic</text>
+<rect x="1065" y="686" width="16" height="16" fill="#7a7a7a"/>
+<text x="1089" y="699" class="legend">Needs judge</text>
+<circle cx="90" cy="728" r="5.5" fill="#111111"/>
+<text x="114" y="733" class="legend">Coverage marker</text>
+<text x="1440" y="742" text-anchor="end" class="note">Generated from qwen3vl8b_baseline_score_diagnostics.csv</text>
+</svg>

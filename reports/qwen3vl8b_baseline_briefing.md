@@ -35,6 +35,27 @@ Repo 内当前保留的是可审计的 summary / score / analysis 产物：
 
 需要特别说明：高覆盖率不等于 official metric 可靠。覆盖率高只说明当前 raw response 里有 ground truth，且我们的 parser 能把 prediction 和 ground truth 都转成可比较的字符串或选项。错误样本仍然可能来自非模型能力因素，例如答案别名没有归一、数字/单位格式不一致、VQA 官方 soft-agreement 没有实现、URL/标点被 normalization 改坏、或者官方 evaluator 本来需要 LLM/judge 抽取答案。因此高覆盖数据集可以作为内部诊断信号，但论文主表仍需要官方或社区标准 evaluator。
 
+## VLMEvalKit 和当前 scorer 的区别
+
+VLMEvalKit 是面向 VLM benchmark 的完整评测框架，而我们当前的 `conservative_v1` 是 repo 内部诊断脚本。二者目标不同：
+
+| 维度 | VLMEvalKit / official evaluator | 当前 `conservative_v1` |
+| --- | --- | --- |
+| 目标 | 生成可复现、可比较、接近 leaderboard 的 benchmark 结果。 | 快速审计 raw responses，定位 parser / failure / coverage 问题。 |
+| 数据准备 | 通常内置 benchmark 下载、格式转换、split 管理。 | 只读取已经生成好的 raw JSONL 和 manifest。 |
+| 推理流程 | 可以统一调模型、分布式推理、保存 prediction。 | 不负责推理，只做 post-hoc scoring。 |
+| 答案抽取 | 对 MMBench 等任务可使用 LLM-based answer extraction；部分 benchmark 有专用规则。 | 只用保守 regex / normalization；宁可 unparsed，也不猜。 |
+| Metric | 实现或对齐 benchmark 官方 metric，例如 CircularEval、soft agreement、judge scoring。 | 只输出 parser-conditional accuracy、coverage、unparsed、length。 |
+| 论文可用性 | 可作为 paper table 候选，前提是记录版本、prompt、judge model。 | 只能作为 internal diagnostic，不能写成 official accuracy。 |
+
+以 MMBench 为例，MMBench 官方建议使用 VLMEvalKit；其评估中有 CircularEval，并可用 GPT-4 等 LLM 将 free-form prediction 映射到选项。我们的 scorer 只识别明确的 A/B/C/D 输出，因此更保守、更透明，但不等价于 MMBench official score。
+
+参考：
+
+- https://github.com/open-compass/VLMEvalKit
+- https://github.com/open-compass/MMBench
+- https://arxiv.org/html/2307.06281v5
+
 ## 总体结果
 
 | 指标 | 数值 |
@@ -53,6 +74,14 @@ Repo 内当前保留的是可审计的 summary / score / analysis 产物：
 | Error rows | 0 |
 
 这里的 accuracy 是 parser-conditional accuracy，即只在 scorer 成功解析的样本上计算。覆盖率低的数据集不能把该 accuracy 解读为完整数据集准确率。
+
+对应的可视化图表已生成：
+
+```text
+reports/figures/qwen3vl8b_baseline_diagnostic_scores.svg
+```
+
+图中柱子表示 parser-conditional accuracy，黑点表示 coverage。低覆盖数据集即使柱子较高，也不能直接解释为完整 benchmark 表现。
 
 ## 数据集分层
 
@@ -188,3 +217,37 @@ Repo 内当前保留的是可审计的 summary / score / analysis 产物：
    - 不写成 official accuracy。
    - 保留 coverage、unparsed、length rows。
    - 对低覆盖数据集只做定性或 parser-conditional 讨论。
+
+## CPU 实例抽样命令
+
+如果要从 raw JSONL 中每个数据集抽 2 个样本，查看题面、选项、模型预测、推理/解释和 ground truth，可在 CPU 实例运行：
+
+```bash
+cd /inspire/hdd/global_user/mengweicheng-240108120092/lzy/projects/Dual-Track-OPD
+
+git fetch origin
+git switch analysis/qwen3vl8b-baseline-scoring
+git pull --ff-only origin analysis/qwen3vl8b-baseline-scoring
+
+python -m dual_track_opd.eval.sample_raw_examples \
+  --raw-dir /inspire/hdd/global_user/mengweicheng-240108120092/lzy/eval_runs/qwen3vl8b_baseline/raw_responses \
+  --manifest data/manifests/qwen3vl8b_baseline_preferred_raw_files.jsonl \
+  --samples-per-dataset 2 \
+  --strategy first \
+  --out-jsonl reports/qwen3vl8b_baseline_sample_examples.jsonl \
+  --out-md reports/qwen3vl8b_baseline_sample_examples.md
+```
+
+如果希望每个 raw file 取“开头和结尾附近”的样本，而不是前两条，可把 `--strategy first` 改成：
+
+```bash
+--strategy even
+```
+
+抽样结果是小文件，可以用于人工分析；但仍建议先检查大小和内容再提交：
+
+```bash
+wc -l reports/qwen3vl8b_baseline_sample_examples.jsonl
+sed -n '1,120p' reports/qwen3vl8b_baseline_sample_examples.md
+du -h reports/qwen3vl8b_baseline_sample_examples.*
+```
