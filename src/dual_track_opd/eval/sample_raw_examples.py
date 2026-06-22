@@ -36,8 +36,15 @@ REASONING_KEYS = (
     "chain_of_thought",
     "analysis",
 )
-IMAGE_KEYS = ("image", "image_path", "image_paths", "images")
-PATH_HINTS = ("image", "img", "path", "file")
+IMAGE_KEYS = (
+    "image",
+    "image_path",
+    "image_paths",
+    "image_url",
+    "image_urls",
+    "images",
+)
+IMAGE_REF_KEY_HINTS = ("image", "img", "path", "url", "file")
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -99,28 +106,64 @@ def _looks_like_image_path(value: str) -> bool:
     )
 
 
-def _recursive_image_path(value: Any) -> str:
-    found = _recursive_first_field(value, IMAGE_KEYS)
-    if found not in (None, ""):
-        return _stringify(found)
+def _looks_like_image_ref(value: str) -> bool:
+    lowered = value.lower()
+    return (
+        _looks_like_image_path(value)
+        or lowered.startswith("http://")
+        or lowered.startswith("https://")
+        or lowered.startswith("s3://")
+        or lowered.startswith("/")
+    )
 
-    candidates: list[str] = []
 
-    def collect(nested: Any, key_name: str = "") -> None:
-        if isinstance(nested, dict):
-            for key, inner in nested.items():
-                collect(inner, key)
-        elif isinstance(nested, list):
-            for inner in nested:
-                collect(inner, key_name)
-        elif isinstance(nested, str):
+def collect_image_refs(obj: Any) -> list[str]:
+    """Recursively collect image path or URL references from nested records."""
+
+    refs: list[str] = []
+    seen: set[str] = set()
+
+    def add(value: Any) -> None:
+        if isinstance(value, str) and _looks_like_image_ref(value) and value not in seen:
+            seen.add(value)
+            refs.append(value)
+        elif isinstance(value, list):
+            for item in value:
+                add(item)
+        elif isinstance(value, dict):
+            if "url" in value:
+                add(value["url"])
+            for item in value.values():
+                add(item)
+
+    def walk(value: Any, key_name: str = "") -> None:
+        if isinstance(value, dict):
+            for key, inner in value.items():
+                lowered_key = key.lower()
+                if key in IMAGE_KEYS or any(hint in lowered_key for hint in IMAGE_REF_KEY_HINTS):
+                    add(inner)
+                walk(inner, key)
+        elif isinstance(value, list):
+            for item in value:
+                walk(item, key_name)
+        elif isinstance(value, str):
             lowered_key = key_name.lower()
-            if _looks_like_image_path(nested) or any(hint in lowered_key for hint in PATH_HINTS):
-                if _looks_like_image_path(nested):
-                    candidates.append(nested)
+            if _looks_like_image_ref(value) and (
+                _looks_like_image_path(value)
+                or any(hint in lowered_key for hint in IMAGE_REF_KEY_HINTS)
+            ):
+                add(value)
 
-    collect(value)
-    return candidates[0] if candidates else ""
+    walk(obj)
+    return refs
+
+
+def _metadata_snapshot(item: dict[str, Any]) -> dict[str, Any]:
+    metadata: dict[str, Any] = {}
+    for key in ("metadata", "original_metadata"):
+        if key in item:
+            metadata[key] = item[key]
+    return metadata
 
 
 def sample_raw_examples(
@@ -138,21 +181,26 @@ def sample_raw_examples(
         rows = _read_jsonl(raw_path)
         for index in _select_indices(len(rows), samples_per_dataset, strategy):
             item = rows[index]
+            image_paths = collect_image_refs(item)
             samples.append(
                 {
                     "dataset": entry.dataset,
                     "file": entry.file,
+                    "raw_response_file": str(raw_path),
+                    "raw_response_row_index": index + 1,
                     "row_index": index + 1,
                     "row_id": get_row_id(item, index + 1),
                     "scoring_type": entry.scoring_type,
                     "question": _field(item, QUESTION_KEYS),
                     "options": _field(item, OPTION_KEYS),
-                    "image": _recursive_image_path(item),
+                    "image": image_paths[0] if image_paths else "",
+                    "image_paths": image_paths,
                     "prediction": get_prediction(item),
                     "reasoning": _field(item, REASONING_KEYS),
                     "ground_truths": get_ground_truths(item),
                     "finish_reason": get_finish_reason(item),
                     "error": _stringify(item.get("error")),
+                    "original_metadata": _metadata_snapshot(item),
                     "raw_keys": sorted(item.keys()),
                 }
             )
@@ -186,6 +234,9 @@ def write_markdown(path: str | Path, rows: list[dict[str, Any]]) -> None:
                 f"- scoring_type: `{row['scoring_type']}`",
                 f"- finish_reason: `{row['finish_reason']}`",
                 f"- image: `{row['image']}`",
+                f"- image_paths: `{json.dumps(row.get('image_paths', []), ensure_ascii=False)}`",
+                f"- raw_response_file: `{row.get('raw_response_file', row['file'])}`",
+                f"- raw_response_row_index: `{row.get('raw_response_row_index', row['row_index'])}`",
                 "",
                 "**Question**",
                 "",
@@ -206,6 +257,10 @@ def write_markdown(path: str | Path, rows: list[dict[str, Any]]) -> None:
                 "**Ground Truths**",
                 "",
                 json.dumps(row["ground_truths"], ensure_ascii=False),
+                "",
+                "**Original Metadata**",
+                "",
+                json.dumps(row.get("original_metadata", {}), ensure_ascii=False, sort_keys=True),
                 "",
             ]
         )
