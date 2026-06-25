@@ -107,8 +107,45 @@ The blurred-image path for each sample is derived deterministically
 (`<stem>.gaussian_blur_s<sigma><ext>`) and only its transform metadata is
 recorded — this stage never mutates source images.
 
+## Offline loss / backward smoke
+
+`dual_track_opd.fc_opd.offline_loss` closes the loop between the offline-score
+dataset and the existing FC-OPD loss/router path **before** any trainer/verl
+change. For each recorded payload it:
+
+1. rebuilds the four condition `TeacherTopK` tensors (`token_ids [T,K]`,
+   `log_probs [T,K]`, `tail_log_prob [T]`, `entropy [T]`);
+2. parses the recorded chunk spans into `visual_evidence` / `reasoning` /
+   `answer` masks aligned to `T`;
+3. attaches synthetic student logits `[1, T, V]` with `requires_grad=True`
+   (`V` defaults to `max teacher token id + 1`);
+4. runs `route_condition_weights` -> `compute_fc_opd_loss` -> `backward`.
+
+The router used here (`FOUR_CONDITION_ROUTER`) maps `visual_evidence→task`,
+`reasoning→free`, `answer→full`, and the remaining tag/whitespace tokens fall
+back to `blur`, so all four conditions are exercised in the loss.
+
+It verifies: finite loss, present and finite student-logit gradients, chunk
+masks aligned to the response token length, and that all four conditions are
+consumed. No student model or teacher service is loaded.
+
+```bash
+# Against the real-teacher VStar smoke output on HPC:
+bash scripts/hpc/run_fc_opd_offline_loss_smoke.sh \
+    "$DTOPD_OUTPUT_ROOT/fc_opd/offline_scores/vstar16_real_teacher/vstar_offline_scores.jsonl"
+
+# Or directly:
+python scripts/hpc/run_fc_opd_offline_loss_smoke.py --scores <offline_scores.jsonl>
+```
+
+The command prints a JSON report and exits non-zero if any check fails.
+
 ## Tests
 
-`tests/fc_opd/test_offline_scoring.py` exercises the full pipeline against the
+`tests/fc_opd/test_offline_scoring.py` exercises the scoring pipeline against the
 synthetic teacher: four-condition `[T,32]` shapes, chunk-span validity, student
 vs protocol-smoke modes, and JSONL round-tripping.
+
+`tests/fc_opd/test_offline_loss.py` exercises the loss/backward path on synthetic
+offline-score fixtures: tensor/mask alignment, finite loss, gradient presence on
+student logits only, four-condition consumption, and JSONL round-tripping.
