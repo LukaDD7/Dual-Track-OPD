@@ -98,6 +98,52 @@ if any check fails.
 - CPU tests use a tiny fake model (`tests/fc_opd/test_real_student_smoke.py`),
   so no weights are needed for CI.
 
+## Parameter & tied-weight reporting
+
+Each `RealStudentResult` (and the optimizer-step report below) includes:
+
+- `num_trainable_params` / `num_trainable_param_tensors` — element and tensor counts;
+- `trainable_param_names` — the first few trainable parameter names;
+- `nonzero_grad_param_names` — the first parameters that received a finite,
+  non-zero gradient;
+- `lm_head_embed_tied` — whether the LM head and input embedding share storage;
+- `tied_parameter_names` — the detected tied groups (names sharing a `data_ptr`).
+
+**Qwen3-VL-4B ties `lm_head.weight` and `model.language_model.embed_tokens.weight`**
+(same object / `data_ptr`). So with `--freeze-all-but-lm-head` the only trainable
+parameter is that shared weight, and the first non-zero gradient is reported
+under `model.language_model.embed_tokens.weight` — this is expected, not a bug.
+Tied detection uses `named_parameters(remove_duplicate=False)` so both names
+surface even though `torch` deduplicates them for the optimizer.
+
+## Real optimizer-step smoke
+
+`run_real_student_min_train` (module `real_student_smoke`) takes the bridge one
+step further: it builds an Adam optimizer over the trainable parameters and runs
+a few steps. Each step re-runs the teacher-forced forward (so the logits reflect
+the current parameters), computes the FC-OPD loss, backpropagates, and steps.
+
+Per step it reports `loss`, `grad_norm`, `param_delta_norm`, and
+`consumed_conditions`. `RealMinTrainReport.passed` requires: tokenizer-hash match,
+decoded match (unless relaxed), finite loss and gradients every step, a strictly
+positive `param_delta_norm` every step (a real parameter actually changed), and
+all four conditions consumed. It also surfaces the tied-weight report above.
+
+```bash
+bash scripts/hpc/run_fc_opd_real_student_min_train_smoke.sh \
+    "$DTOPD_OUTPUT_ROOT/fc_opd/offline_scores/vstar16_real_teacher/vstar_offline_scores.jsonl"
+
+# Or directly (defaults: --limit 1 --steps 3 --lr 1e-4 --freeze-all-but-lm-head):
+python scripts/hpc/run_fc_opd_real_student_min_train_smoke.py \
+    --scores <offline_scores.jsonl> \
+    --model-path "$DTOPD_MODEL_ROOT/Qwen3-VL-4B-Instruct" \
+    --steps 3 --device cuda --dtype bfloat16
+```
+
+Pass `--no-freeze-all-but-lm-head` to train the whole model (more memory). The
+command prints one JSON object per step plus a summary and exits non-zero on
+failure. No teacher service is contacted; `third_party/verl` is never imported.
+
 ## Tests
 
 `tests/fc_opd/test_real_student_smoke.py` covers:
@@ -108,4 +154,9 @@ if any check fails.
   non-zero gradient through the loss;
 - shape / `T`-mismatch and tokenizer-hash-mismatch failures;
 - decoded-text mismatch is rejected by default and relaxable;
-- the four-condition consumption check.
+- the four-condition consumption check;
+- tied-weight detection (`lm_head` / `embed_tokens` sharing storage) and
+  the parameter-reporting fields;
+- the optimizer-step smoke: finite loss/gradients per step, a strictly positive
+  `param_delta_norm` per step, an actual parameter change, four-condition
+  consumption, and tied-status reporting.

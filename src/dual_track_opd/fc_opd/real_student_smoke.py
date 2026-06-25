@@ -156,6 +156,64 @@ class StudentLogitsProvider(Protocol):
     def zero_grad(self) -> None: ...
 
 
+def _all_named_parameters(provider: StudentLogitsProvider) -> Iterable[tuple[str, torch.Tensor]]:
+    """All named parameters including tied duplicates, with a safe fallback."""
+
+    getter = getattr(provider, "all_named_parameters", None)
+    if getter is not None:
+        yield from getter()
+    else:
+        yield from provider.named_parameters()
+
+
+def detect_tied_parameter_groups(provider: StudentLogitsProvider) -> list[list[str]]:
+    """Group parameter names that share storage (tied weights)."""
+
+    by_storage: dict[int, list[str]] = {}
+    for name, param in _all_named_parameters(provider):
+        by_storage.setdefault(param.data_ptr(), []).append(name)
+    return [sorted(names) for names in by_storage.values() if len(names) > 1]
+
+
+def lm_head_embed_tied(tied_groups: Sequence[Sequence[str]]) -> bool:
+    """True when an lm-head-like name and an embedding-like name share storage."""
+
+    for names in tied_groups:
+        has_head = any(("lm_head" in name) or ("output_embed" in name) for name in names)
+        has_embed = any("embed" in name for name in names)
+        if has_head and has_embed:
+            return True
+    return False
+
+
+def _trainable_summary(provider: StudentLogitsProvider, *, max_names: int = 8) -> tuple[int, int, list[str]]:
+    num_tensors = 0
+    num_elements = 0
+    names: list[str] = []
+    for name, param in provider.named_parameters():
+        num_tensors += 1
+        num_elements += int(param.numel())
+        if len(names) < max_names:
+            names.append(name)
+    return num_tensors, num_elements, names
+
+
+def _finite_nonzero_grads(
+    provider: StudentLogitsProvider, *, max_names: int = 8
+) -> list[tuple[str, float]]:
+    found: list[tuple[str, float]] = []
+    for name, param in provider.named_parameters():
+        grad = param.grad
+        if grad is None:
+            continue
+        grad = grad.detach().float()
+        if bool(torch.isfinite(grad).all().item()) and float(grad.norm().item()) > 0.0:
+            found.append((name, float(grad.norm().item())))
+            if len(found) >= max_names:
+                break
+    return found
+
+
 # ---------------------------------------------------------------------------
 # Real Hugging Face student provider (transformers imported lazily)
 # ---------------------------------------------------------------------------
@@ -221,6 +279,11 @@ class HFStudentProvider:
         for name, param in self._model.named_parameters():
             if param.requires_grad:
                 yield name, param
+
+    def all_named_parameters(self) -> Iterable[tuple[str, torch.Tensor]]:
+        # remove_duplicate=False so tied weights (e.g. lm_head / embed_tokens)
+        # surface under all of their names for tied-parameter detection.
+        yield from self._model.named_parameters(remove_duplicate=False)
 
     def zero_grad(self) -> None:
         self._model.zero_grad(set_to_none=True)
@@ -310,6 +373,12 @@ class RealStudentResult:
     grad_param_norm: float
     grad_is_finite: bool
     consumed_conditions: set[Condition]
+    num_trainable_params: int = 0
+    num_trainable_param_tensors: int = 0
+    trainable_param_names: list[str] = field(default_factory=list)
+    nonzero_grad_param_names: list[str] = field(default_factory=list)
+    lm_head_embed_tied: bool = False
+    tied_parameter_names: list[list[str]] = field(default_factory=list)
     metrics: dict[str, float] = field(default_factory=dict)
 
     @property
@@ -336,16 +405,11 @@ class RealStudentResult:
 def _first_finite_nonzero_grad(
     provider: StudentLogitsProvider,
 ) -> tuple[str | None, float, bool]:
-    for name, param in provider.named_parameters():
-        grad = param.grad
-        if grad is None:
-            continue
-        grad = grad.detach().float()
-        finite = bool(torch.isfinite(grad).all().item())
-        norm = float(grad.norm().item())
-        if finite and norm > 0.0:
-            return name, norm, True
-    return None, 0.0, False
+    found = _finite_nonzero_grads(provider, max_names=1)
+    if not found:
+        return None, 0.0, False
+    name, norm = found[0]
+    return name, norm, True
 
 
 def run_real_student_record(
@@ -417,12 +481,18 @@ def run_real_student_record(
     except RuntimeError:
         backward_succeeded = False
 
-    grad_name, grad_norm, grad_finite = _first_finite_nonzero_grad(provider)
+    nonzero_grads = _finite_nonzero_grads(provider)
+    grad_name = nonzero_grads[0][0] if nonzero_grads else None
+    grad_norm = nonzero_grads[0][1] if nonzero_grads else 0.0
+    grad_finite = bool(nonzero_grads)
     consumed = {
         condition
         for condition in tensors.teacher_scores
         if metrics.get(f"selection/{condition.value}", torch.zeros(())).item() > 0.0
     }
+
+    num_tensors, num_elements, trainable_names = _trainable_summary(provider)
+    tied_groups = detect_tied_parameter_groups(provider)
 
     return RealStudentResult(
         sample_uid=str(record.get("sample_uid", "unknown")),
@@ -442,6 +512,12 @@ def run_real_student_record(
         grad_param_norm=grad_norm,
         grad_is_finite=grad_finite,
         consumed_conditions=consumed,
+        num_trainable_params=num_elements,
+        num_trainable_param_tensors=num_tensors,
+        trainable_param_names=trainable_names,
+        nonzero_grad_param_names=[name for name, _ in nonzero_grads],
+        lm_head_embed_tied=lm_head_embed_tied(tied_groups),
+        tied_parameter_names=tied_groups,
         metrics={key: float(value.item()) for key, value in metrics.items()},
     )
 
@@ -484,6 +560,250 @@ def run_real_student_smoke(
 
 
 # ---------------------------------------------------------------------------
+# Real optimizer-step smoke
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class RealMinTrainStep:
+    step: int
+    loss: float
+    loss_is_finite: bool
+    grad_norm: float
+    grad_is_finite: bool
+    param_delta_norm: float
+    consumed_conditions: set[Condition]
+
+
+@dataclass
+class RealMinTrainReport:
+    num_records: int
+    num_steps: int
+    learning_rate: float
+    tokenizer_hash_matches: bool
+    decoded_matches: bool
+    reencoded_matches: bool
+    require_decoded_match: bool
+    num_trainable_params: int
+    num_trainable_param_tensors: int
+    trainable_param_names: list[str] = field(default_factory=list)
+    nonzero_grad_param_names: list[str] = field(default_factory=list)
+    lm_head_embed_tied: bool = False
+    tied_parameter_names: list[list[str]] = field(default_factory=list)
+    steps: list[RealMinTrainStep] = field(default_factory=list)
+
+    @property
+    def all_loss_finite(self) -> bool:
+        return all(step.loss_is_finite for step in self.steps)
+
+    @property
+    def all_grads_finite(self) -> bool:
+        return all(step.grad_is_finite for step in self.steps)
+
+    @property
+    def every_step_updates_params(self) -> bool:
+        return all(step.param_delta_norm > 0.0 for step in self.steps)
+
+    @property
+    def consumed_conditions(self) -> set[Condition]:
+        consumed: set[Condition] = set()
+        for step in self.steps:
+            consumed |= step.consumed_conditions
+        return consumed
+
+    @property
+    def four_conditions_consumed(self) -> bool:
+        return set(FOUR_CONDITIONS).issubset(self.consumed_conditions)
+
+    @property
+    def loss_decreased(self) -> bool:
+        return bool(self.steps) and self.steps[-1].loss < self.steps[0].loss
+
+    @property
+    def passed(self) -> bool:
+        return (
+            self.num_records > 0
+            and self.num_steps > 0
+            and self.tokenizer_hash_matches
+            and (self.decoded_matches or not self.require_decoded_match)
+            and self.all_loss_finite
+            and self.all_grads_finite
+            and self.every_step_updates_params
+            and self.four_conditions_consumed
+        )
+
+
+@dataclass
+class _PreparedRecord:
+    record: Mapping[str, Any]
+    seq_len: int
+    vocab_floor: int
+    teacher_scores: dict[Condition, Any] | None = None
+    chunk_masks: dict[str, torch.Tensor] | None = None
+    response_mask: torch.Tensor | None = None
+    format_valid: torch.Tensor | None = None
+    device: torch.device | None = None
+
+
+def _params_grad_norm(params: Sequence[torch.Tensor]) -> tuple[float, bool]:
+    norms = []
+    finite = True
+    for param in params:
+        if param.grad is None:
+            continue
+        grad = param.grad.detach().float()
+        norms.append(grad.norm())
+        finite &= bool(torch.isfinite(grad).all().item())
+    if not norms:
+        return 0.0, finite
+    return float(torch.stack(norms).norm().item()), finite
+
+
+def run_real_student_min_train(
+    records: Sequence[Mapping[str, Any]],
+    provider: StudentLogitsProvider,
+    *,
+    num_steps: int = 3,
+    learning_rate: float = 1e-4,
+    router_config: RouterConfig = FOUR_CONDITION_ROUTER,
+    loss_config: FCOPDLossConfig | None = None,
+    require_decoded_match: bool = True,
+    device: torch.device | str = "cpu",
+) -> RealMinTrainReport:
+    """Run a few real optimizer steps and verify trainable parameters change.
+
+    Re-runs the teacher-forced forward each step (logits depend on the current
+    parameters), computes the FC-OPD loss against the recorded teacher scores,
+    backpropagates, and steps Adam over the trainable parameters. The recorded
+    offline tensors are device-moved once and reused.
+    """
+
+    if num_steps <= 0:
+        raise ValueError("num_steps must be positive")
+    if not records:
+        raise ValueError("no offline-score records were provided")
+    loss_config = loss_config or FCOPDLossConfig()
+
+    tokenizer_hash_matches = True
+    for record in records:
+        if provider.tokenizer_hash != str(record.get("tokenizer_hash", "")):
+            tokenizer_hash_matches = False
+    if not tokenizer_hash_matches:
+        raise ValueError("student tokenizer hash does not match an offline tokenizer_hash")
+
+    prepared = []
+    for record in records:
+        cpu_tensors = offline_record_to_tensors(record, device="cpu")
+        prepared.append(
+            _PreparedRecord(
+                record=record,
+                seq_len=cpu_tensors.seq_len,
+                vocab_floor=cpu_tensors.vocab_floor,
+            )
+        )
+
+    params = [param for _, param in provider.named_parameters()]
+    if not params:
+        raise ValueError("provider exposes no trainable parameters")
+    optimizer = torch.optim.Adam(params, lr=learning_rate)
+
+    num_tensors, num_elements, trainable_names = _trainable_summary(provider)
+    tied_groups = detect_tied_parameter_groups(provider)
+    report = RealMinTrainReport(
+        num_records=len(records),
+        num_steps=num_steps,
+        learning_rate=learning_rate,
+        tokenizer_hash_matches=tokenizer_hash_matches,
+        decoded_matches=True,
+        reencoded_matches=True,
+        require_decoded_match=require_decoded_match,
+        num_trainable_params=num_elements,
+        num_trainable_param_tensors=num_tensors,
+        trainable_param_names=trainable_names,
+        lm_head_embed_tied=lm_head_embed_tied(tied_groups),
+        tied_parameter_names=tied_groups,
+    )
+
+    for step in range(num_steps):
+        optimizer.zero_grad(set_to_none=True)
+        total_loss = torch.zeros((), dtype=torch.float32)
+        consumed: set[Condition] = set()
+
+        for prep in prepared:
+            output = provider.forward(prep.record)
+            logits = output.response_logits
+            if logits.ndim != 3 or logits.shape[0] != 1 or logits.shape[1] != prep.seq_len:
+                raise ValueError(
+                    f"student logits must be [1, {prep.seq_len}, V], got {tuple(logits.shape)}"
+                )
+            if step == 0:
+                report.decoded_matches &= output.decoded_matches
+                report.reencoded_matches &= output.reencoded_token_ids == output.used_token_ids
+                if require_decoded_match and not output.decoded_matches:
+                    raise ValueError("decoded response text does not match the offline record")
+
+            if prep.teacher_scores is None or prep.device != logits.device:
+                cpu_tensors = offline_record_to_tensors(prep.record, device="cpu")
+                prep.device = logits.device
+                prep.teacher_scores = teacher_scores_to_device(cpu_tensors.teacher_scores, logits.device)
+                prep.chunk_masks = {
+                    name: mask.to(logits.device) for name, mask in cpu_tensors.chunk_masks.items()
+                }
+                prep.response_mask = cpu_tensors.response_mask.to(logits.device)
+                prep.format_valid = cpu_tensors.format_valid.to(logits.device)
+
+            weights = route_condition_weights(
+                signals={},
+                chunk_masks=prep.chunk_masks,
+                router_config=router_config,
+                response_mask=prep.response_mask,
+                available_conditions=tuple(prep.teacher_scores),
+                format_valid=prep.format_valid,
+            )
+            loss, metrics = compute_fc_opd_loss(
+                logits,
+                prep.teacher_scores,
+                prep.chunk_masks,
+                weights,
+                prep.response_mask,
+                loss_config,
+            )
+            total_loss = total_loss.to(loss.device) + loss
+            consumed |= {
+                condition
+                for condition in prep.teacher_scores
+                if metrics.get(f"selection/{condition.value}", torch.zeros(())).item() > 0.0
+            }
+
+        loss_is_finite = bool(torch.isfinite(total_loss).all().item())
+        total_loss.backward()
+        grad_norm, grad_is_finite = _params_grad_norm(params)
+
+        snapshot = [param.detach().clone() for param in params]
+        optimizer.step()
+        delta = torch.stack(
+            [(param.detach() - old).float().norm() for param, old in zip(params, snapshot, strict=True)]
+        ).norm()
+
+        if step == 0:
+            report.nonzero_grad_param_names = [name for name, _ in _finite_nonzero_grads(provider)]
+
+        report.steps.append(
+            RealMinTrainStep(
+                step=step,
+                loss=float(total_loss.detach().float().item()),
+                loss_is_finite=loss_is_finite,
+                grad_norm=grad_norm,
+                grad_is_finite=grad_is_finite,
+                param_delta_norm=float(delta.item()),
+                consumed_conditions=consumed,
+            )
+        )
+
+    return report
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -505,6 +825,12 @@ def _result_to_json(result: RealStudentResult) -> dict[str, Any]:
         "grad_param_name": result.grad_param_name,
         "grad_param_norm": result.grad_param_norm,
         "grad_is_finite": result.grad_is_finite,
+        "num_trainable_params": result.num_trainable_params,
+        "num_trainable_param_tensors": result.num_trainable_param_tensors,
+        "trainable_param_names": result.trainable_param_names,
+        "nonzero_grad_param_names": result.nonzero_grad_param_names,
+        "lm_head_embed_tied": result.lm_head_embed_tied,
+        "tied_parameter_names": result.tied_parameter_names,
         "consumed_conditions": sorted(c.value for c in result.consumed_conditions),
         "four_conditions_consumed": result.four_conditions_consumed,
         "passed": result.passed,
@@ -574,6 +900,106 @@ def main(argv: Sequence[str] | None = None) -> int:
         print("FAIL: real student-logits smoke did not pass", file=sys.stderr)
         return 1
     print("PASS: real student-logits smoke is valid")
+    return 0
+
+
+def min_train_main(argv: Sequence[str] | None = None) -> int:
+    default_model = os.path.join(
+        os.environ.get("DTOPD_MODEL_ROOT", ""), "Qwen3-VL-4B-Instruct"
+    )
+    parser = argparse.ArgumentParser(
+        description="Real student optimizer-step smoke for the offline FC-OPD loss.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument("--scores", type=Path, required=True, help="offline-score JSONL path")
+    parser.add_argument("--model-path", default=default_model)
+    parser.add_argument("--limit", type=int, default=1)
+    parser.add_argument("--steps", type=int, default=3)
+    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--device", default="cuda")
+    parser.add_argument("--dtype", default="bfloat16", choices=tuple(_DTYPES))
+    parser.add_argument(
+        "--freeze-all-but-lm-head",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="keep only the LM head (and any tied embedding) trainable",
+    )
+    parser.add_argument("--max-prompt-length", type=int, default=None)
+    parser.add_argument("--max-response-tokens", type=int, default=None)
+    parser.add_argument(
+        "--allow-retokenize-mismatch",
+        action="store_true",
+        help="treat a decoded-text mismatch as a warning instead of a failure",
+    )
+    args = parser.parse_args(argv)
+
+    records = load_offline_score_records(args.scores)
+    if args.limit is not None:
+        records = records[: args.limit]
+    if not records:
+        print(f"FAIL: no records found in {args.scores}", file=sys.stderr)
+        return 1
+
+    config = RealStudentConfig(
+        model_path=args.model_path,
+        device=args.device,
+        dtype=args.dtype,
+        freeze_all_but_lm_head=args.freeze_all_but_lm_head,
+        max_prompt_length=args.max_prompt_length,
+        max_response_tokens=args.max_response_tokens,
+    )
+    provider = HFStudentProvider.load(config)
+
+    report = run_real_student_min_train(
+        records,
+        provider,
+        num_steps=args.steps,
+        learning_rate=args.lr,
+        require_decoded_match=not args.allow_retokenize_mismatch,
+    )
+
+    for step in report.steps:
+        print(
+            json.dumps(
+                {
+                    "step": step.step,
+                    "loss": step.loss,
+                    "grad_norm": step.grad_norm,
+                    "param_delta_norm": step.param_delta_norm,
+                    "consumed_conditions": sorted(c.value for c in step.consumed_conditions),
+                }
+            )
+        )
+
+    summary = {
+        "model_path": args.model_path,
+        "num_records": report.num_records,
+        "num_steps": report.num_steps,
+        "learning_rate": report.learning_rate,
+        "tokenizer_hash_matches": report.tokenizer_hash_matches,
+        "decoded_matches": report.decoded_matches,
+        "reencoded_matches": report.reencoded_matches,
+        "num_trainable_params": report.num_trainable_params,
+        "num_trainable_param_tensors": report.num_trainable_param_tensors,
+        "trainable_param_names": report.trainable_param_names,
+        "nonzero_grad_param_names": report.nonzero_grad_param_names,
+        "lm_head_embed_tied": report.lm_head_embed_tied,
+        "tied_parameter_names": report.tied_parameter_names,
+        "all_loss_finite": report.all_loss_finite,
+        "all_grads_finite": report.all_grads_finite,
+        "every_step_updates_params": report.every_step_updates_params,
+        "consumed_conditions": sorted(c.value for c in report.consumed_conditions),
+        "four_conditions_consumed": report.four_conditions_consumed,
+        "initial_loss": report.steps[0].loss,
+        "final_loss": report.steps[-1].loss,
+        "loss_decreased": report.loss_decreased,
+        "passed": report.passed,
+    }
+    print(json.dumps(summary, indent=2))
+    if not report.passed:
+        print("FAIL: real student optimizer-step smoke did not pass", file=sys.stderr)
+        return 1
+    print("PASS: real student optimizer-step smoke is valid")
     return 0
 
 

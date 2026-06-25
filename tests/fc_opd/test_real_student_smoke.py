@@ -17,7 +17,10 @@ from dual_track_opd.fc_opd.offline_scoring import (
 )
 from dual_track_opd.fc_opd.real_student_smoke import (
     StudentForwardOutput,
+    detect_tied_parameter_groups,
+    lm_head_embed_tied,
     response_logit_slice,
+    run_real_student_min_train,
     run_real_student_record,
     run_real_student_smoke,
     teacher_scores_to_device,
@@ -59,21 +62,30 @@ def _build_offline_payloads(num_samples: int = 2) -> list[dict]:
 class FakeStudentModel(nn.Module):
     """Tiny non-causal LM whose logits depend on real trainable parameters."""
 
-    def __init__(self, vocab_size: int, hidden: int = 8):
+    def __init__(self, vocab_size: int, hidden: int = 8, *, tie_weights: bool = False):
         super().__init__()
         torch.manual_seed(0)
-        self.embed = nn.Embedding(vocab_size, hidden)
-        self.lm_head = nn.Linear(hidden, vocab_size)
+        self.embed_tokens = nn.Embedding(vocab_size, hidden)
+        self.lm_head = nn.Linear(hidden, vocab_size, bias=False)
+        if tie_weights:
+            self.lm_head.weight = self.embed_tokens.weight
 
     def full_logits(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.lm_head(self.embed(input_ids))
+        return self.lm_head(self.embed_tokens(input_ids))
 
 
 class FakeStudentProvider:
     """CPU provider that mimics teacher-forced forward with a fake model."""
 
-    def __init__(self, vocab_size: int, tokenizer: ByteTokenizer, *, override_hash: str | None = None):
-        self.model = FakeStudentModel(vocab_size)
+    def __init__(
+        self,
+        vocab_size: int,
+        tokenizer: ByteTokenizer,
+        *,
+        override_hash: str | None = None,
+        tie_weights: bool = False,
+    ):
+        self.model = FakeStudentModel(vocab_size, tie_weights=tie_weights)
         self.tokenizer = tokenizer
         self._hash = override_hash or tokenizer_fingerprint(tokenizer)
         self.vocab_size = vocab_size
@@ -84,6 +96,9 @@ class FakeStudentProvider:
 
     def named_parameters(self):
         yield from self.model.named_parameters()
+
+    def all_named_parameters(self):
+        yield from self.model.named_parameters(remove_duplicate=False)
 
     def zero_grad(self) -> None:
         self.model.zero_grad(set_to_none=True)
@@ -279,3 +294,101 @@ def test_student_vocab_floor_is_checked(offline_payloads):
     provider = FakeStudentProvider(tensors.vocab_floor - 1, ByteTokenizer())
     with pytest.raises((ValueError, IndexError)):
         run_real_student_record(offline_payloads[0], provider)
+
+
+# --- parameter / tied-weight reporting -------------------------------------
+
+
+def test_result_reports_trainable_params_and_nonzero_grads(offline_payloads):
+    provider = _provider_for(offline_payloads)
+    result = run_real_student_record(offline_payloads[0], provider)
+    assert result.num_trainable_params > 0
+    assert result.num_trainable_param_tensors >= 1
+    assert "lm_head.weight" in result.trainable_param_names
+    assert result.nonzero_grad_param_names  # at least one param has a real grad
+
+
+def test_tied_weights_are_detected_and_reported(offline_payloads):
+    provider = _provider_for(offline_payloads, tie_weights=True)
+    result = run_real_student_record(offline_payloads[0], provider)
+    assert result.lm_head_embed_tied is True
+    assert result.tied_parameter_names
+    tied = result.tied_parameter_names[0]
+    assert any("lm_head" in name for name in tied)
+    assert any("embed" in name for name in tied)
+
+
+def test_untied_weights_report_no_tie(offline_payloads):
+    provider = _provider_for(offline_payloads, tie_weights=False)
+    result = run_real_student_record(offline_payloads[0], provider)
+    assert result.lm_head_embed_tied is False
+    assert result.tied_parameter_names == []
+
+
+def test_detect_tied_helpers_directly(offline_payloads):
+    provider = _provider_for(offline_payloads, tie_weights=True)
+    groups = detect_tied_parameter_groups(provider)
+    assert groups
+    assert lm_head_embed_tied(groups) is True
+    assert lm_head_embed_tied([["a.weight", "b.weight"]]) is False
+
+
+# --- real optimizer-step (min-train) smoke ---------------------------------
+
+
+def test_min_train_changes_trainable_parameters(offline_payloads):
+    provider = _provider_for(offline_payloads)
+    report = run_real_student_min_train(offline_payloads, provider, num_steps=3, learning_rate=0.1)
+    assert report.passed
+    assert report.num_steps == 3
+    assert report.tokenizer_hash_matches
+    assert report.decoded_matches
+    for step in report.steps:
+        assert step.loss_is_finite
+        assert step.grad_is_finite
+        assert step.grad_norm > 0.0
+        assert step.param_delta_norm > 0.0
+        assert step.consumed_conditions == set(FOUR_CONDITIONS)
+    assert report.every_step_updates_params
+    assert report.four_conditions_consumed
+
+
+def test_min_train_actually_moves_a_parameter(offline_payloads):
+    provider = _provider_for(offline_payloads)
+    before = next(p for n, p in provider.named_parameters() if n == "lm_head.weight").detach().clone()
+    run_real_student_min_train(offline_payloads, provider, num_steps=2, learning_rate=0.1)
+    after = next(p for n, p in provider.named_parameters() if n == "lm_head.weight").detach()
+    assert not torch.allclose(before, after)
+
+
+def test_min_train_reports_tied_status(offline_payloads):
+    provider = _provider_for(offline_payloads, tie_weights=True)
+    report = run_real_student_min_train(offline_payloads, provider, num_steps=1, learning_rate=0.1)
+    assert report.lm_head_embed_tied is True
+    assert report.tied_parameter_names
+    assert report.nonzero_grad_param_names
+
+
+def test_min_train_rejects_tokenizer_mismatch(offline_payloads):
+    provider = _provider_for(offline_payloads, override_hash="wrong-hash")
+    with pytest.raises(ValueError, match="tokenizer hash does not match"):
+        run_real_student_min_train(offline_payloads, provider, num_steps=1)
+
+
+def test_min_train_requires_positive_steps(offline_payloads):
+    provider = _provider_for(offline_payloads)
+    with pytest.raises(ValueError, match="num_steps must be positive"):
+        run_real_student_min_train(offline_payloads, provider, num_steps=0)
+
+
+def test_min_train_decoded_mismatch_can_be_relaxed(offline_payloads):
+    provider = _provider_for(offline_payloads)
+    payload = dict(offline_payloads[0])
+    payload["response_text"] = payload["response_text"] + " (edited)"
+    with pytest.raises(ValueError, match="decoded response text does not match"):
+        run_real_student_min_train([payload], provider, num_steps=1)
+    relaxed = run_real_student_min_train(
+        [payload], provider, num_steps=1, require_decoded_match=False
+    )
+    assert relaxed.steps[0].loss_is_finite
+    assert not relaxed.decoded_matches
