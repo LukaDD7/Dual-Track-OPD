@@ -1,0 +1,114 @@
+# FC-OPD Offline Scoring
+
+This stage turns a prepared Vision-OPD-style dataset plus student responses into
+a self-describing **offline-score dataset**: for every student response it records
+the teacher's top-k distribution under each FC-OPD condition (`full`, `blur`,
+`free`, `task`), the decomposed condition signals, and the chunk spans of the
+structured response.
+
+It is deliberately **model-free**:
+
+- The student model is **never** loaded.
+- The teacher runs as a separate service (`dual_track_opd.fc_opd.teacher_service`);
+  this stage only talks to it over HTTP.
+- `third_party/verl` is **not** modified or imported.
+
+All heavy lifting reuses existing primitives:
+`ConditionInputs`, `TeacherClient` / `score_teacher_conditions`,
+`compute_condition_signals`, and the chunk parser (`parse_response_chunks`).
+
+## Inputs
+
+1. **Vision-OPD dataset** — a JSON array or JSONL file. Each record is read with
+   flexible field names:
+   - image(s): `images` (list) / `image` / `image_path`
+   - question: `query` / `question` / `prompt`
+   - answer (optional): `response` / `answer` / `label`
+   - identifier (optional): `question_id` / `id` / `index`
+   - optional `condition_inputs`, `free_caption`, `task_evidence`
+2. **Student responses** — required only in `--mode student`: a JSONL keyed by
+   `sample_uid` / `question_id` / `index`. Each entry needs `response_text` and
+   optionally `response_token_ids` (otherwise the text is re-tokenized).
+   In `--mode protocol_smoke` the structured response is synthesised instead.
+3. **Teacher service URL** — default `http://127.0.0.1:18080`.
+4. **Condition configuration** — `--conditions full,blur,free,task`, `--blur-sigma`.
+
+## Tokenizers
+
+The stage needs a tokenizer only to encode/decode token IDs and to fingerprint
+the vocabulary — not the student model.
+
+- `--tokenizer byte` (default): the bundled `ByteTokenizer`, a deterministic
+  byte-level tokenizer with an exact decode round-trip. No weights required.
+- `--tokenizer hf:<name-or-path>`: a Hugging Face `AutoTokenizer` (loads only the
+  tokenizer, never the model). The tokenizer fingerprint must match the teacher's
+  `tokenizer_hash`.
+
+## Output
+
+Written under `$DTOPD_OUTPUT_ROOT/fc_opd/offline_scores/` (override with
+`--output-dir`) as JSONL, and optionally Parquet (`--parquet`). Each record:
+
+| field | description |
+| --- | --- |
+| `sample_uid` | `"{source_dataset}:{question_id}"` |
+| `source_dataset`, `source_index`, `question_id` | provenance |
+| `question` | the resolved query |
+| `image_paths` | resolved full-image paths |
+| `condition_inputs` | full/degraded image paths + blur transform, caption, evidence |
+| `response_text`, `response_token_ids` | student response |
+| `chunk_spans` | per-chunk token spans + `format_valid`, `errors`, `token_counts` |
+| `tokenizer_hash` | student tokenizer fingerprint |
+| `protocol_version` | teacher protocol version |
+| `condition_scores[cond]` | `token_ids` `[T,K]`, `log_probs` `[T,K]`, `tail_log_prob` `[T]`, `entropy` `[T]` |
+| `condition_signals` | `visual_detail` (full vs blur), `task_extraction` (task vs free), each `[T]` |
+| `metadata` | `top_k`, `blur_sigma`, `teacher_model_id`, `created_at`, `response_mode` |
+
+## Smoke run
+
+A self-contained smoke run scores the first 16 synthetic VStar-style samples
+against an **in-process** synthetic teacher (top-k 32). It needs no GPU, no
+weights, and no external service:
+
+```bash
+bash scripts/hpc/run_fc_opd_offline_smoke.sh
+```
+
+Equivalently:
+
+```bash
+python scripts/hpc/build_fc_opd_offline_scores.py \
+    --self-contained-smoke --limit 16 \
+    --source-dataset vstar --mode protocol_smoke \
+    --tokenizer byte --smoke-top-k 32 \
+    --output-dir "$TMPDIR/fc_opd_offline_smoke"
+```
+
+The run verifies that every sample has all four conditions and that each
+condition tensor has shape `[T, 32]` before exiting.
+
+## Real run
+
+Start the teacher service (see `docs/fc_opd_teacher_service.md`), then:
+
+```bash
+python scripts/hpc/build_fc_opd_offline_scores.py \
+    --dataset "$DTOPD_DATA_ROOT/vstar_eval.json" \
+    --mode student \
+    --student-responses "$DTOPD_OUTPUT_ROOT/vstar_student.jsonl" \
+    --teacher-url http://127.0.0.1:18080 \
+    --tokenizer hf:Qwen/Qwen3-VL-8B-Instruct \
+    --source-dataset vstar \
+    --conditions full,blur,free,task --blur-sigma 2.0 \
+    --verify-top-k 32 --parquet
+```
+
+The blurred-image path for each sample is derived deterministically
+(`<stem>.gaussian_blur_s<sigma><ext>`) and only its transform metadata is
+recorded — this stage never mutates source images.
+
+## Tests
+
+`tests/fc_opd/test_offline_scoring.py` exercises the full pipeline against the
+synthetic teacher: four-condition `[T,32]` shapes, chunk-span validity, student
+vs protocol-smoke modes, and JSONL round-tripping.

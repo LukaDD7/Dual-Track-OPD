@@ -3,6 +3,20 @@
 from .chunk_parser import ChunkMasks, parse_response_chunks
 from .conditions import Condition, ConditionInputs, build_condition_inputs
 from .loss import FCOPDLossConfig, compute_fc_opd_loss, sparse_forward_kl
+from .offline_scoring import (
+    ByteTokenizer,
+    OfflineScoreRecord,
+    OfflineScoringConfig,
+    OfflineScoringResult,
+    build_condition_inputs_for_record,
+    default_output_dir,
+    iter_offline_scores,
+    load_student_responses,
+    load_vision_opd_records,
+    make_smoke_dataset,
+    score_record,
+    write_offline_scores,
+)
 from .router import RouterConfig, route_condition_weights
 from .signal_decomposer import TeacherTopK, compute_condition_signals, jensen_shannon_topk
 from .teacher_client import TeacherClient, score_teacher_conditions
@@ -15,10 +29,14 @@ from .teacher_protocol import (
 from .teacher_prompts import render_teacher_prompt
 
 __all__ = [
+    "ByteTokenizer",
     "ChunkMasks",
     "Condition",
     "ConditionInputs",
     "FCOPDLossConfig",
+    "OfflineScoreRecord",
+    "OfflineScoringConfig",
+    "OfflineScoringResult",
     "RouterConfig",
     "TeacherTopK",
     "TeacherClient",
@@ -26,13 +44,21 @@ __all__ = [
     "TeacherScoreRequest",
     "TeacherScoreResponse",
     "build_condition_inputs",
+    "build_condition_inputs_for_record",
     "compute_condition_signals",
     "compute_fc_opd_loss",
+    "default_output_dir",
+    "iter_offline_scores",
     "jensen_shannon_topk",
+    "load_student_responses",
+    "load_vision_opd_records",
+    "make_smoke_dataset",
     "parse_response_chunks",
     "render_teacher_prompt",
     "route_condition_weights",
+    "score_record",
     "score_teacher_conditions",
     "sparse_forward_kl",
     "tokenizer_fingerprint",
+    "write_offline_scores",
 ]
