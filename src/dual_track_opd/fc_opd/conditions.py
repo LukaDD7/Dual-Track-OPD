@@ -35,6 +35,23 @@ class ConditionInputs:
     verified_facts: str | None = None
     verified_facts_source: str | None = None
 
+    def validate(self, *, require_paths: bool = False) -> None:
+        if not self.full_image.path.strip() or not self.degraded_image.path.strip():
+            raise ValueError("condition image paths must be non-empty")
+        if not self.free_caption.strip() or not self.task_evidence.strip():
+            raise ValueError("caption and task evidence must be non-empty")
+        transform = self.degraded_image.transform
+        if not isinstance(transform, Mapping) or transform.get("type") != "gaussian_blur":
+            raise ValueError("degraded image must record a gaussian_blur transform")
+        sigma = transform.get("sigma")
+        if not isinstance(sigma, int | float) or sigma <= 0:
+            raise ValueError("gaussian_blur sigma must be positive")
+        _validate_verified_facts(self.verified_facts, self.verified_facts_source)
+        if require_paths:
+            for path in (self.full_image.path, self.degraded_image.path):
+                if not Path(path).is_file():
+                    raise FileNotFoundError(f"condition image path does not exist: {path}")
+
     def available_conditions(self) -> tuple[Condition, ...]:
         conditions = [Condition.FULL, Condition.BLUR, Condition.FREE, Condition.TASK]
         if self.verified_facts is not None:
@@ -130,7 +147,7 @@ def build_condition_inputs(
     facts_source = _optional_string(raw.get("verified_facts_source"), "verified_facts_source")
     _validate_verified_facts(facts, facts_source)
 
-    return ConditionInputs(
+    inputs = ConditionInputs(
         full_image=ImageInput(path=full_path),
         degraded_image=ImageInput(path=degraded_path, transform=dict(transform)),
         free_caption=_nonempty_string(raw.get("free_caption"), "free_caption"),
@@ -138,3 +155,5 @@ def build_condition_inputs(
         verified_facts=facts,
         verified_facts_source=facts_source,
     )
+    inputs.validate(require_paths=require_paths)
+    return inputs
