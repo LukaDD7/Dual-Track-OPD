@@ -4,6 +4,8 @@ from .chunk_parser import ChunkMasks, parse_response_chunks
 from .conditions import Condition, ConditionInputs, build_condition_inputs
 from .loss import FCOPDLossConfig, compute_fc_opd_loss, sparse_forward_kl
 from .offline_loss import (
+    MinTrainReport,
+    MinTrainStep,
     OfflineLossResult,
     OfflineLossSmokeReport,
     OfflineRecordTensors,
@@ -12,6 +14,7 @@ from .offline_loss import (
     offline_record_to_tensors,
     run_offline_loss_backward,
     run_offline_loss_smoke,
+    run_offline_min_train_smoke,
 )
 from .offline_scoring import (
     ByteTokenizer,
@@ -44,6 +47,8 @@ __all__ = [
     "Condition",
     "ConditionInputs",
     "FCOPDLossConfig",
+    "MinTrainReport",
+    "MinTrainStep",
     "OfflineLossResult",
     "OfflineLossSmokeReport",
     "OfflineRecordTensors",
@@ -72,6 +77,7 @@ __all__ = [
     "parse_response_chunks",
     "run_offline_loss_backward",
     "run_offline_loss_smoke",
+    "run_offline_min_train_smoke",
     "render_teacher_prompt",
     "route_condition_weights",
     "score_record",

@@ -140,6 +140,33 @@ python scripts/hpc/run_fc_opd_offline_loss_smoke.py --scores <offline_scores.jso
 
 The command prints a JSON report and exits non-zero if any check fails.
 
+## Minimal optimizer-update smoke
+
+`run_offline_min_train_smoke` (also in `dual_track_opd.fc_opd.offline_loss`) takes
+the loss/backward smoke one step further: it attaches one synthetic
+`student_logits` parameter per record and runs **Adam** for a few steps (default
+10) against the recorded teacher scores. Router weights are fixed (they do not
+depend on the student), so the loss is purely a function of the student logits
+and the update should reduce it.
+
+Per step it reports `loss`, `grad_norm`, `logits_delta_norm`, and
+`consumed_conditions`, and verifies: finite loss and gradients every step, that
+every `optimizer.step()` changes the logits (`logits_delta_norm > 0`), and that
+all four conditions are consumed.
+
+```bash
+# Against the real-teacher VStar smoke output on HPC (10 Adam steps):
+bash scripts/hpc/run_fc_opd_min_train_smoke.sh \
+    "$DTOPD_OUTPUT_ROOT/fc_opd/offline_scores/vstar16_real_teacher/vstar_offline_scores.jsonl"
+
+# Or directly, with a custom step count:
+python scripts/hpc/run_fc_opd_min_train_smoke.py --scores <offline_scores.jsonl> --steps 10
+```
+
+The command prints one JSON object per step plus a JSON summary, and exits
+non-zero if any check fails. It loads no student model and never imports
+`third_party/verl`.
+
 ## Tests
 
 `tests/fc_opd/test_offline_scoring.py` exercises the scoring pipeline against the
@@ -149,3 +176,7 @@ vs protocol-smoke modes, and JSONL round-tripping.
 `tests/fc_opd/test_offline_loss.py` exercises the loss/backward path on synthetic
 offline-score fixtures: tensor/mask alignment, finite loss, gradient presence on
 student logits only, four-condition consumption, and JSONL round-tripping.
+
+`tests/fc_opd/test_offline_min_train.py` exercises the Adam optimizer-update
+smoke: finite loss/gradients every step, logit updates every step, loss
+decreasing over training, and four-condition consumption.

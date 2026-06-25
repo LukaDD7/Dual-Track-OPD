@@ -342,6 +342,242 @@ def run_offline_loss_smoke(
     )
 
 
+# ---------------------------------------------------------------------------
+# Minimal optimizer-update smoke
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class MinTrainStep:
+    step: int
+    loss: float
+    loss_is_finite: bool
+    grad_norm: float
+    grad_is_finite: bool
+    logits_delta_norm: float
+    consumed_conditions: set[Condition]
+
+
+@dataclass
+class MinTrainReport:
+    num_records: int
+    num_steps: int
+    learning_rate: float
+    steps: list[MinTrainStep] = field(default_factory=list)
+
+    @property
+    def all_loss_finite(self) -> bool:
+        return all(step.loss_is_finite for step in self.steps)
+
+    @property
+    def all_grads_finite(self) -> bool:
+        return all(step.grad_is_finite for step in self.steps)
+
+    @property
+    def every_step_updates_logits(self) -> bool:
+        return all(step.logits_delta_norm > 0.0 for step in self.steps)
+
+    @property
+    def consumed_conditions(self) -> set[Condition]:
+        consumed: set[Condition] = set()
+        for step in self.steps:
+            consumed |= step.consumed_conditions
+        return consumed
+
+    @property
+    def four_conditions_consumed(self) -> bool:
+        return set(FOUR_CONDITIONS).issubset(self.consumed_conditions)
+
+    @property
+    def loss_decreased(self) -> bool:
+        return bool(self.steps) and self.steps[-1].loss < self.steps[0].loss
+
+    @property
+    def passed(self) -> bool:
+        return (
+            self.num_records > 0
+            and self.num_steps > 0
+            and self.all_loss_finite
+            and self.all_grads_finite
+            and self.every_step_updates_logits
+            and self.four_conditions_consumed
+        )
+
+
+def _global_grad_norm(params: Sequence[torch.Tensor]) -> tuple[float, bool]:
+    norms = []
+    finite = True
+    for param in params:
+        if param.grad is None:
+            continue
+        norms.append(param.grad.detach().float().norm())
+        finite &= bool(torch.isfinite(param.grad).all().item())
+    if not norms:
+        return 0.0, finite
+    return float(torch.stack(norms).norm().item()), finite
+
+
+def run_offline_min_train_smoke(
+    records: Iterable[Mapping[str, Any]],
+    *,
+    num_steps: int = 10,
+    learning_rate: float = 0.05,
+    router_config: RouterConfig = FOUR_CONDITION_ROUTER,
+    loss_config: FCOPDLossConfig | None = None,
+    student_vocab_size: int | None = None,
+    seed: int = 0,
+    device: torch.device | str = "cpu",
+) -> MinTrainReport:
+    """Run a minimal Adam optimizer-update smoke over offline-score records.
+
+    Each record gets its own synthetic ``student_logits`` parameter; a single
+    Adam optimizer steps them against the recorded teacher scores. Router weights
+    are fixed (they do not depend on the student), so the per-token loss is purely
+    a function of the student logits and the update should reduce it.
+    """
+
+    if num_steps <= 0:
+        raise ValueError("num_steps must be positive")
+    device = torch.device(device)
+    loss_config = loss_config or FCOPDLossConfig()
+
+    tensors_list = [offline_record_to_tensors(record, device=device) for record in records]
+    if not tensors_list:
+        raise ValueError("no offline-score records were provided")
+
+    params: list[torch.Tensor] = []
+    weights_list: list[dict[Condition, torch.Tensor]] = []
+    for index, tensors in enumerate(tensors_list):
+        vocab_size = student_vocab_size if student_vocab_size is not None else tensors.vocab_floor
+        if vocab_size < tensors.vocab_floor:
+            raise ValueError("student_vocab_size is smaller than the largest teacher token id")
+        params.append(make_student_logits(tensors.seq_len, vocab_size, seed=seed + index, device=device))
+        weights_list.append(
+            route_condition_weights(
+                signals={},
+                chunk_masks=tensors.chunk_masks,
+                router_config=router_config,
+                response_mask=tensors.response_mask,
+                available_conditions=tuple(tensors.teacher_scores),
+                format_valid=tensors.format_valid,
+            )
+        )
+
+    optimizer = torch.optim.Adam(params, lr=learning_rate)
+    report = MinTrainReport(
+        num_records=len(tensors_list), num_steps=num_steps, learning_rate=learning_rate
+    )
+
+    for step in range(num_steps):
+        optimizer.zero_grad(set_to_none=True)
+        total_loss = torch.zeros((), dtype=torch.float32, device=device)
+        consumed: set[Condition] = set()
+        for tensors, logits, weights in zip(tensors_list, params, weights_list, strict=True):
+            loss, metrics = compute_fc_opd_loss(
+                logits,
+                tensors.teacher_scores,
+                tensors.chunk_masks,
+                weights,
+                tensors.response_mask,
+                loss_config,
+            )
+            total_loss = total_loss + loss
+            consumed |= {
+                condition
+                for condition in tensors.teacher_scores
+                if metrics.get(f"selection/{condition.value}", torch.zeros(())).item() > 0.0
+            }
+
+        loss_is_finite = bool(torch.isfinite(total_loss).all().item())
+        total_loss.backward()
+        grad_norm, grad_is_finite = _global_grad_norm(params)
+
+        snapshot = [param.detach().clone() for param in params]
+        optimizer.step()
+        delta = torch.stack(
+            [(param.detach() - old).float().norm() for param, old in zip(params, snapshot, strict=True)]
+        ).norm()
+
+        report.steps.append(
+            MinTrainStep(
+                step=step,
+                loss=float(total_loss.detach().item()),
+                loss_is_finite=loss_is_finite,
+                grad_norm=grad_norm,
+                grad_is_finite=grad_is_finite,
+                logits_delta_norm=float(delta.item()),
+                consumed_conditions=consumed,
+            )
+        )
+
+    return report
+
+
+def min_train_main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        description="Minimal Adam optimizer-update smoke for offline FC-OPD loss.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument("--scores", type=Path, required=True, help="offline-score JSONL path")
+    parser.add_argument("--limit", type=int, default=None, help="only use the first N records")
+    parser.add_argument("--steps", type=int, default=10)
+    parser.add_argument("--lr", type=float, default=0.05)
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--device", default="cpu")
+    parser.add_argument("--student-vocab-size", type=int, default=None)
+    args = parser.parse_args(argv)
+
+    records = load_offline_score_records(args.scores)
+    if args.limit is not None:
+        records = records[: args.limit]
+    if not records:
+        print(f"FAIL: no records found in {args.scores}", file=sys.stderr)
+        return 1
+
+    report = run_offline_min_train_smoke(
+        records,
+        num_steps=args.steps,
+        learning_rate=args.lr,
+        student_vocab_size=args.student_vocab_size,
+        seed=args.seed,
+        device=args.device,
+    )
+
+    for step in report.steps:
+        print(
+            json.dumps(
+                {
+                    "step": step.step,
+                    "loss": step.loss,
+                    "grad_norm": step.grad_norm,
+                    "logits_delta_norm": step.logits_delta_norm,
+                    "consumed_conditions": sorted(c.value for c in step.consumed_conditions),
+                }
+            )
+        )
+
+    summary = {
+        "num_records": report.num_records,
+        "num_steps": report.num_steps,
+        "learning_rate": report.learning_rate,
+        "all_loss_finite": report.all_loss_finite,
+        "all_grads_finite": report.all_grads_finite,
+        "every_step_updates_logits": report.every_step_updates_logits,
+        "four_conditions_consumed": report.four_conditions_consumed,
+        "consumed_conditions": sorted(c.value for c in report.consumed_conditions),
+        "initial_loss": report.steps[0].loss,
+        "final_loss": report.steps[-1].loss,
+        "loss_decreased": report.loss_decreased,
+        "passed": report.passed,
+    }
+    print(json.dumps(summary, indent=2))
+    if not report.passed:
+        print("FAIL: offline min-train smoke did not pass", file=sys.stderr)
+        return 1
+    print("PASS: offline min-train smoke is valid")
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--scores", type=Path, required=True, help="offline-score JSONL path")
