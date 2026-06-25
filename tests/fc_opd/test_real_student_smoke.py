@@ -1,0 +1,200 @@
+from contextlib import ExitStack
+
+import pytest
+import torch
+import torch.nn as nn
+
+from dual_track_opd.fc_opd.conditions import Condition
+from dual_track_opd.fc_opd.offline_loss import (
+    FOUR_CONDITIONS,
+    offline_record_to_tensors,
+)
+from dual_track_opd.fc_opd.offline_scoring import (
+    ByteTokenizer,
+    OfflineScoringConfig,
+    iter_offline_scores,
+    make_smoke_dataset,
+)
+from dual_track_opd.fc_opd.real_student_smoke import (
+    StudentForwardOutput,
+    response_logit_slice,
+    run_real_student_record,
+    run_real_student_smoke,
+)
+from dual_track_opd.fc_opd.teacher_client import TeacherClient
+from dual_track_opd.fc_opd.teacher_protocol import tokenizer_fingerprint
+from dual_track_opd.fc_opd.teacher_scorer import SyntheticTeacherScorer
+from dual_track_opd.fc_opd.teacher_service import running_teacher_server
+
+TOP_K = 32
+FAKE_PROMPT_LENGTH = 4
+
+
+def _build_offline_payloads(num_samples: int = 2) -> list[dict]:
+    tokenizer = ByteTokenizer()
+    scorer = SyntheticTeacherScorer(
+        vocab_size=320, top_k=TOP_K, tokenizer_hash=tokenizer_fingerprint(tokenizer)
+    )
+    with ExitStack() as stack:
+        server = stack.enter_context(running_teacher_server(scorer))
+        host, port = server.server_address
+        client = TeacherClient(
+            f"http://{host}:{port}", expected_tokenizer_hash=tokenizer_fingerprint(tokenizer)
+        )
+        config = OfflineScoringConfig(source_dataset="vstar", conditions=FOUR_CONDITIONS)
+        scored = list(
+            iter_offline_scores(
+                make_smoke_dataset(num_samples),
+                config=config,
+                tokenizer=tokenizer,
+                teacher_client=client,
+                mode="protocol_smoke",
+            )
+        )
+    return [record.payload for record in scored]
+
+
+class FakeStudentModel(nn.Module):
+    """Tiny non-causal LM whose logits depend on real trainable parameters."""
+
+    def __init__(self, vocab_size: int, hidden: int = 8):
+        super().__init__()
+        torch.manual_seed(0)
+        self.embed = nn.Embedding(vocab_size, hidden)
+        self.lm_head = nn.Linear(hidden, vocab_size)
+
+    def full_logits(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.lm_head(self.embed(input_ids))
+
+
+class FakeStudentProvider:
+    """CPU provider that mimics teacher-forced forward with a fake model."""
+
+    def __init__(self, vocab_size: int, tokenizer: ByteTokenizer, *, override_hash: str | None = None):
+        self.model = FakeStudentModel(vocab_size)
+        self.tokenizer = tokenizer
+        self._hash = override_hash or tokenizer_fingerprint(tokenizer)
+        self.vocab_size = vocab_size
+
+    @property
+    def tokenizer_hash(self) -> str:
+        return self._hash
+
+    def named_parameters(self):
+        yield from self.model.named_parameters()
+
+    def zero_grad(self) -> None:
+        self.model.zero_grad(set_to_none=True)
+
+    def forward(self, record):
+        response_ids = tuple(int(item) for item in record["response_token_ids"])
+        response_text = str(record["response_text"])
+        prompt_ids = torch.zeros((1, FAKE_PROMPT_LENGTH), dtype=torch.long)
+        response_tensor = torch.tensor([response_ids], dtype=torch.long)
+        full_ids = torch.cat([prompt_ids, response_tensor], dim=1)
+        full_logits = self.model.full_logits(full_ids)
+        response_logits = response_logit_slice(full_logits, FAKE_PROMPT_LENGTH, len(response_ids))
+        decoded = self.tokenizer.decode(list(response_ids))
+        reencoded = tuple(int(i) for i in self.tokenizer.encode(response_text))
+        return StudentForwardOutput(
+            response_logits=response_logits,
+            prompt_length=FAKE_PROMPT_LENGTH,
+            full_length=int(full_ids.shape[1]),
+            used_token_ids=response_ids,
+            reencoded_token_ids=reencoded,
+            decoded_text=decoded,
+            decoded_matches=(decoded == response_text),
+        )
+
+
+@pytest.fixture(scope="module")
+def offline_payloads() -> list[dict]:
+    return _build_offline_payloads(2)
+
+
+def _provider_for(payloads, **kwargs) -> FakeStudentProvider:
+    vocab = max(offline_record_to_tensors(p).vocab_floor for p in payloads)
+    return FakeStudentProvider(vocab, ByteTokenizer(), **kwargs)
+
+
+def test_response_logit_slice_picks_next_token_positions():
+    seq_len, vocab = 10, 3
+    full = torch.arange(seq_len, dtype=torch.float32).reshape(1, seq_len, 1).expand(1, seq_len, vocab)
+    sliced = response_logit_slice(full, prompt_length=4, num_response_tokens=5)
+    assert sliced.shape == (1, 5, vocab)
+    # Positions 3..7 predict response tokens at absolute positions 4..8.
+    assert sliced[0, :, 0].tolist() == [3.0, 4.0, 5.0, 6.0, 7.0]
+
+
+def test_response_logit_slice_rejects_out_of_range():
+    full = torch.zeros((1, 5, 2))
+    with pytest.raises(ValueError, match="exceeds sequence length"):
+        response_logit_slice(full, prompt_length=3, num_response_tokens=5)
+
+
+def test_real_student_record_backward_reaches_fake_parameter(offline_payloads):
+    provider = _provider_for(offline_payloads)
+    result = run_real_student_record(offline_payloads[0], provider)
+    assert result.passed
+    assert result.tokenizer_hash_matches
+    assert result.seq_len == result.num_response_tokens
+    assert result.logits_shape[0] == 1 and result.logits_shape[1] == result.seq_len
+    assert result.loss_is_finite
+    assert result.backward_succeeded
+    assert result.grad_param_name is not None
+    assert result.grad_param_norm > 0.0
+    assert result.grad_is_finite
+    assert result.consumed_conditions == set(FOUR_CONDITIONS)
+
+
+def test_named_parameter_actually_receives_grad(offline_payloads):
+    provider = _provider_for(offline_payloads)
+    run_real_student_record(offline_payloads[0], provider)
+    grads = {name: p.grad for name, p in provider.named_parameters()}
+    assert grads["lm_head.weight"] is not None
+    assert torch.isfinite(grads["lm_head.weight"]).all()
+    assert grads["lm_head.weight"].float().norm() > 0.0
+
+
+def test_tokenizer_hash_mismatch_raises(offline_payloads):
+    provider = _provider_for(offline_payloads, override_hash="not-the-offline-hash")
+    with pytest.raises(ValueError, match="tokenizer hash does not match"):
+        run_real_student_record(offline_payloads[0], provider)
+
+
+def test_response_length_mismatch_raises(offline_payloads):
+    provider = _provider_for(offline_payloads)
+    payload = dict(offline_payloads[0])
+    payload["response_token_ids"] = list(payload["response_token_ids"]) + [0]
+    with pytest.raises(ValueError):
+        run_real_student_record(payload, provider)
+
+
+def test_decoded_mismatch_is_rejected_but_can_be_relaxed(offline_payloads):
+    provider = _provider_for(offline_payloads)
+    payload = dict(offline_payloads[0])
+    payload["response_text"] = payload["response_text"] + " (edited)"
+
+    with pytest.raises(ValueError, match="decoded response text does not match"):
+        run_real_student_record(payload, provider)
+
+    relaxed = run_real_student_record(payload, provider, require_decoded_match=False)
+    assert relaxed.loss_is_finite
+    assert relaxed.backward_succeeded
+    assert not relaxed.decoded_matches
+
+
+def test_smoke_report_passes_over_all_records(offline_payloads):
+    provider = _provider_for(offline_payloads)
+    report = run_real_student_smoke(offline_payloads, provider)
+    assert report.num_records == len(offline_payloads)
+    assert report.passed
+    assert all(r.four_conditions_consumed for r in report.results)
+
+
+def test_student_vocab_floor_is_checked(offline_payloads):
+    # A provider whose model vocab is too small for the teacher token ids.
+    tensors = offline_record_to_tensors(offline_payloads[0])
+    provider = FakeStudentProvider(tensors.vocab_floor - 1, ByteTokenizer())
+    with pytest.raises((ValueError, IndexError)):
+        run_real_student_record(offline_payloads[0], provider)
