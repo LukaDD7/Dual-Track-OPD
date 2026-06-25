@@ -19,7 +19,7 @@ import argparse
 import json
 import os
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Protocol, Sequence
 
@@ -100,6 +100,31 @@ def condition_inputs_from_record(record: Mapping[str, Any]) -> ConditionInputs:
     )
     inputs.validate()
     return inputs
+
+
+def teacher_scores_to_device(
+    teacher_scores: Mapping[Condition, Any],
+    device: torch.device | str,
+) -> dict[Condition, Any]:
+    """Move every ``TeacherTopK`` tensor field onto ``device``.
+
+    Uses ``dataclasses.replace`` so the ``TeacherTopK`` type is preserved. The
+    optional ``tail_log_prob`` / ``entropy`` fields are moved only when present.
+    """
+
+    device = torch.device(device)
+    moved: dict[Condition, Any] = {}
+    for condition, scores in teacher_scores.items():
+        moved[condition] = replace(
+            scores,
+            token_ids=scores.token_ids.to(device),
+            log_probs=scores.log_probs.to(device),
+            tail_log_prob=(
+                None if scores.tail_log_prob is None else scores.tail_log_prob.to(device)
+            ),
+            entropy=None if scores.entropy is None else scores.entropy.to(device),
+        )
+    return moved
 
 
 # ---------------------------------------------------------------------------
@@ -358,20 +383,29 @@ def run_real_student_record(
     if require_decoded_match and not output.decoded_matches:
         raise ValueError("decoded response text does not match the offline record")
 
+    # Real student logits can live on a different device (e.g. cuda) than the
+    # CPU-built offline teacher tensors. Move every loss-side tensor onto the
+    # student logits device so compute_fc_opd_loss stays single-device.
+    target_device = logits.device
+    teacher_scores = teacher_scores_to_device(tensors.teacher_scores, target_device)
+    chunk_masks = {name: mask.to(target_device) for name, mask in tensors.chunk_masks.items()}
+    response_mask = tensors.response_mask.to(target_device)
+    format_valid = tensors.format_valid.to(target_device)
+
     weights = route_condition_weights(
         signals={},
-        chunk_masks=tensors.chunk_masks,
+        chunk_masks=chunk_masks,
         router_config=router_config,
-        response_mask=tensors.response_mask,
-        available_conditions=tuple(tensors.teacher_scores),
-        format_valid=tensors.format_valid,
+        response_mask=response_mask,
+        available_conditions=tuple(teacher_scores),
+        format_valid=format_valid,
     )
     loss, metrics = compute_fc_opd_loss(
         logits,
-        tensors.teacher_scores,
-        tensors.chunk_masks,
+        teacher_scores,
+        chunk_masks,
         weights,
-        tensors.response_mask,
+        response_mask,
         loss_config or FCOPDLossConfig(),
     )
 

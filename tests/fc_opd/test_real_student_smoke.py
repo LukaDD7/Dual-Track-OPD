@@ -20,7 +20,9 @@ from dual_track_opd.fc_opd.real_student_smoke import (
     response_logit_slice,
     run_real_student_record,
     run_real_student_smoke,
+    teacher_scores_to_device,
 )
+from dual_track_opd.fc_opd.signal_decomposer import TeacherTopK
 from dual_track_opd.fc_opd.teacher_client import TeacherClient
 from dual_track_opd.fc_opd.teacher_protocol import tokenizer_fingerprint
 from dual_track_opd.fc_opd.teacher_scorer import SyntheticTeacherScorer
@@ -190,6 +192,85 @@ def test_smoke_report_passes_over_all_records(offline_payloads):
     assert report.num_records == len(offline_payloads)
     assert report.passed
     assert all(r.four_conditions_consumed for r in report.results)
+
+
+def _cpu_teacher_scores() -> dict:
+    return {
+        Condition.FULL: TeacherTopK(
+            token_ids=torch.tensor([[[0, 1], [1, 2]]], dtype=torch.int64),
+            log_probs=torch.log(torch.tensor([[[0.6, 0.4], [0.7, 0.3]]])),
+            tail_log_prob=torch.log(torch.tensor([[0.01, 0.02]])),
+            entropy=torch.tensor([[0.5, 0.4]]),
+        ),
+        Condition.BLUR: TeacherTopK(
+            token_ids=torch.tensor([[[0, 2], [1, 3]]], dtype=torch.int64),
+            log_probs=torch.log(torch.tensor([[[0.5, 0.5], [0.6, 0.4]]])),
+            tail_log_prob=None,
+            entropy=None,
+        ),
+    }
+
+
+def test_teacher_scores_to_device_preserves_type_and_moves_all_fields():
+    scores = _cpu_teacher_scores()
+    target = torch.device("cpu")
+    moved = teacher_scores_to_device(scores, target)
+
+    assert set(moved) == set(scores)
+    for condition, topk in moved.items():
+        assert isinstance(topk, TeacherTopK)  # dataclasses.replace preserves the type
+        topk.validate()
+        assert topk.token_ids.device == target
+        assert topk.log_probs.device == target
+        if topk.tail_log_prob is not None:
+            assert topk.tail_log_prob.device == target
+        if topk.entropy is not None:
+            assert topk.entropy.device == target
+    # The optional fields stay None when absent rather than being fabricated.
+    assert moved[Condition.BLUR].tail_log_prob is None
+    assert moved[Condition.BLUR].entropy is None
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_teacher_scores_to_device_moves_cpu_scores_to_cuda():
+    scores = _cpu_teacher_scores()
+    moved = teacher_scores_to_device(scores, "cuda")
+    for topk in moved.values():
+        assert topk.token_ids.is_cuda
+        assert topk.log_probs.is_cuda
+        if topk.tail_log_prob is not None:
+            assert topk.tail_log_prob.is_cuda
+        if topk.entropy is not None:
+            assert topk.entropy.is_cuda
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_real_student_record_handles_cuda_logits_with_cpu_teacher_scores(offline_payloads):
+    # Regression: CPU teacher tensors + CUDA student logits must not raise a
+    # cross-device error inside compute_fc_opd_loss.
+    payload = offline_payloads[0]
+    vocab = offline_record_to_tensors(payload).vocab_floor
+    provider = FakeStudentProvider(vocab, ByteTokenizer())
+
+    class CudaProvider:
+        # The fake model and its parameters stay on CPU; only the response
+        # logits are moved to CUDA, reproducing the real cuda-logits /
+        # cpu-teacher-scores device split that triggered the bug.
+        tokenizer_hash = provider.tokenizer_hash
+
+        def named_parameters(self):
+            return provider.named_parameters()
+
+        def zero_grad(self):
+            provider.zero_grad()
+
+        def forward(self, record):
+            out = provider.forward(record)
+            out.response_logits = out.response_logits.to("cuda")
+            return out
+
+    result = run_real_student_record(payload, CudaProvider())
+    assert result.passed
 
 
 def test_student_vocab_floor_is_checked(offline_payloads):

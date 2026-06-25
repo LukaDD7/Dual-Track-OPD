@@ -26,6 +26,7 @@ from .real_student_smoke import (
     response_logit_slice,
     run_real_student_record,
     run_real_student_smoke,
+    teacher_scores_to_device,
 )
 from .offline_scoring import (
     ByteTokenizer,
@@ -103,6 +104,7 @@ __all__ = [
     "score_record",
     "score_teacher_conditions",
     "sparse_forward_kl",
+    "teacher_scores_to_device",
     "tokenizer_fingerprint",
     "write_offline_scores",
 ]
