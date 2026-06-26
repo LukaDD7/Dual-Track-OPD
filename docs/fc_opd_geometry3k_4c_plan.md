@@ -23,3 +23,16 @@ infrastructure validation or red-box-contaminated ablation only.
 
 ViRL39K is the next target, but the adapter remains a placeholder until the
 actual data schema is inspected.
+
+## Real-Student Smoke
+
+After building Geometry3K 4C scores:
+
+```bash
+SCORES=/path/to/geometry3k_4c_offline_scores.jsonl \
+scripts/hpc/run_fc_opd_geometry3k_4c_real_student_min_train_smoke.sh
+```
+
+Expected summary fields include `passed=true`, finite loss, finite gradients,
+nonzero parameter update, and consumed conditions containing
+`full,degraded,free,task`.

@@ -66,6 +66,7 @@ def test_vision_opd_2c_builder_writes_trainable_rows(tmp_path):
                 limit=2,
                 rollouts_per_prompt=2,
                 student_model_path="fake/student",
+                allow_red_box_contaminated_images=True,
             ),
             rollout_generator=FixedFakeRolloutGenerator(tokenizer),
             teacher_client=client,
@@ -82,6 +83,12 @@ def test_vision_opd_2c_builder_writes_trainable_rows(tmp_path):
     assert {tuple(row["conditions"]) for row in rows} == {("full", "blur")}
     assert all(row["crop_bbox_policy"] == CROP_BBOX_POLICY for row in rows)
     assert all(row["bbox_metadata_unused_by_default"] is True for row in rows)
+    assert all(row["red_box_contaminated"] is True for row in rows)
+    assert all(row["localization_cued_ablation"] is True for row in rows)
+    assert all(row["not_main_experiment"] is True for row in rows)
+    assert result.summary["red_box_contaminated"] is True
+    assert result.summary["localization_cued_ablation"] is True
+    assert result.summary["not_main_experiment"] is True
     assert all(row["condition_inputs"]["full_image"]["path"] == str(image) for row in rows)
     assert all(row["condition_inputs"]["full_image"]["path"] != str(crop) for row in rows)
 
@@ -118,6 +125,7 @@ def test_builder_resume_skips_existing_rollout_uids(tmp_path):
         rollouts_per_prompt=2,
         student_model_path="fake/student",
         resume=True,
+        allow_red_box_contaminated_images=True,
     )
 
     with ExitStack() as stack:
@@ -134,3 +142,19 @@ def test_builder_resume_skips_existing_rollout_uids(tmp_path):
         )
 
     assert len(output_jsonl.read_text(encoding="utf-8").splitlines()) == 2
+
+
+def test_vision_opd_builder_hard_stops_without_contaminated_override(tmp_path):
+    dataset = tmp_path / "train.json"
+    dataset.write_text("[]", encoding="utf-8")
+
+    import pytest
+
+    with pytest.raises(ValueError, match="red-box contamination"):
+        VisionOPD2COfflineScoreConfig(
+            dataset=dataset,
+            dataset_type="vision_opd_parquet",
+            output_jsonl=tmp_path / "scores.jsonl",
+            summary_json=tmp_path / "summary.json",
+            limit=4,
+        )

@@ -18,6 +18,10 @@ alignment, `top_k=32`, and no builder errors or leakage warnings in smoke runs.
 Vision-OPD is no longer main experimental evidence. Local images likely contain
 explicit red bounding-box localization cues baked into the PNG/JPG files:
 
+- HPC red-box audit over 128 samples found
+  `full_image_red_box_suspected_rate = 0.9140625`,
+  `bbox_image_red_box_suspected_rate = 1.0`, and
+  `likely_conclusion = red_box_likely_baked_into_full_images`.
 - `teacher_images` have very high red-pixel ratios in inspected samples.
 - `data/images` also show nonzero strong-red ratios.
 - Human inspection previously showed visible red boxes in full images.

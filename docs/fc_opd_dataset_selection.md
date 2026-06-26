@@ -58,7 +58,10 @@ the resolved task evidence includes the answer string.
 ## Vision-OPD-6K Default Adapter Policy
 
 Vision-OPD is frozen as main experimental data because red-box localization
-cues are suspected or confirmed in local images. Run:
+cues are confirmed in local images. The HPC red-box audit over 128 samples
+reported `full_image_red_box_suspected_rate=0.9140625`,
+`bbox_image_red_box_suspected_rate=1.0`, and
+`likely_conclusion=red_box_likely_baked_into_full_images`. Run:
 
 ```bash
 DATASET=/path/to/Vision-OPD/train.parquet \

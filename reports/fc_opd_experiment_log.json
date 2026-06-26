@@ -8,6 +8,12 @@
   ],
   "vision_opd_contamination_finding": {
     "red_box_localization_cue_suspected": true,
+    "hpc_red_box_audit": {
+      "num_samples_checked": 128,
+      "full_image_red_box_suspected_rate": 0.9140625,
+      "bbox_image_red_box_suspected_rate": 1.0,
+      "likely_conclusion": "red_box_likely_baked_into_full_images"
+    },
     "teacher_images_contain_red_box_overlays": true,
     "full_images_likely_contain_red_box_overlays": true,
     "gaussian_blur_degraded_images_derive_from_loaded_full_images": true,

@@ -3,6 +3,13 @@
 Vision-OPD is currently treated as infrastructure validation only because local
 images appear to contain baked-in red bounding-box localization cues.
 
+Latest HPC audit result:
+
+- `num_samples_checked = 128`
+- `full_image_red_box_suspected_rate = 0.9140625`
+- `bbox_image_red_box_suspected_rate = 1.0`
+- `likely_conclusion = red_box_likely_baked_into_full_images`
+
 Run the audit:
 
 ```bash

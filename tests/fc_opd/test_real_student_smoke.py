@@ -16,6 +16,8 @@ from dual_track_opd.fc_opd.offline_scoring import (
     make_smoke_dataset,
 )
 from dual_track_opd.fc_opd.real_student_smoke import (
+    FOUR_CLEAN_CONDITIONS,
+    FOUR_CLEAN_CONDITION_ROUTER,
     StudentForwardOutput,
     TWO_CONDITIONS,
     TWO_CONDITION_ROUTER,
@@ -76,6 +78,30 @@ def _build_2c_offline_payloads(num_samples: int = 2) -> list[dict]:
         scored = list(
             iter_offline_scores(
                 make_smoke_dataset(num_samples),
+                config=config,
+                tokenizer=tokenizer,
+                teacher_client=client,
+                mode="protocol_smoke",
+            )
+        )
+    return [record.payload for record in scored]
+
+
+def _build_4c_clean_offline_payloads(num_samples: int = 2) -> list[dict]:
+    tokenizer = ByteTokenizer()
+    scorer = SyntheticTeacherScorer(
+        vocab_size=320, top_k=TOP_K, tokenizer_hash=tokenizer_fingerprint(tokenizer)
+    )
+    with ExitStack() as stack:
+        server = stack.enter_context(running_teacher_server(scorer))
+        host, port = server.server_address
+        client = TeacherClient(
+            f"http://{host}:{port}", expected_tokenizer_hash=tokenizer_fingerprint(tokenizer)
+        )
+        config = OfflineScoringConfig(source_dataset="geometry3k", conditions=FOUR_CLEAN_CONDITIONS)
+        scored = list(
+            iter_offline_scores(
+                make_smoke_dataset(num_samples, dataset_name="geometry3k"),
                 config=config,
                 tokenizer=tokenizer,
                 teacher_client=client,
@@ -394,6 +420,24 @@ def test_min_train_supports_explicit_2c_router():
     assert report.passed
     assert report.expected_conditions_consumed
     assert report.consumed_conditions == set(TWO_CONDITIONS)
+    assert not report.four_conditions_consumed
+
+
+def test_min_train_supports_clean_4c_router():
+    payloads = _build_4c_clean_offline_payloads(2)
+    provider = _provider_for(payloads)
+    report = run_real_student_min_train(
+        payloads,
+        provider,
+        router_config=FOUR_CLEAN_CONDITION_ROUTER,
+        expected_conditions=FOUR_CLEAN_CONDITIONS,
+        num_steps=2,
+        learning_rate=0.1,
+    )
+
+    assert report.passed
+    assert report.expected_conditions_consumed
+    assert report.consumed_conditions == set(FOUR_CLEAN_CONDITIONS)
     assert not report.four_conditions_consumed
 
 

@@ -79,7 +79,6 @@ class VisionOPD2COfflineScoreConfig:
     shard_id: int | None = None
     num_shards: int | None = None
     allow_red_box_contaminated_images: bool = False
-    red_box_full_run_guard_limit: int = 64
     min_response_tokens_for_warning: int = 16
     high_signal_threshold: float = 0.01
     high_cosine_threshold: float = 0.98
@@ -110,11 +109,13 @@ class VisionOPD2COfflineScoreConfig:
                 raise ValueError("num_shards must be positive")
             if self.shard_id is None or not 0 <= self.shard_id < self.num_shards:
                 raise ValueError("shard_id must be in [0, num_shards)")
-        is_vision_opd = self.source_dataset.lower().replace("_", "-").startswith("vision-opd")
-        fullish_run = self.limit is None or self.limit > self.red_box_full_run_guard_limit
-        if is_vision_opd and fullish_run and not self.allow_red_box_contaminated_images:
+        is_vision_opd = (
+            self.dataset_type == "vision_opd_parquet"
+            or "vision-opd" in self.source_dataset.lower().replace("_", "-")
+        )
+        if is_vision_opd and not self.allow_red_box_contaminated_images:
             raise ValueError(
-                "Vision-OPD full-run builder is blocked because red-box contamination is suspected. "
+                "Vision-OPD builder is blocked because red-box contamination is suspected. "
                 "Use --allow-red-box-contaminated-images only for a localization-cued ablation."
             )
 
@@ -344,12 +345,18 @@ def _build_rows_for_record(
             "chunk_spans": _serialize_chunks(chunk_masks),
             "leakage_warnings": leakage_warnings,
             "errors": [],
+            "red_box_contaminated": bool(config.allow_red_box_contaminated_images),
+            "localization_cued_ablation": bool(config.allow_red_box_contaminated_images),
+            "not_main_experiment": bool(config.allow_red_box_contaminated_images),
             "metadata": {
                 "crop_bbox_policy": CROP_BBOX_POLICY,
                 "bbox_metadata_unused_by_default": True,
                 "blur_sigma": float(config.blur_sigma),
                 "source_builder": "vision_opd_2c_offline_score_builder",
                 "response_source": "student_rollout",
+                "red_box_contaminated": bool(config.allow_red_box_contaminated_images),
+                "localization_cued_ablation": bool(config.allow_red_box_contaminated_images),
+                "not_main_experiment": bool(config.allow_red_box_contaminated_images),
             },
         }
         rows.append(row)

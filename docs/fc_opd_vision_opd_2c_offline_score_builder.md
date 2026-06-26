@@ -97,8 +97,8 @@ diagnostics, full-vs-blur signal statistics, high visual signal ratio, gradient
 cosines, tokenizer hash, teacher model ID, student model path, output path/file
 size, and best-effort git commit/dirty status.
 
-Full-ish Vision-OPD runs are guarded by default because red-box contamination is
-suspected. Use `--allow-red-box-contaminated-images` only for an explicit
-localization-cued ablation; the summary then records
-`red_box_contaminated=true`, `localization_cued_ablation=true`, and
-`not_main_experiment=true`.
+Vision-OPD builder runs are guarded by default when `dataset_type` is
+`vision_opd_parquet` or `source_dataset` contains `vision-opd`. Use
+`--allow-red-box-contaminated-images` only for an explicit localization-cued
+ablation; rows and summary then record `red_box_contaminated=true`,
+`localization_cued_ablation=true`, and `not_main_experiment=true`.
