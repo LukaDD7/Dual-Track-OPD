@@ -45,6 +45,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--normalized-limit", type=int, default=8)
     parser.add_argument("--prompt-limit", type=int, default=3)
     parser.add_argument("--audit-limit", type=int, default=8)
+    parser.add_argument("--no-materialize-degraded-images", action="store_true")
     return parser
 
 
@@ -76,6 +77,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             limit=args.prompt_limit,
             output=output_dir / "vision_opd_condition_prompts.md",
             include_images_as_paths=True,
+            materialize_degraded_images=not args.no_materialize_degraded_images,
         )
     )
 
@@ -88,6 +90,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             output_dir=output_dir / "dataset_audit_dryrun",
             tokenizer="byte",
             dry_run=True,
+            materialize_degraded_images=not args.no_materialize_degraded_images,
         ),
         tokenizer=ByteTokenizer(),
     )

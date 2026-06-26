@@ -34,7 +34,8 @@ uses the same stem with `.jsonl`.
 ## Task Evidence Modes
 
 - `none`: default non-oracle mode. Task evidence says that no task-specific
-  evidence is provided. It must not contain the answer.
+  evidence is provided. It must not contain the answer. This is a
+  non-informative placeholder / audit mode, not final 4C training evidence.
 - `free_caption`: reuses the weak/free caption as task evidence.
 - `question_conditioned_caption`: uses an existing `task_evidence` /
   `task_extraction` / `evidence` field if present, otherwise a question-only
@@ -45,6 +46,9 @@ uses the same stem with `.jsonl`.
 The VStar16 protocol smoke used benchmark reference answers as task evidence
 only to exercise the protocol. That is not a valid default training
 construction.
+
+For first real Vision-OPD training, prefer FC-OPD-2C (`full,blur`) unless and
+until non-oracle free/task evidence generators are implemented and audited.
 
 ## Default 4C Image Policy
 
@@ -76,3 +80,27 @@ Each JSONL record includes:
   - `task_evidence_contains_option_letter`
   - `task_evidence_contains_gold_text`
   - `oracle_mode_enabled`
+
+## Recommended HPC Validation
+
+```bash
+bash scripts/hpc/run_fc_opd_vision_opd_adapter_smoke.sh
+```
+
+```bash
+python scripts/hpc/dump_fc_opd_condition_prompts.py \
+  --dataset "$PROJECT_ROOT/third_party/Vision-OPD/data/train.parquet" \
+  --dataset-type vision_opd_parquet \
+  --source-dataset vision-opd-6k \
+  --limit 3 \
+  --conditions full,blur,free,task \
+  --blur-sigma 2.0 \
+  --task-evidence-mode none \
+  --materialize-degraded-images \
+  --output "$DTOPD_OUTPUT_ROOT/fc_opd/prompt_audit/vision_opd6k_first3/prompts.md" \
+  --include-images-as-paths
+```
+
+Expected: degraded images are created, question text is clean, no Python dict
+repr appears in rendered prompts, leakage flags remain false, and bbox/crop
+metadata is preserved but unused by default 4C.

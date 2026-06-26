@@ -33,6 +33,12 @@ The implemented real pipeline uses four conditions:
 - `free`: generic image-only or weak caption/evidence.
 - `task`: question-conditioned evidence/caption.
 
+For Vision-OPD path and prompt audits, `task_evidence_mode=none` is a safe
+non-informative placeholder mode. It is useful for verifying prompts and image
+paths, but it is not final 4C training evidence. First real Vision-OPD training
+should use FC-OPD-2C (`full,blur`) or wait for audited non-oracle free/task
+evidence generators before using FC-OPD-4C.
+
 `fact` is reserved and is not implemented in the current real pipeline. It
 should be used only for externally verified facts with provenance. Same-model
 generated captions should not be treated as verified facts.

@@ -20,7 +20,7 @@ from typing import Any, Iterable, Mapping, Sequence
 import torch
 
 from .conditions import Condition, ConditionInputs, ImageInput
-from .dataset_adapters import load_normalized_records, load_raw_records
+from .dataset_adapters import load_normalized_records, load_raw_records, task_evidence_mode_label
 from .offline_scoring import (
     DEFAULT_CONDITIONS,
     DEFAULT_TEACHER_URL,
@@ -292,6 +292,8 @@ def audit_record(
         "image_path": image_path,
         "degraded_image_path": degraded_image_path,
         "bbox_image_path": str(record.get("bbox_image_path") or ""),
+        "bbox_image_paths": list(record.get("bbox_image_paths") or []),
+        "bbox_image_exists": bool(record.get("bbox_image_exists", False)),
         "image_exists": Path(image_path).expanduser().is_file() if image_path else False,
         "degraded_image_exists": (
             Path(degraded_image_path).expanduser().is_file() if degraded_image_path else False
@@ -314,6 +316,7 @@ def audit_record(
         "metadata": {
             "crop_bbox_policy": "metadata_only_default_no_crop_condition",
             "task_evidence_mode": config.task_evidence_mode,
+            "task_evidence_mode_label": task_evidence_mode_label(config.task_evidence_mode),
         },
     }
 

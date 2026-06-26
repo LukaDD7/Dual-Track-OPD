@@ -29,8 +29,12 @@ GLOBAL_IMAGE_KEYS = (
     "img",
 )
 CROP_IMAGE_KEYS = (
+    "bbox_images",
+    "bbox_image_paths",
     "bbox_image_path",
     "bbox_image",
+    "crop_images",
+    "crop_image_paths",
     "crop_image_path",
     "crop_image",
     "cropped_image_path",
@@ -118,11 +122,15 @@ def normalize_record(
         if str(question_id).startswith(f"{source_dataset}:")
         else f"{source_dataset}:{question_id}"
     )
-    question = _first_text(record, QUESTION_KEYS) or ""
+    question = extract_question_text(record)
     image_raw = _first_value(record, GLOBAL_IMAGE_KEYS)
     crop_raw = _first_value(record, CROP_IMAGE_KEYS)
     image_path = resolve_dataset_path(_pathlike_from_value(image_raw), dataset_path)
-    bbox_image_path = resolve_dataset_path(_pathlike_from_value(crop_raw), dataset_path)
+    bbox_image_paths = [
+        resolve_dataset_path(path, dataset_path)
+        for path in _pathlikes_from_value(crop_raw)
+    ]
+    bbox_image_path = bbox_image_paths[0] if bbox_image_paths else ""
     answer = _first_text(record, ANSWER_KEYS)
     free_caption = _first_text(record, ("free_caption", "caption", "image_caption")) or ""
     task_evidence = _first_text(record, ("task_evidence", "task_extraction", "evidence")) or ""
@@ -138,6 +146,8 @@ def normalize_record(
         "image_path": image_path,
         "images": [image_path] if image_path else [],
         "bbox_image_path": bbox_image_path,
+        "bbox_image_paths": bbox_image_paths,
+        "bbox_image_exists": Path(bbox_image_path).expanduser().is_file() if bbox_image_path else False,
         "answer": answer,
         "gold": answer,
         "free_caption": free_caption,
@@ -147,10 +157,63 @@ def normalize_record(
             "adapter": "vision_opd_6k_or_generic",
             "crop_bbox_policy": "metadata_only_default_no_crop_condition",
             "bbox_image_path": bbox_image_path,
+            "bbox_image_paths": bbox_image_paths,
+            "bbox_image_exists": Path(bbox_image_path).expanduser().is_file() if bbox_image_path else False,
             "raw_keys": sorted(str(key) for key in record.keys()),
         },
     }
     return normalized
+
+
+def extract_question_text(record: Mapping[str, Any]) -> str:
+    """Extract clean user question text from strings, dicts, or chat messages."""
+
+    raw = _first_value(record, QUESTION_KEYS)
+    text = normalize_prompt_text(raw)
+    options = _extract_options(record)
+    if options and not _question_contains_options(text, options):
+        text = "\n\n".join([text, *options]).strip()
+    return text
+
+
+def task_evidence_mode_label(mode: str) -> str:
+    if mode == "none":
+        return "non-informative placeholder / audit mode; not final 4C training evidence"
+    if mode == "oracle_answer":
+        return "oracle / upper-bound only; leaks gold answer by construction"
+    return "non-oracle evidence candidate; audit for leakage before training"
+
+
+def normalize_prompt_text(value: Any) -> str:
+    """Normalize prompt/chat values into plain teacher question text.
+
+    Handles raw strings, OpenAI/Qwen-style message dicts, lists of messages, and
+    multimodal content lists. Leading ``<image>`` markers are removed because
+    image paths are supplied separately to the teacher prompt renderer.
+    """
+
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return _strip_leading_image_tokens(value)
+    if isinstance(value, Mapping):
+        if "content" in value:
+            return _strip_leading_image_tokens(_content_to_text(value.get("content")))
+        return _strip_leading_image_tokens(_first_text(value, QUESTION_KEYS) or "")
+    if isinstance(value, Sequence) and not isinstance(value, str | bytes):
+        messages = [item for item in value if isinstance(item, Mapping)]
+        if messages:
+            user_texts = [
+                _content_to_text(message.get("content"))
+                for message in messages
+                if str(message.get("role", "")).lower() in {"user", "human"}
+            ]
+            if user_texts:
+                return _strip_leading_image_tokens("\n\n".join(text for text in user_texts if text))
+            all_texts = [_content_to_text(message.get("content")) for message in messages]
+            return _strip_leading_image_tokens("\n\n".join(text for text in all_texts if text))
+        return _strip_leading_image_tokens("\n".join(str(item) for item in value))
+    return _strip_leading_image_tokens(str(value))
 
 
 def discover_vision_opd_train_parquet(project_root: str | Path) -> Path | None:
@@ -232,23 +295,32 @@ def _first_text(record: Mapping[str, Any], keys: Sequence[str]) -> str | None:
 
 
 def _pathlike_from_value(value: Any) -> str | None:
+    paths = _pathlikes_from_value(value)
+    return paths[0] if paths else None
+
+
+def _pathlikes_from_value(value: Any) -> list[str]:
     if value is None:
-        return None
+        return []
     if isinstance(value, str):
-        return value.strip() or None
+        return [value.strip()] if value.strip() else []
     if isinstance(value, Mapping):
         for key in ("path", "image_path", "filename", "file_name"):
             item = value.get(key)
             if isinstance(item, str) and item.strip():
-                return item.strip()
-        return None
+                return [item.strip()]
+        return []
     if isinstance(value, Sequence) and not isinstance(value, str | bytes):
+        paths: list[str] = []
         for item in value:
-            path = _pathlike_from_value(item)
-            if path is not None:
-                return path
-        return None
-    return None
+            paths.extend(_pathlikes_from_value(item))
+        return paths
+    if hasattr(value, "tolist"):
+        try:
+            return _pathlikes_from_value(value.tolist())
+        except Exception:  # noqa: BLE001
+            return []
+    return []
 
 
 def _extract_options(record: Mapping[str, Any]) -> list[str]:
@@ -260,6 +332,37 @@ def _extract_options(record: Mapping[str, Any]) -> list[str]:
     if isinstance(raw, Sequence) and not isinstance(raw, str | bytes):
         return [str(item) for item in raw]
     return [str(raw)]
+
+
+def _content_to_text(content: Any) -> str:
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, Mapping):
+        if content.get("type") in {"text", "input_text"}:
+            return str(content.get("text", ""))
+        if "content" in content:
+            return _content_to_text(content.get("content"))
+        if "text" in content:
+            return str(content.get("text", ""))
+        return ""
+    if isinstance(content, Sequence) and not isinstance(content, str | bytes):
+        parts = [_content_to_text(item) for item in content]
+        return "\n".join(part for part in parts if part)
+    return str(content)
+
+
+def _strip_leading_image_tokens(text: str) -> str:
+    lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    while lines and lines[0].strip().lower() in {"<image>", "<image/>", "<img>", "<|image|>"}:
+        lines.pop(0)
+    return "\n".join(lines).strip()
+
+
+def _question_contains_options(text: str, options: Sequence[str]) -> bool:
+    normalized_text = " ".join(text.lower().split())
+    return any(" ".join(option.lower().split()) in normalized_text for option in options)
 
 
 def _is_empty(value: Any) -> bool:

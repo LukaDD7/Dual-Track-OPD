@@ -52,6 +52,11 @@ Crop/bbox should be used only in an explicit ablation, for example a future
 `--use-crop-condition` or `--condition-set full,blur,free,task,crop`, and should
 be marked as a privileged visual condition.
 
+`task_evidence_mode=none` is safe for prompt/path audits but deliberately
+non-informative. It should not be recommended as final 4C training evidence.
+For first real Vision-OPD training, use FC-OPD-2C (`full,blur`) or wait for
+audited non-oracle free/task evidence generators before running FC-OPD-4C.
+
 ## Audit Command
 
 Start the teacher service separately, then run:
@@ -92,6 +97,26 @@ bash scripts/hpc/run_fc_opd_vision_opd_adapter_smoke.sh
 This writes normalized records, a 3-sample prompt dump, and an 8-sample dataset
 audit dry-run without requiring a teacher service.
 
+The first path-readiness dry-run should materialize degraded images:
+
+```bash
+python scripts/hpc/run_fc_opd_dataset_signal_audit.py \
+  --dataset "$PROJECT_ROOT/third_party/Vision-OPD/data/train.parquet" \
+  --dataset-type vision_opd_parquet \
+  --source-dataset vision-opd-6k \
+  --limit 8 \
+  --conditions full,blur,free,task \
+  --blur-sigma 2.0 \
+  --task-evidence-mode none \
+  --materialize-degraded-images \
+  --output-dir "$DTOPD_OUTPUT_ROOT/fc_opd/dataset_audit/vision_opd6k_dryrun_8" \
+  --dry-run
+```
+
+Expected for the first Vision-OPD samples after materialization:
+`image_missing_rate=0.0`, `degraded_image_missing_rate=0.0`, no leakage
+warnings, clean question text, and bbox/crop metadata preserved if present.
+
 The Python entrypoint exposes the same flags directly:
 
 ```bash
@@ -121,6 +146,8 @@ Flexible field names include:
 
 - question: `query`, `question`, `prompt`, `instruction`;
 - image: `images`, `image`, `image_path`, `image_paths`;
+- crop/bbox metadata: `bbox_images`, `bbox_image_path`, `crop_images`,
+  `crop_image_path`;
 - answer: `response`, `answer`, `label`, `target`;
 - evidence: `task_evidence`, `task_extraction`, `evidence`;
 - caption: `free_caption`, `caption`, `image_caption`.

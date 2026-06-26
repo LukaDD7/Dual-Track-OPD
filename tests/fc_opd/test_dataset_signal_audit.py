@@ -1,6 +1,8 @@
 import json
 from contextlib import ExitStack
 
+import pytest
+
 from dual_track_opd.fc_opd.dataset_signal_audit import (
     DatasetAuditConfig,
     detect_task_evidence_leakage,
@@ -78,6 +80,33 @@ def test_dry_run_default_task_evidence_does_not_leak_answer(tmp_path):
 
     assert result.samples[0]["leakage_warnings"] == []
     assert result.samples[0]["metadata"]["task_evidence_mode"] == "none"
+
+
+def test_dry_run_materializes_degraded_images_and_counts_them_present(tmp_path):
+    pytest.importorskip("PIL")
+    from PIL import Image
+
+    dataset = tmp_path / "candidate.json"
+    image = tmp_path / "image.png"
+    Image.new("RGB", (4, 4), color=(0, 0, 255)).save(image)
+    _write_dataset(dataset, image)
+
+    result = run_dataset_signal_audit(
+        DatasetAuditConfig(
+            dataset=dataset,
+            dataset_type="vision_opd_json",
+            source_dataset="vision_opd_6k",
+            output_dir=tmp_path / "audit",
+            dry_run=True,
+            materialize_degraded_images=True,
+        ),
+        tokenizer=ByteTokenizer(),
+    )
+
+    degraded_path = result.samples[0]["degraded_image_path"]
+    assert degraded_path.endswith("image.gaussian_blur_s2.png")
+    assert result.samples[0]["degraded_image_exists"] is True
+    assert result.summary["degraded_image_missing_rate"] == 0.0
 
 
 def test_synthetic_teacher_audit_computes_signal_summary_and_cosines(tmp_path):

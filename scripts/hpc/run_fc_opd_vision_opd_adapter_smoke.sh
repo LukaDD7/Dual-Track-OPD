@@ -18,5 +18,8 @@ args=(
 if [[ -f "${DATASET}" ]]; then
   args+=(--dataset "${DATASET}")
 fi
+if [[ "${MATERIALIZE_DEGRADED_IMAGES:-1}" != "1" ]]; then
+  args+=(--no-materialize-degraded-images)
+fi
 
 python "${args[@]}"

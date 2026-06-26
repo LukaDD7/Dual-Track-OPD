@@ -9,7 +9,11 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from .conditions import Condition, ConditionInputs, ImageInput
-from .dataset_adapters import discover_vision_opd_train_parquet, load_normalized_records
+from .dataset_adapters import (
+    discover_vision_opd_train_parquet,
+    load_normalized_records,
+    task_evidence_mode_label,
+)
 from .dataset_signal_audit import materialize_gaussian_blur
 from .offline_scoring import DEFAULT_CONDITIONS, derive_degraded_path
 from .teacher_prompts import render_teacher_prompt
@@ -133,6 +137,8 @@ def dump_prompt_record(record: Mapping[str, Any], *, config: PromptDumpConfig) -
         "image_path": image_path,
         "degraded_image_path": degraded_image_path,
         "bbox_image_path": str(record.get("bbox_image_path") or ""),
+        "bbox_image_paths": list(record.get("bbox_image_paths") or []),
+        "bbox_image_exists": bool(record.get("bbox_image_exists", False)),
         "question": question,
         "answer": answer,
         "gold": answer,
@@ -142,6 +148,7 @@ def dump_prompt_record(record: Mapping[str, Any], *, config: PromptDumpConfig) -
             "conditions": [condition.value for condition in config.conditions],
             "blur_sigma": float(config.blur_sigma),
             "task_evidence_mode": config.task_evidence_mode,
+            "task_evidence_mode_label": task_evidence_mode_label(config.task_evidence_mode),
             "crop_bbox_policy": "metadata_only_default_no_crop_condition",
             "include_images_as_paths": config.include_images_as_paths,
         },
@@ -222,6 +229,7 @@ def _render_markdown(records: Sequence[Mapping[str, Any]], config: PromptDumpCon
                 f"- Image: {record['image_path']}",
                 f"- Degraded image: {record['degraded_image_path']}",
                 f"- Crop/bbox image metadata: {record['bbox_image_path'] or 'None'}",
+                f"- Crop/bbox image exists: {record['bbox_image_exists']}",
                 f"- Question: {record['question']}",
                 f"- Answer/gold: {record['answer']}",
                 f"- Leakage flags: `{json.dumps(record['leakage_flags'], sort_keys=True)}`",
