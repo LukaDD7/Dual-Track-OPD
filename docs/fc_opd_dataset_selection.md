@@ -13,7 +13,8 @@ training from the audit outputs.
 Recommended decision order:
 
 1. Vision-OPD-6K prepared train JSON / Parquet for the first fair objective
-   comparison with the Vision-OPD baseline.
+   comparison with the Vision-OPD baseline. This is the first recommended
+   training dataset.
 2. Geometry3K, if available, for a VA-OPD-style visual-math comparison.
 3. ViRL39K, or mixed visual reasoning data, only after the audit confirms
    non-collapsed condition signal.
@@ -33,6 +34,23 @@ construction.
 
 The audit emits `task_evidence_contains_answer` warnings when it can detect that
 the resolved task evidence includes the answer string.
+
+## Vision-OPD-6K Default Adapter Policy
+
+The default FC-OPD-4C setup for Vision-OPD-6K is no-crop:
+
+- `full`: original/global image + question.
+- `blur`: degraded original/global image + question.
+- `free`: weak/free caption/evidence + question.
+- `task`: question-conditioned text evidence + question.
+
+Crop or bbox images are preserved as metadata only by the adapter. They are not
+silently mapped to `task`, because that would introduce a privileged visual
+condition into the default comparison.
+
+Crop/bbox should be used only in an explicit ablation, for example a future
+`--use-crop-condition` or `--condition-set full,blur,free,task,crop`, and should
+be marked as a privileged visual condition.
 
 ## Audit Command
 
@@ -62,6 +80,17 @@ DRY_RUN=1
 For a schema-only dry run on a machine without model tokenizers, set
 `TOKENIZER=byte`; real audit runs should use the same HF tokenizer hash expected
 by the teacher service.
+
+For the dedicated Vision-OPD adapter smoke, run:
+
+```bash
+PROJECT_ROOT="$PROJECT_ROOT" \
+DATASET="$PROJECT_ROOT/third_party/Vision-OPD/data/train.parquet" \
+bash scripts/hpc/run_fc_opd_vision_opd_adapter_smoke.sh
+```
+
+This writes normalized records, a 3-sample prompt dump, and an 8-sample dataset
+audit dry-run without requiring a teacher service.
 
 The Python entrypoint exposes the same flags directly:
 
@@ -141,6 +170,7 @@ under a fixed synthetic student distribution:
 - `cos(g_full, g_task)`
 - `cos(g_blur, g_task)`
 
-This is useful for detecting condition redundancy or collapse. It is not
-ideal-gradient alignment and should not be interpreted as
+This is labeled as a condition redundancy diagnostic. It is useful for detecting
+condition redundancy or collapse, but it is not ideal-gradient alignment and
+should not be interpreted as
 `Align_c(u) = cos(g_c^KD(u), g_u^ideal(u))`.

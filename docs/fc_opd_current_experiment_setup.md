@@ -74,6 +74,10 @@ Not implemented yet:
 - success-conditioned ideal-gradient estimation;
 - verl trainer integration.
 
+See `docs/fc_opd_rollout_and_alignment_plan.md` for the formal multi-rollout
+plan. In short, `K=1` is smoke/debug only; formal OPD should use `K=4` by
+default, with `K=8` as an ablation.
+
 ## Current Router Status
 
 The default `RouterConfig()` in `src/dual_track_opd/fc_opd/router.py` maps:

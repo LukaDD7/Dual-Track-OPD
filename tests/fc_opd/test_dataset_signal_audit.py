@@ -41,6 +41,7 @@ def test_dry_run_writes_outputs_and_flags_task_evidence_leakage(tmp_path):
             source_dataset="vision_opd_6k",
             output_dir=tmp_path / "audit",
             dry_run=True,
+            task_evidence_mode="question_conditioned_caption",
         ),
         tokenizer=ByteTokenizer(),
     )
@@ -57,6 +58,26 @@ def test_dry_run_writes_outputs_and_flags_task_evidence_leakage(tmp_path):
 
     parsed = json.loads(result.jsonl_path.read_text(encoding="utf-8").splitlines()[0])
     assert parsed["sample_uid"] == "vision_opd_6k:sample-0001"
+
+
+def test_dry_run_default_task_evidence_does_not_leak_answer(tmp_path):
+    dataset = tmp_path / "candidate.json"
+    missing_image = tmp_path / "missing.jpg"
+    _write_dataset(dataset, missing_image, task_evidence="The correct answer is red.")
+
+    result = run_dataset_signal_audit(
+        DatasetAuditConfig(
+            dataset=dataset,
+            dataset_type="vision_opd_json",
+            source_dataset="vision_opd_6k",
+            output_dir=tmp_path / "audit",
+            dry_run=True,
+        ),
+        tokenizer=ByteTokenizer(),
+    )
+
+    assert result.samples[0]["leakage_warnings"] == []
+    assert result.samples[0]["metadata"]["task_evidence_mode"] == "none"
 
 
 def test_synthetic_teacher_audit_computes_signal_summary_and_cosines(tmp_path):
@@ -100,6 +121,8 @@ def test_synthetic_teacher_audit_computes_signal_summary_and_cosines(tmp_path):
     assert result.summary["mean_entropy"]["full"] is not None
     assert result.summary["mean_full_vs_blur_divergence"] is not None
     assert result.summary["gradient_cosines"]["cos_g_full_blur"] is not None
+    assert result.summary["gradient_cosine_diagnostic"]["label"] == "condition redundancy diagnostic"
+    assert result.summary["gradient_cosine_diagnostic"]["is_ideal_alignment"] is False
 
 
 def test_load_candidate_records_accepts_jsonl_auto(tmp_path):

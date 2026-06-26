@@ -20,6 +20,7 @@ from typing import Any, Iterable, Mapping, Sequence
 import torch
 
 from .conditions import Condition, ConditionInputs, ImageInput
+from .dataset_adapters import load_normalized_records, load_raw_records
 from .offline_scoring import (
     DEFAULT_CONDITIONS,
     DEFAULT_TEACHER_URL,
@@ -31,7 +32,6 @@ from .offline_scoring import (
     extract_question,
     extract_question_id,
     extract_source_index,
-    load_vision_opd_records,
 )
 from .signal_decomposer import TeacherTopK, compute_condition_signals
 from .teacher_client import TeacherClient
@@ -57,7 +57,9 @@ class DatasetAuditConfig:
     output_dir: Path | None = None
     skip_existing: bool = False
     dry_run: bool = False
+    task_evidence_mode: str = "none"
     high_signal_threshold: float = HIGH_SIGNAL_THRESHOLD
+    high_cosine_threshold: float = 0.98
 
     def __post_init__(self) -> None:
         if self.limit <= 0:
@@ -66,6 +68,13 @@ class DatasetAuditConfig:
             raise ValueError("blur_sigma must be positive")
         if not self.conditions:
             raise ValueError("at least one condition is required")
+        if self.task_evidence_mode not in {
+            "none",
+            "free_caption",
+            "question_conditioned_caption",
+            "oracle_answer",
+        }:
+            raise ValueError("unsupported task_evidence_mode")
         valid_types = {"vision_opd_json", "vision_opd_parquet", "generic_jsonl", "auto"}
         if self.dataset_type not in valid_types:
             raise ValueError(f"dataset_type must be one of {sorted(valid_types)}")
@@ -85,17 +94,7 @@ class DatasetAuditResult:
 def load_candidate_records(path: str | Path, dataset_type: str = "auto") -> list[dict[str, Any]]:
     """Load a candidate dataset for signal auditing."""
 
-    path = Path(path).expanduser()
-    resolved_type = _resolve_dataset_type(path, dataset_type)
-    if resolved_type == "vision_opd_parquet":
-        try:
-            import pandas as pd
-        except ImportError as exc:  # pragma: no cover - optional HPC dependency
-            raise RuntimeError("reading parquet requires pandas and pyarrow") from exc
-        return [dict(record) for record in pd.read_parquet(path).to_dict(orient="records")]
-    if resolved_type in {"vision_opd_json", "generic_jsonl"}:
-        return load_vision_opd_records(path)
-    raise ValueError(f"unsupported dataset type: {resolved_type}")
+    return load_raw_records(path, dataset_type)
 
 
 def build_tokenizer(spec: str) -> OfflineScoringTokenizer:
@@ -130,7 +129,11 @@ def run_dataset_signal_audit(
             skipped_existing=True,
         )
 
-    records = load_candidate_records(config.dataset, config.dataset_type)
+    records = load_normalized_records(
+        config.dataset,
+        config.dataset_type,
+        source_dataset=config.source_dataset,
+    )
     requested = min(config.limit, len(records))
     tokenizer = tokenizer or build_tokenizer(config.tokenizer)
     tokenizer_hash = tokenizer_fingerprint(tokenizer)
@@ -192,15 +195,20 @@ def audit_record(
     prompt_length: int | None = None
     response_token_ids: tuple[int, ...] = ()
 
-    try:
-        question = extract_question(record)
-    except Exception as exc:  # noqa: BLE001 - audit must keep moving
-        errors.append(f"question_error: {exc}")
+    question = str(record.get("question") or record.get("query") or "")
+    if not question.strip():
+        try:
+            question = extract_question(record)
+        except Exception as exc:  # noqa: BLE001 - audit must keep moving
+            errors.append(f"question_error: {exc}")
 
-    try:
-        answer = extract_answer(record)
-    except Exception as exc:  # noqa: BLE001
-        errors.append(f"answer_error: {exc}")
+    answer_value = record.get("answer") or record.get("gold")
+    answer = None if answer_value is None else str(answer_value)
+    if answer is None:
+        try:
+            answer = extract_answer(record)
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"answer_error: {exc}")
 
     try:
         image_paths = extract_image_paths(record, None)
@@ -230,9 +238,11 @@ def audit_record(
         condition_inputs = build_audit_condition_inputs(
             record,
             question=question,
+            answer=answer,
             full_image_path=image_path,
             degraded_image_path=degraded_image_path,
             blur_sigma=config.blur_sigma,
+            task_evidence_mode=config.task_evidence_mode,
         )
         leakage_warnings.extend(
             detect_task_evidence_leakage(
@@ -240,6 +250,8 @@ def audit_record(
                 task_evidence=condition_inputs.task_evidence,
             )
         )
+        if config.task_evidence_mode == "oracle_answer":
+            leakage_warnings.append("oracle_mode_enabled")
 
     if teacher_client is not None and condition_inputs is not None:
         try:
@@ -279,6 +291,7 @@ def audit_record(
         "question_id": question_id,
         "image_path": image_path,
         "degraded_image_path": degraded_image_path,
+        "bbox_image_path": str(record.get("bbox_image_path") or ""),
         "image_exists": Path(image_path).expanduser().is_file() if image_path else False,
         "degraded_image_exists": (
             Path(degraded_image_path).expanduser().is_file() if degraded_image_path else False
@@ -298,6 +311,10 @@ def audit_record(
         "gradient_cosines": gradient_cosines,
         "leakage_warnings": leakage_warnings,
         "errors": errors,
+        "metadata": {
+            "crop_bbox_policy": "metadata_only_default_no_crop_condition",
+            "task_evidence_mode": config.task_evidence_mode,
+        },
     }
 
 
@@ -326,9 +343,11 @@ def build_audit_condition_inputs(
     record: Mapping[str, Any],
     *,
     question: str,
+    answer: str | None,
     full_image_path: str,
     degraded_image_path: str,
     blur_sigma: float,
+    task_evidence_mode: str = "none",
 ) -> ConditionInputs:
     """Build non-oracle condition inputs for audit scoring."""
 
@@ -337,10 +356,12 @@ def build_audit_condition_inputs(
         ("free_caption", "caption", "image_caption"),
         "Audit caption placeholder: image-only evidence is available, but no gold answer is injected.",
     )
-    task_evidence = _coalesce_text(
+    task_evidence = build_task_evidence(
         record,
-        ("task_evidence", "task_extraction", "evidence"),
-        f"Audit question-conditioned evidence request: {question}",
+        question=question,
+        answer=answer,
+        mode=task_evidence_mode,
+        free_caption=free_caption,
     )
     inputs = ConditionInputs(
         full_image=ImageInput(path=full_image_path),
@@ -353,6 +374,33 @@ def build_audit_condition_inputs(
     )
     inputs.validate(require_paths=False)
     return inputs
+
+
+def build_task_evidence(
+    record: Mapping[str, Any],
+    *,
+    question: str,
+    answer: str | None,
+    mode: str,
+    free_caption: str,
+) -> str:
+    if mode == "none":
+        return "No task-specific evidence is provided in this non-oracle audit."
+    if mode == "free_caption":
+        return free_caption
+    if mode == "question_conditioned_caption":
+        evidence = _coalesce_text(
+            record,
+            ("task_evidence", "task_extraction", "evidence"),
+            "",
+        )
+        if evidence:
+            return evidence
+        return f"Question-conditioned evidence request for audit only: {question}"
+    if mode == "oracle_answer":
+        answer_text = answer.strip() if isinstance(answer, str) and answer.strip() else "unknown"
+        return f"ORACLE UPPER-BOUND evidence. Gold answer: {answer_text}"
+    raise ValueError(f"unsupported task_evidence_mode: {mode}")
 
 
 def materialize_gaussian_blur(source_path: str, target_path: str, sigma: float) -> None:
@@ -407,6 +455,11 @@ def summarize_audit_samples(
         for condition in config.conditions
     }
     gradient_cosines = _summarize_cosines(samples)
+    high_cosines = {
+        key: value
+        for key, value in gradient_cosines.items()
+        if value is not None and abs(float(value)) >= config.high_cosine_threshold
+    }
     leakage = [
         {
             "sample_uid": str(sample.get("sample_uid", "")),
@@ -428,6 +481,8 @@ def summarize_audit_samples(
         ),
         "missing_full_or_blur_scores": not visual_values and not config.dry_run,
         "missing_task_or_free_scores": not task_values and not config.dry_run,
+        "high_condition_gradient_cosine": bool(high_cosines),
+        "high_condition_gradient_cosines": high_cosines,
     }
     return {
         "source_dataset": config.source_dataset,
@@ -460,6 +515,15 @@ def summarize_audit_samples(
         "condition_collapse": collapse,
         "leakage_warnings": leakage,
         "gradient_cosines": gradient_cosines,
+        "gradient_cosine_diagnostic": {
+            "label": "condition redundancy diagnostic",
+            "is_ideal_alignment": False,
+            "note": (
+                "Pairwise condition KD-gradient cosine detects redundancy/collapse; "
+                "it is not success-conditioned ideal-gradient alignment."
+            ),
+            "high_cosine_threshold": config.high_cosine_threshold,
+        },
         "decision_rule": [
             "1. Vision-OPD-6K for the first fair objective comparison.",
             "2. Geometry3K for VA-OPD-style visual-math comparison.",
@@ -748,6 +812,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--skip-existing", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--task-evidence-mode",
+        choices=("none", "free_caption", "question_conditioned_caption", "oracle_answer"),
+        default="none",
+    )
     return parser
 
 
@@ -767,6 +836,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         output_dir=args.output_dir,
         skip_existing=args.skip_existing,
         dry_run=args.dry_run,
+        task_evidence_mode=args.task_evidence_mode,
     )
     result = run_dataset_signal_audit(config)
     if result.skipped_existing:
