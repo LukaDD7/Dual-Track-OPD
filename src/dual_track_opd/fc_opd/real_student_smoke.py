@@ -43,6 +43,17 @@ _DTYPES = {
     "float32": torch.float32,
 }
 
+TWO_CONDITIONS: tuple[Condition, ...] = (Condition.FULL, Condition.BLUR)
+TWO_CONDITION_ROUTER = RouterConfig(
+    mode="chunk",
+    chunk_condition={
+        "visual_evidence": Condition.FULL,
+        "reasoning": Condition.FULL,
+        "answer": Condition.FULL,
+    },
+    invalid_format_condition=Condition.BLUR,
+)
+
 
 # ---------------------------------------------------------------------------
 # Pure, CPU-testable alignment helpers
@@ -379,11 +390,16 @@ class RealStudentResult:
     nonzero_grad_param_names: list[str] = field(default_factory=list)
     lm_head_embed_tied: bool = False
     tied_parameter_names: list[list[str]] = field(default_factory=list)
+    expected_conditions: tuple[Condition, ...] = FOUR_CONDITIONS
     metrics: dict[str, float] = field(default_factory=dict)
 
     @property
     def four_conditions_consumed(self) -> bool:
         return set(FOUR_CONDITIONS).issubset(self.consumed_conditions)
+
+    @property
+    def expected_conditions_consumed(self) -> bool:
+        return set(self.expected_conditions).issubset(self.consumed_conditions)
 
     @property
     def passed(self) -> bool:
@@ -398,7 +414,7 @@ class RealStudentResult:
             and self.grad_param_name is not None
             and self.grad_is_finite
             and self.grad_param_norm > 0.0
-            and self.four_conditions_consumed
+            and self.expected_conditions_consumed
         )
 
 
@@ -418,6 +434,7 @@ def run_real_student_record(
     *,
     router_config: RouterConfig = FOUR_CONDITION_ROUTER,
     loss_config: FCOPDLossConfig | None = None,
+    expected_conditions: tuple[Condition, ...] = FOUR_CONDITIONS,
     require_decoded_match: bool = True,
     device: torch.device | str = "cpu",
 ) -> RealStudentResult:
@@ -518,6 +535,7 @@ def run_real_student_record(
         nonzero_grad_param_names=[name for name, _ in nonzero_grads],
         lm_head_embed_tied=lm_head_embed_tied(tied_groups),
         tied_parameter_names=tied_groups,
+        expected_conditions=expected_conditions,
         metrics={key: float(value.item()) for key, value in metrics.items()},
     )
 
@@ -541,6 +559,7 @@ def run_real_student_smoke(
     *,
     router_config: RouterConfig = FOUR_CONDITION_ROUTER,
     loss_config: FCOPDLossConfig | None = None,
+    expected_conditions: tuple[Condition, ...] = FOUR_CONDITIONS,
     require_decoded_match: bool = True,
     device: torch.device | str = "cpu",
 ) -> RealStudentSmokeReport:
@@ -552,6 +571,7 @@ def run_real_student_smoke(
                 provider,
                 router_config=router_config,
                 loss_config=loss_config,
+                expected_conditions=expected_conditions,
                 require_decoded_match=require_decoded_match,
                 device=device,
             )
@@ -590,6 +610,7 @@ class RealMinTrainReport:
     nonzero_grad_param_names: list[str] = field(default_factory=list)
     lm_head_embed_tied: bool = False
     tied_parameter_names: list[list[str]] = field(default_factory=list)
+    expected_conditions: tuple[Condition, ...] = FOUR_CONDITIONS
     steps: list[RealMinTrainStep] = field(default_factory=list)
 
     @property
@@ -616,6 +637,10 @@ class RealMinTrainReport:
         return set(FOUR_CONDITIONS).issubset(self.consumed_conditions)
 
     @property
+    def expected_conditions_consumed(self) -> bool:
+        return set(self.expected_conditions).issubset(self.consumed_conditions)
+
+    @property
     def loss_decreased(self) -> bool:
         return bool(self.steps) and self.steps[-1].loss < self.steps[0].loss
 
@@ -629,7 +654,7 @@ class RealMinTrainReport:
             and self.all_loss_finite
             and self.all_grads_finite
             and self.every_step_updates_params
-            and self.four_conditions_consumed
+            and self.expected_conditions_consumed
         )
 
 
@@ -667,6 +692,7 @@ def run_real_student_min_train(
     learning_rate: float = 1e-4,
     router_config: RouterConfig = FOUR_CONDITION_ROUTER,
     loss_config: FCOPDLossConfig | None = None,
+    expected_conditions: tuple[Condition, ...] = FOUR_CONDITIONS,
     require_decoded_match: bool = True,
     device: torch.device | str = "cpu",
 ) -> RealMinTrainReport:
@@ -722,6 +748,7 @@ def run_real_student_min_train(
         trainable_param_names=trainable_names,
         lm_head_embed_tied=lm_head_embed_tied(tied_groups),
         tied_parameter_names=tied_groups,
+        expected_conditions=expected_conditions,
     )
 
     for step in range(num_steps):
@@ -831,10 +858,20 @@ def _result_to_json(result: RealStudentResult) -> dict[str, Any]:
         "nonzero_grad_param_names": result.nonzero_grad_param_names,
         "lm_head_embed_tied": result.lm_head_embed_tied,
         "tied_parameter_names": result.tied_parameter_names,
+        "expected_conditions": [condition.value for condition in result.expected_conditions],
         "consumed_conditions": sorted(c.value for c in result.consumed_conditions),
         "four_conditions_consumed": result.four_conditions_consumed,
+        "expected_conditions_consumed": result.expected_conditions_consumed,
         "passed": result.passed,
     }
+
+
+def _condition_set(value: str) -> tuple[RouterConfig, tuple[Condition, ...]]:
+    if value == "4c":
+        return FOUR_CONDITION_ROUTER, FOUR_CONDITIONS
+    if value == "2c":
+        return TWO_CONDITION_ROUTER, TWO_CONDITIONS
+    raise argparse.ArgumentTypeError("condition set must be '4c' or '2c'")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -850,6 +887,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--limit", type=int, default=1)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--dtype", default="bfloat16", choices=tuple(_DTYPES))
+    parser.add_argument("--condition-set", choices=("4c", "2c"), default="4c")
     parser.add_argument("--freeze-all-but-lm-head", action="store_true")
     parser.add_argument("--max-prompt-length", type=int, default=None)
     parser.add_argument("--max-response-tokens", type=int, default=None)
@@ -876,10 +914,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         max_response_tokens=args.max_response_tokens,
     )
     provider = HFStudentProvider.load(config)
+    router_config, expected_conditions = _condition_set(args.condition_set)
 
     report = run_real_student_smoke(
         records,
         provider,
+        router_config=router_config,
+        expected_conditions=expected_conditions,
         require_decoded_match=not args.allow_retokenize_mismatch,
         device="cpu",
     )
@@ -890,6 +931,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         json.dumps(
             {
                 "model_path": args.model_path,
+                "condition_set": args.condition_set,
                 "num_records": report.num_records,
                 "passed": report.passed,
             },
@@ -918,6 +960,7 @@ def min_train_main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--dtype", default="bfloat16", choices=tuple(_DTYPES))
+    parser.add_argument("--condition-set", choices=("4c", "2c"), default="4c")
     parser.add_argument(
         "--freeze-all-but-lm-head",
         action=argparse.BooleanOptionalAction,
@@ -949,12 +992,15 @@ def min_train_main(argv: Sequence[str] | None = None) -> int:
         max_response_tokens=args.max_response_tokens,
     )
     provider = HFStudentProvider.load(config)
+    router_config, expected_conditions = _condition_set(args.condition_set)
 
     report = run_real_student_min_train(
         records,
         provider,
         num_steps=args.steps,
         learning_rate=args.lr,
+        router_config=router_config,
+        expected_conditions=expected_conditions,
         require_decoded_match=not args.allow_retokenize_mismatch,
     )
 
@@ -973,6 +1019,7 @@ def min_train_main(argv: Sequence[str] | None = None) -> int:
 
     summary = {
         "model_path": args.model_path,
+        "condition_set": args.condition_set,
         "num_records": report.num_records,
         "num_steps": report.num_steps,
         "learning_rate": report.learning_rate,
@@ -990,6 +1037,8 @@ def min_train_main(argv: Sequence[str] | None = None) -> int:
         "every_step_updates_params": report.every_step_updates_params,
         "consumed_conditions": sorted(c.value for c in report.consumed_conditions),
         "four_conditions_consumed": report.four_conditions_consumed,
+        "expected_conditions": [condition.value for condition in report.expected_conditions],
+        "expected_conditions_consumed": report.expected_conditions_consumed,
         "initial_loss": report.steps[0].loss,
         "final_loss": report.steps[-1].loss,
         "loss_decreased": report.loss_decreased,

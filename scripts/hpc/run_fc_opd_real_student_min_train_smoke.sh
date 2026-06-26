@@ -17,6 +17,7 @@ STEPS="${FC_OPD_REAL_STUDENT_STEPS:-3}"
 LR="${FC_OPD_REAL_STUDENT_LR:-1e-4}"
 DEVICE="${FC_OPD_STUDENT_DEVICE:-cuda}"
 DTYPE="${FC_OPD_STUDENT_DTYPE:-bfloat16}"
+CONDITION_SET="${FC_OPD_CONDITION_SET:-4c}"
 
 EXTRA_ARGS=()
 if [[ -n "${FC_OPD_MAX_PROMPT_LENGTH:-}" ]]; then
@@ -37,4 +38,5 @@ python "${REPO_ROOT}/scripts/hpc/run_fc_opd_real_student_min_train_smoke.py" \
   --lr "${LR}" \
   --device "${DEVICE}" \
   --dtype "${DTYPE}" \
+  --condition-set "${CONDITION_SET}" \
   "${EXTRA_ARGS[@]}"

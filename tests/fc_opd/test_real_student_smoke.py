@@ -17,6 +17,8 @@ from dual_track_opd.fc_opd.offline_scoring import (
 )
 from dual_track_opd.fc_opd.real_student_smoke import (
     StudentForwardOutput,
+    TWO_CONDITIONS,
+    TWO_CONDITION_ROUTER,
     detect_tied_parameter_groups,
     lm_head_embed_tied,
     response_logit_slice,
@@ -47,6 +49,30 @@ def _build_offline_payloads(num_samples: int = 2) -> list[dict]:
             f"http://{host}:{port}", expected_tokenizer_hash=tokenizer_fingerprint(tokenizer)
         )
         config = OfflineScoringConfig(source_dataset="vstar", conditions=FOUR_CONDITIONS)
+        scored = list(
+            iter_offline_scores(
+                make_smoke_dataset(num_samples),
+                config=config,
+                tokenizer=tokenizer,
+                teacher_client=client,
+                mode="protocol_smoke",
+            )
+        )
+    return [record.payload for record in scored]
+
+
+def _build_2c_offline_payloads(num_samples: int = 2) -> list[dict]:
+    tokenizer = ByteTokenizer()
+    scorer = SyntheticTeacherScorer(
+        vocab_size=320, top_k=TOP_K, tokenizer_hash=tokenizer_fingerprint(tokenizer)
+    )
+    with ExitStack() as stack:
+        server = stack.enter_context(running_teacher_server(scorer))
+        host, port = server.server_address
+        client = TeacherClient(
+            f"http://{host}:{port}", expected_tokenizer_hash=tokenizer_fingerprint(tokenizer)
+        )
+        config = OfflineScoringConfig(source_dataset="vstar", conditions=TWO_CONDITIONS)
         scored = list(
             iter_offline_scores(
                 make_smoke_dataset(num_samples),
@@ -351,6 +377,24 @@ def test_min_train_changes_trainable_parameters(offline_payloads):
         assert step.consumed_conditions == set(FOUR_CONDITIONS)
     assert report.every_step_updates_params
     assert report.four_conditions_consumed
+
+
+def test_min_train_supports_explicit_2c_router():
+    payloads = _build_2c_offline_payloads(2)
+    provider = _provider_for(payloads)
+    report = run_real_student_min_train(
+        payloads,
+        provider,
+        router_config=TWO_CONDITION_ROUTER,
+        expected_conditions=TWO_CONDITIONS,
+        num_steps=2,
+        learning_rate=0.1,
+    )
+
+    assert report.passed
+    assert report.expected_conditions_consumed
+    assert report.consumed_conditions == set(TWO_CONDITIONS)
+    assert not report.four_conditions_consumed
 
 
 def test_min_train_actually_moves_a_parameter(offline_payloads):
