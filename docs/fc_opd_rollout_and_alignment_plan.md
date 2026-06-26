@@ -17,6 +17,12 @@ For each prompt `x`:
 3. Teacher-force score each `y_k` under all configured conditions.
 4. Train the student against the stored offline scores.
 
+Audit levels:
+
+- `fixed_audit_response`: fixed non-gold response for protocol/path checks only.
+- `dataset_target`: diagnostic target scoring only, not OPD.
+- `student_rollout`: OPD-compatible signal audit; use this before training.
+
 If rollouts are generated once and reused for multiple epochs, label the method
 as offline or semi-offline distillation. If rollouts are periodically refreshed
 from the current student policy, label it semi-on-policy or on-policy depending

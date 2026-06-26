@@ -31,6 +31,9 @@ python scripts/hpc/dump_fc_opd_condition_prompts.py \
 The tool writes both Markdown and JSONL. If `--output` ends in `.md`, the JSONL
 uses the same stem with `.jsonl`.
 
+Prompt dumps do not establish OPD rollout signal. They are a prompt/path audit
+for condition construction.
+
 ## Task Evidence Modes
 
 - `none`: default non-oracle mode. Task evidence says that no task-specific

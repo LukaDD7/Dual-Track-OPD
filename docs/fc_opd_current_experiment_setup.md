@@ -19,6 +19,11 @@ The current FC-OPD pipeline is offline-teacher, fixed-response distillation:
 7. FC-OPD loss compares student logits against stored teacher condition scores.
 8. `backward()` and `optimizer.step()` update real student parameters.
 
+The original dataset signal audit used `fixed_audit_response`, which is only a
+protocol/path/condition audit. It is useful for checking full-vs-blur signal and
+teacher scoring health, but it is not a student-rollout signal audit. Formal
+OPD-compatible evidence requires `response_source=student_rollout`.
+
 The latest real student optimizer-step smoke verified that the tied Qwen3-VL-4B
 `lm_head.weight` / `model.language_model.embed_tokens.weight` parameter receives
 gradient and changes after Adam steps.
@@ -38,6 +43,11 @@ non-informative placeholder mode. It is useful for verifying prompts and image
 paths, but it is not final 4C training evidence. First real Vision-OPD training
 should use FC-OPD-2C (`full,blur`) or wait for audited non-oracle free/task
 evidence generators before using FC-OPD-4C.
+
+Answer fields such as `reward_model.ground_truth` and `extra_info.answer` are
+preserved as answer metadata for later evaluation, correctness estimation, and
+alignment diagnostics. They must not be injected into default prompts or fixed
+audit responses.
 
 `fact` is reserved and is not implemented in the current real pipeline. It
 should be used only for externally verified facts with provenance. Same-model

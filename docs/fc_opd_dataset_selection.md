@@ -8,6 +8,24 @@ train or tune the student.
 Do not modify `third_party/verl` for this stage, and do not start actual
 training from the audit outputs.
 
+## Response Provenance Levels
+
+There are three audit levels, and their summaries must not be mixed:
+
+- `fixed_audit_response`: protocol/path/condition audit only. It uses a fixed
+  non-gold XML response and can show whether prompts, paths, teacher scoring, and
+  condition divergences are non-collapsed. It is not student-rollout evidence.
+- `dataset_target`: diagnostic target scoring only. It may use preserved answer
+  metadata and must not be called OPD or student rollout.
+- `student_rollout`: formal OPD-compatible signal audit. It samples K student
+  responses first, freezes those response token IDs, then teacher-force scores
+  each rollout under the requested conditions.
+
+Every dataset audit JSONL row records `response_source`, response hashes, token
+counts, and a provenance note. Summaries report response-source counts, unique
+response hash counts, response length distribution, and an
+`all_responses_identical` warning when applicable.
+
 ## Candidate Order
 
 Recommended decision order:
@@ -108,6 +126,7 @@ python scripts/hpc/run_fc_opd_dataset_signal_audit.py \
   --conditions full,blur,free,task \
   --blur-sigma 2.0 \
   --task-evidence-mode none \
+  --response-source fixed_audit_response \
   --materialize-degraded-images \
   --output-dir "$DTOPD_OUTPUT_ROOT/fc_opd/dataset_audit/vision_opd6k_dryrun_8" \
   --dry-run
@@ -116,6 +135,18 @@ python scripts/hpc/run_fc_opd_dataset_signal_audit.py \
 Expected for the first Vision-OPD samples after materialization:
 `image_missing_rate=0.0`, `degraded_image_missing_rate=0.0`, no leakage
 warnings, clean question text, and bbox/crop metadata preserved if present.
+
+For the first OPD-compatible rollout smoke, start with:
+
+```bash
+DATASET="$PROJECT_ROOT/third_party/Vision-OPD/data/train.parquet" \
+LIMIT=4 \
+ROLLOUTS_PER_PROMPT=2 \
+CONDITIONS=full,blur \
+bash scripts/hpc/run_fc_opd_student_rollout_signal_audit.sh
+```
+
+Then scale to `LIMIT=16` and `ROLLOUTS_PER_PROMPT=4` once the smoke passes.
 
 The Python entrypoint exposes the same flags directly:
 
@@ -167,6 +198,8 @@ Each per-sample JSONL row includes:
 - image path and degraded image path;
 - question and answer availability flag;
 - response length `T` and prompt length if known;
+- response source, response text/token hashes, response tokens or token count,
+  and response provenance note;
 - tokenizer hash and teacher model ID;
 - condition score availability;
 - condition entropy means;
@@ -180,6 +213,10 @@ The summary includes:
 - image and degraded-image missing rates;
 - teacher error rate;
 - mean response tokens;
+- response source counts;
+- unique response text/token hash counts;
+- response length mean / p50 / p90 and top-10 counter;
+- all-responses-identical and response provenance warnings;
 - mean entropy per condition;
 - mean `full` vs `blur` divergence;
 - mean `task` vs `free` divergence;

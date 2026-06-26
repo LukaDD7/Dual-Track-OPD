@@ -53,6 +53,15 @@ ANSWER_KEYS = (
     "chosen",
 )
 OPTION_KEYS = ("options", "choices", "candidates")
+NESTED_QUESTION_PATHS = (
+    ("extra_info", "question"),
+    ("metadata", "question"),
+)
+NESTED_ANSWER_PATHS = (
+    ("reward_model", "ground_truth"),
+    ("extra_info", "answer"),
+    ("metadata", "answer"),
+)
 
 
 def load_raw_records(path: str | Path, dataset_type: str = "auto") -> list[dict[str, Any]]:
@@ -131,7 +140,8 @@ def normalize_record(
         for path in _pathlikes_from_value(crop_raw)
     ]
     bbox_image_path = bbox_image_paths[0] if bbox_image_paths else ""
-    answer = _first_text(record, ANSWER_KEYS)
+    answer_metadata = extract_answer_metadata(record)
+    answer = answer_metadata.get("answer_metadata")
     free_caption = _first_text(record, ("free_caption", "caption", "image_caption")) or ""
     task_evidence = _first_text(record, ("task_evidence", "task_extraction", "evidence")) or ""
     options = _extract_options(record)
@@ -150,6 +160,11 @@ def normalize_record(
         "bbox_image_exists": Path(bbox_image_path).expanduser().is_file() if bbox_image_path else False,
         "answer": answer,
         "gold": answer,
+        "answer_metadata": answer,
+        "answer_source": answer_metadata.get("answer_source"),
+        "answer_available": bool(answer),
+        "reward_model_ground_truth": answer_metadata.get("reward_model_ground_truth"),
+        "extra_info_answer": answer_metadata.get("extra_info_answer"),
         "free_caption": free_caption,
         "task_evidence": task_evidence,
         "options": options,
@@ -159,6 +174,10 @@ def normalize_record(
             "bbox_image_path": bbox_image_path,
             "bbox_image_paths": bbox_image_paths,
             "bbox_image_exists": Path(bbox_image_path).expanduser().is_file() if bbox_image_path else False,
+            "answer_source": answer_metadata.get("answer_source"),
+            "answer_available": bool(answer),
+            "reward_model_ground_truth": answer_metadata.get("reward_model_ground_truth"),
+            "extra_info_answer": answer_metadata.get("extra_info_answer"),
             "raw_keys": sorted(str(key) for key in record.keys()),
         },
     }
@@ -169,11 +188,35 @@ def extract_question_text(record: Mapping[str, Any]) -> str:
     """Extract clean user question text from strings, dicts, or chat messages."""
 
     raw = _first_value(record, QUESTION_KEYS)
+    if raw is None:
+        raw = _first_nested_value(record, NESTED_QUESTION_PATHS)
     text = normalize_prompt_text(raw)
     options = _extract_options(record)
     if options and not _question_contains_options(text, options):
         text = "\n\n".join([text, *options]).strip()
     return text
+
+
+def extract_answer_metadata(record: Mapping[str, Any]) -> dict[str, str | None]:
+    """Preserve gold/target fields as metadata without using them as rollouts."""
+
+    direct = _first_text(record, ANSWER_KEYS)
+    reward_model_ground_truth = _string_or_none(_nested_value(record, ("reward_model", "ground_truth")))
+    extra_info_answer = _string_or_none(_nested_value(record, ("extra_info", "answer")))
+    answer = direct or reward_model_ground_truth or extra_info_answer
+    source = None
+    if direct:
+        source = "direct_answer_field"
+    elif reward_model_ground_truth:
+        source = "reward_model.ground_truth"
+    elif extra_info_answer:
+        source = "extra_info.answer"
+    return {
+        "answer_metadata": answer,
+        "answer_source": source,
+        "reward_model_ground_truth": reward_model_ground_truth,
+        "extra_info_answer": extra_info_answer,
+    }
 
 
 def task_evidence_mode_label(mode: str) -> str:
@@ -279,6 +322,23 @@ def _first_value(record: Mapping[str, Any], keys: Sequence[str]) -> Any:
     return None
 
 
+def _first_nested_value(record: Mapping[str, Any], paths: Sequence[Sequence[str]]) -> Any:
+    for path in paths:
+        value = _nested_value(record, path)
+        if value is not None and not _is_empty(value):
+            return value
+    return None
+
+
+def _nested_value(record: Mapping[str, Any], path: Sequence[str]) -> Any:
+    current: Any = record
+    for key in path:
+        if not isinstance(current, Mapping) or key not in current:
+            return None
+        current = current[key]
+    return current
+
+
 def _first_text(record: Mapping[str, Any], keys: Sequence[str]) -> str | None:
     value = _first_value(record, keys)
     if value is None:
@@ -292,6 +352,13 @@ def _first_text(record: Mapping[str, Any], keys: Sequence[str]) -> str | None:
             return None
         return str(value[0]).strip() or None
     return str(value).strip() or None
+
+
+def _string_or_none(value: Any) -> str | None:
+    if value is None or _is_empty(value):
+        return None
+    text = normalize_prompt_text(value) if isinstance(value, Mapping | list | tuple) else str(value).strip()
+    return text or None
 
 
 def _pathlike_from_value(value: Any) -> str | None:

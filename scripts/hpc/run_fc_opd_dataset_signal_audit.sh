@@ -13,6 +13,7 @@
 #   OUTPUT_DIR="${DTOPD_OUTPUT_ROOT}/fc_opd/dataset_signal_audit/${SOURCE_DATASET}"
 #   DEGRADED_DIR=/path/to/blurred/images
 #   TASK_EVIDENCE_MODE=none
+#   RESPONSE_SOURCE=fixed_audit_response
 #   DRY_RUN=1
 set -euo pipefail
 
@@ -29,6 +30,7 @@ OUTPUT_DIR="${OUTPUT_DIR:-${DTOPD_OUTPUT_ROOT:-${REPO_ROOT}/artifacts}/fc_opd/da
 CONDITIONS="${CONDITIONS:-full,blur,free,task}"
 BLUR_SIGMA="${BLUR_SIGMA:-2.0}"
 TASK_EVIDENCE_MODE="${TASK_EVIDENCE_MODE:-none}"
+RESPONSE_SOURCE="${RESPONSE_SOURCE:-fixed_audit_response}"
 
 args=(
   "${REPO_ROOT}/scripts/hpc/run_fc_opd_dataset_signal_audit.py"
@@ -41,6 +43,7 @@ args=(
   --conditions "${CONDITIONS}"
   --blur-sigma "${BLUR_SIGMA}"
   --task-evidence-mode "${TASK_EVIDENCE_MODE}"
+  --response-source "${RESPONSE_SOURCE}"
   --output-dir "${OUTPUT_DIR}"
 )
 

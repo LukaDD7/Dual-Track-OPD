@@ -9,9 +9,11 @@ in ``--dry-run`` mode to validate dataset fields before a teacher is available.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 from statistics import mean
@@ -40,6 +42,18 @@ from .teacher_protocol import tokenizer_fingerprint
 DEFAULT_TOKENIZER = "hf:$DTOPD_MODEL_ROOT/Qwen3-VL-4B-Instruct"
 DEFAULT_LIMIT = 128
 HIGH_SIGNAL_THRESHOLD = 0.01
+FIXED_AUDIT_RESPONSE_NOTE = (
+    "This audit probes condition/prompt protocol signal only; it is not a "
+    "student-rollout signal audit."
+)
+DATASET_TARGET_RESPONSE_NOTE = "diagnostic target scoring, not student rollout"
+ALLOWED_RESPONSE_SOURCES = (
+    "fixed_audit_response",
+    "dataset_target",
+    "student_rollout",
+    "teacher_generated",
+    "unknown",
+)
 
 
 @dataclass(frozen=True)
@@ -58,6 +72,7 @@ class DatasetAuditConfig:
     skip_existing: bool = False
     dry_run: bool = False
     task_evidence_mode: str = "none"
+    response_source: str = "fixed_audit_response"
     high_signal_threshold: float = HIGH_SIGNAL_THRESHOLD
     high_cosine_threshold: float = 0.98
 
@@ -75,6 +90,13 @@ class DatasetAuditConfig:
             "oracle_answer",
         }:
             raise ValueError("unsupported task_evidence_mode")
+        if self.response_source not in ALLOWED_RESPONSE_SOURCES:
+            raise ValueError(f"response_source must be one of {ALLOWED_RESPONSE_SOURCES}")
+        if self.response_source not in {"fixed_audit_response", "dataset_target"}:
+            raise ValueError(
+                "dataset_signal_audit supports fixed_audit_response and dataset_target; "
+                "use student rollout audit for student_rollout"
+            )
         valid_types = {"vision_opd_json", "vision_opd_parquet", "generic_jsonl", "auto"}
         if self.dataset_type not in valid_types:
             raise ValueError(f"dataset_type must be one of {sorted(valid_types)}")
@@ -228,7 +250,10 @@ def audit_record(
             except Exception as exc:  # noqa: BLE001
                 errors.append(f"degraded_image_error: {exc}")
 
-    response_text = build_audit_response(record, answer=answer)
+    response = resolve_audit_response(record, source=config.response_source)
+    response_text = response["response_text"]
+    if response.get("error"):
+        errors.append(str(response["error"]))
     response_token_ids = tuple(int(item) for item in tokenizer.encode(response_text))
     if question:
         prompt_length = len(tokenizer.encode(question))
@@ -300,7 +325,18 @@ def audit_record(
         ),
         "question": question,
         "answer_available": bool(answer and str(answer).strip()),
+        "answer_metadata": record.get("answer_metadata"),
+        "answer_source": record.get("answer_source"),
+        "reward_model_ground_truth": record.get("reward_model_ground_truth"),
+        "extra_info_answer": record.get("extra_info_answer"),
+        "response_source": response["response_source"],
+        "response_text": response_text,
+        "response_token_ids": list(response_token_ids),
+        "response_token_count": len(response_token_ids),
+        "response_text_hash": hash_text(response_text),
+        "response_token_hash": hash_token_ids(response_token_ids),
         "response_length": len(response_token_ids),
+        "response_provenance_note": response["response_provenance_note"],
         "prompt_length": prompt_length,
         "tokenizer_hash": tokenizer_hash,
         "teacher_model_id": teacher_model_id,
@@ -317,18 +353,45 @@ def audit_record(
             "crop_bbox_policy": "metadata_only_default_no_crop_condition",
             "task_evidence_mode": config.task_evidence_mode,
             "task_evidence_mode_label": task_evidence_mode_label(config.task_evidence_mode),
+            "response_source": config.response_source,
         },
     }
 
 
-def build_audit_response(record: Mapping[str, Any], *, answer: str | None) -> str:
-    """Resolve a fixed response string for teacher scoring during the audit."""
+def resolve_audit_response(record: Mapping[str, Any], *, source: str) -> dict[str, str]:
+    """Resolve response text with explicit provenance."""
 
-    for key in ("response_text", "student_response", "response", "completion"):
-        value = record.get(key)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-    answer_text = answer.strip() if isinstance(answer, str) and answer.strip() else "unavailable"
+    if source == "fixed_audit_response":
+        return {
+            "response_source": "fixed_audit_response",
+            "response_text": build_fixed_audit_response(),
+            "response_provenance_note": FIXED_AUDIT_RESPONSE_NOTE,
+        }
+    if source == "dataset_target":
+        target = _dataset_target_text(record)
+        if target is None:
+            return {
+                "response_source": "dataset_target",
+                "response_text": "",
+                "response_provenance_note": DATASET_TARGET_RESPONSE_NOTE,
+                "error": "response_error: dataset_target requested but no target/answer is available",
+            }
+        return {
+            "response_source": "dataset_target",
+            "response_text": target,
+            "response_provenance_note": DATASET_TARGET_RESPONSE_NOTE,
+        }
+    return {
+        "response_source": "unknown",
+        "response_text": "",
+        "response_provenance_note": "unknown response source",
+        "error": f"response_error: unsupported response_source {source}",
+    }
+
+
+def build_fixed_audit_response() -> str:
+    """Construct a non-gold fixed response for protocol/path audits."""
+
     return (
         "<visual_evidence>\n"
         "The image should be inspected for the question-relevant visual details.\n"
@@ -337,9 +400,33 @@ def build_audit_response(record: Mapping[str, Any], *, answer: str | None) -> st
         "Use the visual evidence and the question to derive the final answer.\n"
         "</reasoning>\n"
         "<answer>\n"
-        f"{answer_text}\n"
+        "unavailable\n"
         "</answer>"
     )
+
+
+def build_audit_response(record: Mapping[str, Any], *, answer: str | None) -> str:
+    """Backward-compatible wrapper for older tests; use ``resolve_audit_response``."""
+
+    del record, answer
+    return build_fixed_audit_response()
+
+
+def _dataset_target_text(record: Mapping[str, Any]) -> str | None:
+    for key in ("target_response", "target", "answer_metadata", "answer", "gold"):
+        value = record.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def hash_text(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def hash_token_ids(token_ids: Sequence[int]) -> str:
+    payload = json.dumps([int(item) for item in token_ids], separators=(",", ":")).encode()
+    return hashlib.sha256(payload).hexdigest()
 
 
 def build_audit_condition_inputs(
@@ -473,6 +560,19 @@ def summarize_audit_samples(
     ]
     visual_stats = _series_stats(visual_values)
     task_stats = _series_stats(task_values)
+    response_text_hashes = [str(sample.get("response_text_hash", "")) for sample in samples]
+    response_token_hashes = [str(sample.get("response_token_hash", "")) for sample in samples]
+    response_sources = [str(sample.get("response_source", "unknown")) for sample in samples]
+    response_lengths = [int(sample.get("response_length", 0)) for sample in samples]
+    response_source_counts = dict(Counter(response_sources))
+    text_hash_count = len(set(hash_value for hash_value in response_text_hashes if hash_value))
+    token_hash_count = len(set(hash_value for hash_value in response_token_hashes if hash_value))
+    all_responses_identical = requested > 1 and text_hash_count == 1 and token_hash_count == 1
+    response_warnings: list[str] = []
+    if all_responses_identical:
+        response_warnings.append("all_responses_identical")
+    if response_source_counts.get("fixed_audit_response", 0):
+        response_warnings.append(FIXED_AUDIT_RESPONSE_NOTE)
     collapse = {
         "visual_detail_collapsed": (
             visual_stats["mean"] is not None
@@ -506,6 +606,17 @@ def summarize_audit_samples(
         "mean_response_tokens": _mean_or_none(
             int(sample.get("response_length", 0)) for sample in samples
         ),
+        "response_source_counts": response_source_counts,
+        "unique_response_text_hash_count": text_hash_count,
+        "unique_response_token_hash_count": token_hash_count,
+        "response_length_mean": _mean_or_none(response_lengths),
+        "response_length_p50": _series_stats(response_lengths)["p50"],
+        "response_length_p90": _series_stats(response_lengths)["p90"],
+        "response_length_counter_top10": [
+            [length, count] for length, count in Counter(response_lengths).most_common(10)
+        ],
+        "all_responses_identical": all_responses_identical,
+        "response_provenance_warning": response_warnings,
         "mean_entropy": entropy_by_condition,
         "mean_full_vs_blur_divergence": visual_stats["mean"],
         "mean_task_vs_free_divergence": task_stats["mean"],
@@ -760,6 +871,21 @@ def _summary_tsv(summary: Mapping[str, Any]) -> str:
         ("degraded_image_missing_rate", summary.get("degraded_image_missing_rate")),
         ("teacher_error_rate", summary.get("teacher_error_rate")),
         ("mean_response_tokens", summary.get("mean_response_tokens")),
+        ("response_source_counts", json.dumps(summary.get("response_source_counts", {}), sort_keys=True)),
+        ("unique_response_text_hash_count", summary.get("unique_response_text_hash_count")),
+        ("unique_response_token_hash_count", summary.get("unique_response_token_hash_count")),
+        ("response_length_mean", summary.get("response_length_mean")),
+        ("response_length_p50", summary.get("response_length_p50")),
+        ("response_length_p90", summary.get("response_length_p90")),
+        (
+            "response_length_counter_top10",
+            json.dumps(summary.get("response_length_counter_top10", [])),
+        ),
+        ("all_responses_identical", summary.get("all_responses_identical")),
+        (
+            "response_provenance_warning",
+            json.dumps(summary.get("response_provenance_warning", [])),
+        ),
         ("mean_full_vs_blur_divergence", summary.get("mean_full_vs_blur_divergence")),
         ("mean_task_vs_free_divergence", summary.get("mean_task_vs_free_divergence")),
         (
@@ -783,6 +909,15 @@ def _summary_markdown(summary: Mapping[str, Any]) -> str:
         f"- Degraded image missing rate: {summary.get('degraded_image_missing_rate')}\n"
         f"- Teacher error rate: {summary.get('teacher_error_rate')}\n"
         f"- Mean response tokens: {summary.get('mean_response_tokens')}\n\n"
+        "## Response Provenance\n\n"
+        f"- Response source counts: `{json.dumps(summary.get('response_source_counts', {}), sort_keys=True)}`\n"
+        f"- Unique response text hashes: {summary.get('unique_response_text_hash_count')}\n"
+        f"- Unique response token hashes: {summary.get('unique_response_token_hash_count')}\n"
+        f"- Response length mean / p50 / p90: {summary.get('response_length_mean')} / "
+        f"{summary.get('response_length_p50')} / {summary.get('response_length_p90')}\n"
+        f"- Response length top10: `{json.dumps(summary.get('response_length_counter_top10', []))}`\n"
+        f"- All responses identical: {summary.get('all_responses_identical')}\n"
+        f"- Response provenance warnings: `{json.dumps(summary.get('response_provenance_warning', []))}`\n\n"
         "## Signal\n\n"
         f"- Visual detail mean / p50 / p90: {visual.get('mean')} / "
         f"{visual.get('p50')} / {visual.get('p90')}\n"
@@ -816,6 +951,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--skip-existing", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument(
+        "--response-source",
+        choices=("fixed_audit_response", "dataset_target"),
+        default="fixed_audit_response",
+    )
+    parser.add_argument(
         "--task-evidence-mode",
         choices=("none", "free_caption", "question_conditioned_caption", "oracle_answer"),
         default="none",
@@ -840,6 +980,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         skip_existing=args.skip_existing,
         dry_run=args.dry_run,
         task_evidence_mode=args.task_evidence_mode,
+        response_source=args.response_source,
     )
     result = run_dataset_signal_audit(config)
     if result.skipped_existing:
