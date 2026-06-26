@@ -1,0 +1,146 @@
+# FC-OPD Dataset Selection And Signal Audit
+
+Before starting FC-OPD training, run a small offline scoring audit over each
+candidate training set. The goal is to check whether the dataset actually
+produces useful condition signal under `full`, `blur`, `free`, and `task`, not to
+train or tune the student.
+
+Do not modify `third_party/verl` for this stage, and do not start actual
+training from the audit outputs.
+
+## Candidate Order
+
+Recommended decision order:
+
+1. Vision-OPD-6K prepared train JSON / Parquet for the first fair objective
+   comparison with the Vision-OPD baseline.
+2. Geometry3K, if available, for a VA-OPD-style visual-math comparison.
+3. ViRL39K, or mixed visual reasoning data, only after the audit confirms
+   non-collapsed condition signal.
+
+Optional later candidates should stay out of training mixtures until their
+signal audit is done: MathVista / MathVerse-like training splits, MV-MATH,
+ScienceQA-IMG, BLINK, ViewSpatial-Bench, MindCube, and MMMU_Pro.
+
+## Leakage Rule
+
+For real training, `task_evidence` must not simply contain the gold answer unless
+the run is explicitly marked as an oracle or upper-bound run.
+
+The previous VStar16 smoke used benchmark reference answers as task evidence
+only as a protocol smoke. That construction is not valid default training-data
+construction.
+
+The audit emits `task_evidence_contains_answer` warnings when it can detect that
+the resolved task evidence includes the answer string.
+
+## Audit Command
+
+Start the teacher service separately, then run:
+
+```bash
+DATASET="$DTOPD_DATA_ROOT/vision_opd_6k/train.parquet" \
+SOURCE_DATASET=vision_opd_6k \
+DATASET_TYPE=vision_opd_parquet \
+bash scripts/hpc/run_fc_opd_dataset_signal_audit.sh
+```
+
+Useful environment overrides:
+
+```bash
+LIMIT=128
+TEACHER_URL=http://127.0.0.1:18080
+TOKENIZER="hf:${DTOPD_MODEL_ROOT}/Qwen3-VL-4B-Instruct"
+CONDITIONS=full,blur,free,task
+BLUR_SIGMA=2.0
+DEGRADED_DIR="$DTOPD_OUTPUT_ROOT/fc_opd/degraded_images/vision_opd_6k"
+MATERIALIZE_DEGRADED_IMAGES=1
+SKIP_EXISTING=1
+DRY_RUN=1
+```
+
+For a schema-only dry run on a machine without model tokenizers, set
+`TOKENIZER=byte`; real audit runs should use the same HF tokenizer hash expected
+by the teacher service.
+
+The Python entrypoint exposes the same flags directly:
+
+```bash
+python scripts/hpc/run_fc_opd_dataset_signal_audit.py \
+  --dataset "$DTOPD_DATA_ROOT/vision_opd_6k/train.parquet" \
+  --dataset-type vision_opd_parquet \
+  --source-dataset vision_opd_6k \
+  --limit 128 \
+  --teacher-url http://127.0.0.1:18080 \
+  --tokenizer "hf:${DTOPD_MODEL_ROOT}/Qwen3-VL-4B-Instruct" \
+  --conditions full,blur,free,task \
+  --blur-sigma 2.0 \
+  --output-dir "$DTOPD_OUTPUT_ROOT/fc_opd/dataset_signal_audit/vision_opd_6k"
+```
+
+## Supported Inputs
+
+`--dataset-type` may be:
+
+- `vision_opd_json`: JSON array or JSONL with Vision-OPD-style fields.
+- `vision_opd_parquet`: Parquet read through pandas / pyarrow.
+- `generic_jsonl`: one JSON object per line with flexible image and question
+  field names.
+- `auto`: `.parquet` -> Parquet, `.jsonl` -> generic JSONL, otherwise JSON.
+
+Flexible field names include:
+
+- question: `query`, `question`, `prompt`, `instruction`;
+- image: `images`, `image`, `image_path`, `image_paths`;
+- answer: `response`, `answer`, `label`, `target`;
+- evidence: `task_evidence`, `task_extraction`, `evidence`;
+- caption: `free_caption`, `caption`, `image_caption`.
+
+## Outputs
+
+The audit writes four files under `--output-dir`:
+
+- `<source>_dataset_signal_audit.jsonl`
+- `<source>_dataset_signal_audit_summary.json`
+- `<source>_dataset_signal_audit_summary.tsv`
+- `<source>_dataset_signal_audit_summary.md`
+
+Each per-sample JSONL row includes:
+
+- `sample_uid`, `source_dataset`, `source_index`;
+- image path and degraded image path;
+- question and answer availability flag;
+- response length `T` and prompt length if known;
+- tokenizer hash and teacher model ID;
+- condition score availability;
+- condition entropy means;
+- condition signal arrays and mean / p50 / p90 summaries;
+- optional pairwise KD-gradient cosine diagnostics;
+- leakage warnings and local errors.
+
+The summary includes:
+
+- requested and scored sample counts;
+- image and degraded-image missing rates;
+- teacher error rate;
+- mean response tokens;
+- mean entropy per condition;
+- mean `full` vs `blur` divergence;
+- mean `task` vs `free` divergence;
+- visual detail signal mean / p50 / p90;
+- task extraction signal mean / p50 / p90;
+- high visual and task signal token ratios;
+- condition-collapse indicators;
+- leakage warnings.
+
+The optional gradient-cosine diagnostic compares condition-induced KD gradients
+under a fixed synthetic student distribution:
+
+- `cos(g_full, g_blur)`
+- `cos(g_full, g_free)`
+- `cos(g_full, g_task)`
+- `cos(g_blur, g_task)`
+
+This is useful for detecting condition redundancy or collapse. It is not
+ideal-gradient alignment and should not be interpreted as
+`Align_c(u) = cos(g_c^KD(u), g_u^ideal(u))`.
