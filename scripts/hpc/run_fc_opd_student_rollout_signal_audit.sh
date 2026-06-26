@@ -22,6 +22,8 @@ python "${REPO_ROOT}/scripts/hpc/run_fc_opd_student_rollout_signal_audit.py" \
   --seed "${SEED:-42}" \
   --device "${DEVICE:-cuda}" \
   --dtype "${DTYPE:-bfloat16}" \
+  --rollout-response-format "${ROLLOUT_RESPONSE_FORMAT:-fc_opd_structured}" \
+  --min-response-tokens-for-warning "${MIN_RESPONSE_TOKENS_FOR_WARNING:-16}" \
   --blur-sigma "${BLUR_SIGMA:-2.0}" \
   --materialize-degraded-images \
   --output-dir "${OUTPUT_DIR:-${DTOPD_OUTPUT_ROOT}/fc_opd/student_rollout_signal_audit}"

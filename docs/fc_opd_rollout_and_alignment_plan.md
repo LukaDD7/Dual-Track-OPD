@@ -23,6 +23,11 @@ Audit levels:
 - `dataset_target`: diagnostic target scoring only, not OPD.
 - `student_rollout`: OPD-compatible signal audit; use this before training.
 
+For Vision-OPD rollout audits, `answer_only` is a mechanical smoke mode only.
+The OPD-compatible default is `fc_opd_structured`, which asks the student for
+visual evidence, reasoning, and a final answer span. K=4 is meaningful only if
+rollouts are diverse; always report duplicate rollout diagnostics.
+
 If rollouts are generated once and reused for multiple epochs, label the method
 as offline or semi-offline distillation. If rollouts are periodically refreshed
 from the current student policy, label it semi-on-policy or on-policy depending

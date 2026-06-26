@@ -21,6 +21,7 @@ from .dataset_adapters import load_normalized_records
 from .dataset_signal_audit import (
     DatasetAuditResult,
     build_audit_condition_inputs,
+    compute_pairwise_kd_gradient_cosines,
     hash_text,
     hash_token_ids,
     materialize_gaussian_blur,
@@ -39,6 +40,46 @@ class StudentRolloutTokenizer(Protocol):
 
 
 class StudentRolloutGenerator(Protocol):
+    tokenizer: StudentRolloutTokenizer
+
+    def generate(
+        self,
+        *,
+        question: str,
+        image_path: str,
+        prompt_text: str,
+        seed: int,
+    ) -> str: ...
+
+
+ROLLOUT_RESPONSE_FORMATS = ("answer_only", "fc_opd_structured")
+STRUCTURED_ROLLOUT_INSTRUCTION = """Respond using exactly this XML structure:
+<visual_evidence>
+Question-relevant visual observations from the image. Do not use the gold answer.
+</visual_evidence>
+<reasoning>
+Briefly reason from the visual evidence and answer choices.
+</reasoning>
+<answer>
+Final option letter and short answer.
+</answer>"""
+
+
+@dataclass(frozen=True)
+class RolloutPrompt:
+    text: str
+    format_mode: str
+
+
+@dataclass(frozen=True)
+class RolloutDiversityDiagnostics:
+    unique_response_per_prompt_mean: float | None
+    duplicate_rollout_rate: float | None
+    all_rollouts_identical_per_prompt_count: int
+    short_response_rate: float | None
+
+
+class LegacyBatchRolloutGenerator(Protocol):
     tokenizer: StudentRolloutTokenizer
 
     def generate(
@@ -71,6 +112,16 @@ class StudentRolloutAuditConfig:
     degraded_dir: str | None = None
     materialize_degraded_images: bool = False
     output_dir: Path | None = None
+    rollout_response_format: str = "fc_opd_structured"
+    min_response_tokens_for_warning: int = 16
+
+    def __post_init__(self) -> None:
+        if self.rollout_response_format not in ROLLOUT_RESPONSE_FORMATS:
+            raise ValueError(f"rollout_response_format must be one of {ROLLOUT_RESPONSE_FORMATS}")
+        if self.rollouts_per_prompt <= 0:
+            raise ValueError("rollouts_per_prompt must be positive")
+        if self.min_response_tokens_for_warning <= 0:
+            raise ValueError("min_response_tokens_for_warning must be positive")
 
 
 @dataclass
@@ -90,24 +141,23 @@ class FixedFakeRolloutGenerator:
         *,
         question: str,
         image_path: str,
-        num_return_sequences: int,
+        prompt_text: str,
         seed: int,
-    ) -> list[str]:
+    ) -> str:
         del image_path
-        return [
-            (
-                "<visual_evidence>\n"
-                f"Fake rollout {index} for: {question[:48]}\n"
-                "</visual_evidence>\n"
-                "<reasoning>\n"
-                "This is a deterministic test rollout.\n"
-                "</reasoning>\n"
-                "<answer>\n"
-                f"{chr(ord('A') + (seed + index) % 4)}\n"
-                "</answer>"
-            )
-            for index in range(num_return_sequences)
-        ]
+        if "<visual_evidence>" not in prompt_text:
+            return f"{chr(ord('A') + seed % 4)}. fake"
+        return (
+            "<visual_evidence>\n"
+            f"Fake rollout seed {seed} for: {question[:48]}\n"
+            "</visual_evidence>\n"
+            "<reasoning>\n"
+            "This is a deterministic test rollout with visual evidence and reasoning.\n"
+            "</reasoning>\n"
+            "<answer>\n"
+            f"{chr(ord('A') + seed % 4)}. fake answer\n"
+            "</answer>"
+        )
 
 
 class HFQwenStudentRolloutGenerator:
@@ -138,20 +188,22 @@ class HFQwenStudentRolloutGenerator:
         *,
         question: str,
         image_path: str,
-        num_return_sequences: int,
+        prompt_text: str,
         seed: int,
-    ) -> list[str]:
+    ) -> str:
         import torch
 
         random.seed(seed)
         torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
         image = self._image_cls.open(image_path).convert("RGB")
         messages = [
             {
                 "role": "user",
                 "content": [
                     {"type": "image", "image": image_path},
-                    {"type": "text", "text": question},
+                    {"type": "text", "text": prompt_text},
                 ],
             }
         ]
@@ -161,18 +213,19 @@ class HFQwenStudentRolloutGenerator:
             add_generation_prompt=True,
         )
         inputs = self.processor(text=[prompt], images=[image], return_tensors="pt").to(self.model.device)
-        outputs = self.model.generate(
-            **inputs,
-            do_sample=True,
-            temperature=self.config.temperature,
-            top_p=self.config.top_p,
-            max_new_tokens=self.config.max_new_tokens,
-            num_return_sequences=num_return_sequences,
-            pad_token_id=self.tokenizer.eos_token_id,
-        )
+        generation_kwargs: dict[str, object] = {
+            "do_sample": self.config.temperature > 0,
+            "max_new_tokens": self.config.max_new_tokens,
+            "num_return_sequences": 1,
+            "pad_token_id": self.tokenizer.eos_token_id,
+        }
+        if self.config.temperature > 0:
+            generation_kwargs["temperature"] = self.config.temperature
+            generation_kwargs["top_p"] = self.config.top_p
+        outputs = self.model.generate(**inputs, **generation_kwargs)
         input_len = inputs["input_ids"].shape[-1]
         generated = outputs[:, input_len:]
-        return self.tokenizer.batch_decode(generated, skip_special_tokens=True)
+        return self.tokenizer.batch_decode(generated, skip_special_tokens=True)[0]
 
 
 def run_student_rollout_signal_audit(
@@ -217,7 +270,10 @@ def run_student_rollout_signal_audit(
         "top_p": config.top_p,
         "max_new_tokens": config.max_new_tokens,
         "seed": config.seed,
+        "rollout_response_format": config.rollout_response_format,
+        "min_response_tokens_for_warning": config.min_response_tokens_for_warning,
     }
+    summary.update(_rollout_diversity_summary(samples, config))
     result = StudentRolloutAuditResult(
         samples=samples,
         summary=summary,
@@ -244,14 +300,20 @@ def _score_rollouts_for_record(
     if config.materialize_degraded_images and image_path:
         materialize_gaussian_blur(image_path, degraded_image_path, config.blur_sigma)
 
-    rollouts = rollout_generator.generate(
-        question=question,
-        image_path=image_path,
-        num_return_sequences=config.rollouts_per_prompt,
-        seed=config.seed + prompt_index,
-    )
     rows: list[dict[str, Any]] = []
-    for rollout_id, response_text in enumerate(rollouts):
+    prompt = build_rollout_prompt(question, response_format=config.rollout_response_format)
+    for rollout_id in range(config.rollouts_per_prompt):
+        generation_seed = rollout_seed(
+            base_seed=config.seed,
+            source_index=int(record.get("source_index", prompt_index)),
+            rollout_id=rollout_id,
+        )
+        response_text = rollout_generator.generate(
+            question=question,
+            image_path=image_path,
+            prompt_text=prompt.text,
+            seed=generation_seed,
+        )
         token_ids = tuple(int(item) for item in rollout_generator.tokenizer.encode(response_text))
         condition_inputs = build_audit_condition_inputs(
             record,
@@ -272,6 +334,18 @@ def _score_rollouts_for_record(
             request_prefix=f"{record.get('sample_uid')}:rollout-{rollout_id}",
         )
         signals = compute_condition_signals(teacher_scores)
+        gradient_cosines = {}
+        errors: list[str] = []
+        try:
+            gradient_cosines = compute_pairwise_kd_gradient_cosines(teacher_scores)
+            if not gradient_cosines:
+                errors.append("gradient_cosine_unavailable: requested condition pair not present")
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"gradient_cosine_unavailable: {exc}")
+        image_exists = Path(image_path).expanduser().is_file() if image_path else False
+        degraded_image_exists = (
+            Path(degraded_image_path).expanduser().is_file() if degraded_image_path else False
+        )
         rows.append(
             {
                 "sample_uid": str(record.get("sample_uid") or ""),
@@ -282,8 +356,12 @@ def _score_rollouts_for_record(
                 "question": question,
                 "image_path": image_path,
                 "degraded_image_path": degraded_image_path,
+                "image_exists": image_exists,
+                "degraded_image_exists": degraded_image_exists,
                 "bbox_image_path": str(record.get("bbox_image_path") or ""),
                 "bbox_image_paths": list(record.get("bbox_image_paths") or []),
+                "bbox_image_exists": bool(record.get("bbox_image_exists", False)),
+                "crop_bbox_policy": "metadata_only_default_no_crop_condition",
                 "bbox_metadata_unused_by_default": True,
                 "response_source": "student_rollout",
                 "response_text": response_text,
@@ -293,10 +371,13 @@ def _score_rollouts_for_record(
                 "response_text_hash": hash_text(response_text),
                 "response_token_hash": hash_token_ids(token_ids),
                 "response_provenance_note": "student rollout sampled before teacher forced-scoring",
-                "generation_seed": config.seed + prompt_index,
+                "generation_seed": generation_seed,
                 "temperature": config.temperature,
                 "top_p": config.top_p,
                 "max_new_tokens": config.max_new_tokens,
+                "rollout_response_format": config.rollout_response_format,
+                "rollout_prompt": prompt.text,
+                "rollout_prompt_hash": hash_text(prompt.text),
                 "student_model_path": config.student_model_path,
                 "prompt_hash": hash_text(question),
                 "tokenizer_hash": tokenizer_hash,
@@ -316,16 +397,83 @@ def _score_rollouts_for_record(
                     name: [float(item) for item in signal[0].tolist()]
                     for name, signal in signals.items()
                 },
-                "gradient_cosines": {},
+                "gradient_cosines": gradient_cosines,
                 "leakage_warnings": [],
-                "errors": [],
+                "errors": errors,
                 "metadata": {
                     "crop_bbox_policy": "metadata_only_default_no_crop_condition",
                     "response_source": "student_rollout",
+                    "rollout_response_format": config.rollout_response_format,
+                    "rollout_response_format_note": response_format_note(config.rollout_response_format),
                 },
             }
         )
     return rows
+
+
+def build_rollout_prompt(question: str, *, response_format: str) -> RolloutPrompt:
+    if response_format == "answer_only":
+        return RolloutPrompt(text=question, format_mode=response_format)
+    if response_format == "fc_opd_structured":
+        return RolloutPrompt(
+            text=f"{question}\n\n{STRUCTURED_ROLLOUT_INSTRUCTION}",
+            format_mode=response_format,
+        )
+    raise ValueError(f"unsupported rollout_response_format: {response_format}")
+
+
+def response_format_note(response_format: str) -> str:
+    if response_format == "answer_only":
+        return "mechanical smoke only; too short for token-level FC-OPD training"
+    return "OPD-compatible structured response with visual evidence, reasoning, and answer spans"
+
+
+def rollout_seed(*, base_seed: int, source_index: int, rollout_id: int) -> int:
+    return int(base_seed) + int(source_index) * 1000 + int(rollout_id)
+
+
+def _rollout_diversity_summary(
+    samples: Sequence[Mapping[str, Any]],
+    config: StudentRolloutAuditConfig,
+) -> dict[str, Any]:
+    by_prompt: dict[str, list[Mapping[str, Any]]] = {}
+    for sample in samples:
+        by_prompt.setdefault(str(sample.get("sample_uid", "")), []).append(sample)
+    unique_counts = [
+        len({str(sample.get("response_text_hash", "")) for sample in prompt_samples})
+        for prompt_samples in by_prompt.values()
+    ]
+    duplicate_rollouts = 0
+    total_rollouts = 0
+    identical_prompt_count = 0
+    for prompt_samples in by_prompt.values():
+        hashes = [str(sample.get("response_text_hash", "")) for sample in prompt_samples]
+        counts = {hash_value: hashes.count(hash_value) for hash_value in set(hashes)}
+        duplicate_rollouts += sum(max(0, count - 1) for count in counts.values())
+        total_rollouts += len(hashes)
+        if len(set(hashes)) == 1 and len(hashes) > 1:
+            identical_prompt_count += 1
+    response_lengths = [int(sample.get("response_length", 0)) for sample in samples]
+    short_count = sum(length < config.min_response_tokens_for_warning for length in response_lengths)
+    duplicate_rate = None if total_rollouts == 0 else duplicate_rollouts / total_rollouts
+    short_rate = None if not response_lengths else short_count / len(response_lengths)
+    warnings: list[str] = []
+    if duplicate_rate is not None and duplicate_rate > 0.25:
+        warnings.append("duplicate_rollout_rate_high")
+    if short_rate is not None and short_rate > 0:
+        warnings.append("short_response_rate_nonzero")
+    if config.rollout_response_format == "answer_only":
+        warnings.append("answer_only_is_mechanical_smoke_only")
+    return {
+        "unique_response_per_prompt_mean": (
+            None if not unique_counts else sum(unique_counts) / len(unique_counts)
+        ),
+        "duplicate_rollout_rate": duplicate_rate,
+        "all_rollouts_identical_per_prompt_count": identical_prompt_count,
+        "short_response_rate": short_rate,
+        "min_response_tokens_for_warning": config.min_response_tokens_for_warning,
+        "rollout_diversity_warnings": warnings,
+    }
 
 
 def _summary_config(config: StudentRolloutAuditConfig) -> Any:
@@ -381,6 +529,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--dtype", default="bfloat16")
+    parser.add_argument(
+        "--rollout-response-format",
+        choices=ROLLOUT_RESPONSE_FORMATS,
+        default="fc_opd_structured",
+    )
+    parser.add_argument("--min-response-tokens-for-warning", type=int, default=16)
     parser.add_argument("--blur-sigma", type=float, default=2.0)
     parser.add_argument("--degraded-dir")
     parser.add_argument("--materialize-degraded-images", action="store_true")
@@ -406,6 +560,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             seed=args.seed,
             device=args.device,
             dtype=args.dtype,
+            rollout_response_format=args.rollout_response_format,
+            min_response_tokens_for_warning=args.min_response_tokens_for_warning,
             blur_sigma=args.blur_sigma,
             degraded_dir=args.degraded_dir,
             materialize_degraded_images=args.materialize_degraded_images,

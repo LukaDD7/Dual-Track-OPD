@@ -24,6 +24,13 @@ protocol/path/condition audit. It is useful for checking full-vs-blur signal and
 teacher scoring health, but it is not a student-rollout signal audit. Formal
 OPD-compatible evidence requires `response_source=student_rollout`.
 
+For Vision-OPD, answer-only rollouts are not sufficient for token-level OPD
+training because the model tends to emit 3-4 token option answers. Use structured
+student responses with `<visual_evidence>`, `<reasoning>`, and `<answer>` spans,
+or another format with enough token-level visual evidence and reasoning content.
+Report `duplicate_rollout_rate`; increasing K only matters when same-prompt
+rollouts are not duplicates.
+
 The latest real student optimizer-step smoke verified that the tied Qwen3-VL-4B
 `lm_head.weight` / `model.language_model.embed_tokens.weight` parameter receives
 gradient and changes after Adam steps.

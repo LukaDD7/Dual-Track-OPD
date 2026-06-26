@@ -143,10 +143,21 @@ DATASET="$PROJECT_ROOT/third_party/Vision-OPD/data/train.parquet" \
 LIMIT=4 \
 ROLLOUTS_PER_PROMPT=2 \
 CONDITIONS=full,blur \
+ROLLOUT_RESPONSE_FORMAT=fc_opd_structured \
 bash scripts/hpc/run_fc_opd_student_rollout_signal_audit.sh
 ```
 
 Then scale to `LIMIT=16` and `ROLLOUTS_PER_PROMPT=4` once the smoke passes.
+Use `ROLLOUT_RESPONSE_FORMAT=answer_only` only as a mechanical generation and
+teacher-scoring smoke. On Vision-OPD it usually produces 3-4 token answers,
+which is too short for token-level FC-OPD training and often collapses
+full-vs-blur signal.
+
+For FC-OPD training, prefer `ROLLOUT_RESPONSE_FORMAT=fc_opd_structured`, which
+asks the student to emit `<visual_evidence>`, `<reasoning>`, and `<answer>`
+spans without injecting the gold answer. Inspect `duplicate_rollout_rate`,
+`unique_response_per_prompt_mean`, and `short_response_rate`; `K=4` only helps
+when same-prompt rollouts are not duplicates.
 
 The Python entrypoint exposes the same flags directly:
 
