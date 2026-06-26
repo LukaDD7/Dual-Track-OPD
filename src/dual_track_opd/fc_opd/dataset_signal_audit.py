@@ -660,9 +660,12 @@ def compute_pairwise_kd_gradient_cosines(
     """
 
     pairs = (
+        (Condition.FULL, Condition.DEGRADED),
         (Condition.FULL, Condition.BLUR),
         (Condition.FULL, Condition.FREE),
         (Condition.FULL, Condition.TASK),
+        (Condition.TASK, Condition.FREE),
+        (Condition.DEGRADED, Condition.FREE),
         (Condition.BLUR, Condition.TASK),
     )
     output: dict[str, float] = {}

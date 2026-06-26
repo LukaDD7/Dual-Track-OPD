@@ -2,8 +2,8 @@
 
 Before starting FC-OPD training, run a small offline scoring audit over each
 candidate training set. The goal is to check whether the dataset actually
-produces useful condition signal under `full`, `blur`, `free`, and `task`, not to
-train or tune the student.
+produces useful condition signal under the selected condition set, not to train
+or tune the student.
 
 Do not modify `third_party/verl` for this stage, and do not start actual
 training from the audit outputs.
@@ -28,14 +28,16 @@ response hash counts, response length distribution, and an
 
 ## Candidate Order
 
-Recommended decision order:
+Recommended decision order after the Vision-OPD red-box finding:
 
-1. Vision-OPD-6K prepared train JSON / Parquet for the first fair objective
-   comparison with the Vision-OPD baseline. This is the first recommended
-   training dataset.
-2. Geometry3K, if available, for a VA-OPD-style visual-math comparison.
-3. ViRL39K, or mixed visual reasoning data, only after the audit confirms
+1. Geometry3K for the first clean-data VA-OPD-style visual-math comparison.
+2. ViRL39K after its schema is inspected and an adapter is implemented.
+3. Mixed visual reasoning data only after the audit confirms
    non-collapsed condition signal.
+
+Vision-OPD-6K is no longer a main-data candidate unless clean no-red-box source
+images are recovered. Current Vision-OPD outputs are infrastructure validation
+or red-box-contaminated / localization-cued ablation only.
 
 Optional later candidates should stay out of training mixtures until their
 signal audit is done: MathVista / MathVerse-like training splits, MV-MATH,
@@ -43,8 +45,8 @@ ScienceQA-IMG, BLINK, ViewSpatial-Bench, MindCube, and MMMU_Pro.
 
 ## Leakage Rule
 
-For real training, `task_evidence` must not simply contain the gold answer unless
-the run is explicitly marked as an oracle or upper-bound run.
+For real training, `task_evidence` must not contain the gold answer unless the
+run is explicitly marked as an oracle or upper-bound run.
 
 The previous VStar16 smoke used benchmark reference answers as task evidence
 only as a protocol smoke. That construction is not valid default training-data
@@ -54,6 +56,19 @@ The audit emits `task_evidence_contains_answer` warnings when it can detect that
 the resolved task evidence includes the answer string.
 
 ## Vision-OPD-6K Default Adapter Policy
+
+Vision-OPD is frozen as main experimental data because red-box localization
+cues are suspected or confirmed in local images. Run:
+
+```bash
+DATASET=/path/to/Vision-OPD/train.parquet \
+DTOPD_OUTPUT_ROOT=/path/to/outputs \
+scripts/hpc/audit_vision_opd_red_box_contamination.sh
+```
+
+The current Vision-OPD Gaussian-blur degraded image is generated from the loaded
+full image. If the loaded full image contains a red box, the degraded image also
+contains that red box.
 
 The default FC-OPD-4C setup for Vision-OPD-6K is no-crop:
 
@@ -72,8 +87,38 @@ be marked as a privileged visual condition.
 
 `task_evidence_mode=none` is safe for prompt/path audits but deliberately
 non-informative. It should not be recommended as final 4C training evidence.
-For first real Vision-OPD training, use FC-OPD-2C (`full,blur`) or wait for
-audited non-oracle free/task evidence generators before running FC-OPD-4C.
+Do not run Vision-OPD full 2C or full 4C as main experiments. Use
+`--allow-red-box-contaminated-images` only for an explicit localization-cued
+ablation; summaries must mark the run as not main evidence.
+
+## Clean-Data Geometry3K 4C Path
+
+The clean-data condition set is `4c_full_degraded_free_task`:
+
+- `full`: clean original image + question.
+- `degraded`: default `lowres_10pct_nearest` image + question.
+- `free`: generated image-only evidence + question.
+- `task`: generated question-conditioned visual evidence + question.
+
+Build the evidence cache first:
+
+```bash
+DATASET=/path/to/geometry3k.json \
+DTOPD_OUTPUT_ROOT=/path/to/outputs \
+LIMIT=8 \
+scripts/hpc/build_fc_opd_4c_evidence_cache.sh
+```
+
+Then build trainable 4C scores:
+
+```bash
+DATASET=/path/to/geometry3k.json \
+EVIDENCE_CACHE=/path/to/evidence_cache.jsonl \
+DTOPD_OUTPUT_ROOT=/path/to/outputs \
+LIMIT=8 \
+ROLLOUTS_PER_PROMPT=4 \
+scripts/hpc/build_fc_opd_geometry3k_4c_offline_scores.sh
+```
 
 ## Audit Command
 

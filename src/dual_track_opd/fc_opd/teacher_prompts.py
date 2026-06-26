@@ -44,7 +44,7 @@ def render_teacher_prompt(
     if condition is Condition.FULL:
         image_path = inputs.full_image.path
         text = _text_prompt("Use the full image to answer the question.", question)
-    elif condition is Condition.BLUR:
+    elif condition in {Condition.BLUR, Condition.DEGRADED}:
         image_path = inputs.degraded_image.path
         text = _text_prompt("Use the degraded image to answer the question.", question)
     elif condition is Condition.FREE:

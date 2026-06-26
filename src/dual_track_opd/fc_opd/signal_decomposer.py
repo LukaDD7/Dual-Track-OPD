@@ -119,6 +119,7 @@ def compute_condition_signals(
     signals: dict[str, torch.Tensor] = {}
 
     pairs = (
+        ("visual_detail", Condition.FULL, Condition.DEGRADED),
         ("visual_detail", Condition.FULL, Condition.BLUR),
         ("task_extraction", Condition.TASK, Condition.FREE),
         ("fact_gap", Condition.FACT, Condition.TASK),

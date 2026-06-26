@@ -13,6 +13,7 @@ class Condition(str, Enum):
 
     FULL = "full"
     BLUR = "blur"
+    DEGRADED = "degraded"
     FREE = "free"
     TASK = "task"
     FACT = "fact"
@@ -41,11 +42,19 @@ class ConditionInputs:
         if not self.free_caption.strip() or not self.task_evidence.strip():
             raise ValueError("caption and task evidence must be non-empty")
         transform = self.degraded_image.transform
-        if not isinstance(transform, Mapping) or transform.get("type") != "gaussian_blur":
-            raise ValueError("degraded image must record a gaussian_blur transform")
-        sigma = transform.get("sigma")
-        if not isinstance(sigma, int | float) or sigma <= 0:
-            raise ValueError("gaussian_blur sigma must be positive")
+        if not isinstance(transform, Mapping):
+            raise ValueError("degraded image must record a transform")
+        transform_type = transform.get("type")
+        if transform_type == "gaussian_blur":
+            sigma = transform.get("sigma")
+            if not isinstance(sigma, int | float) or sigma <= 0:
+                raise ValueError("gaussian_blur sigma must be positive")
+        elif transform_type == "lowres_nearest":
+            scale = transform.get("scale")
+            if not isinstance(scale, int | float) or not 0 < float(scale) < 1:
+                raise ValueError("lowres_nearest scale must be in (0, 1)")
+        else:
+            raise ValueError("degraded image transform must be gaussian_blur or lowres_nearest")
         _validate_verified_facts(self.verified_facts, self.verified_facts_source)
         if require_paths:
             for path in (self.full_image.path, self.degraded_image.path):
@@ -132,11 +141,16 @@ def build_condition_inputs(
     transform = degraded_raw.get("transform", default_blur)
     if not isinstance(transform, Mapping) or not transform:
         raise ValueError("degraded_image.transform must be a non-empty mapping")
-    if transform.get("type") != "gaussian_blur":
-        raise ValueError("the first FC-OPD stage supports only gaussian_blur degradation")
-    sigma = transform.get("sigma")
-    if not isinstance(sigma, int | float) or sigma <= 0:
-        raise ValueError("gaussian_blur sigma must be positive")
+    if transform.get("type") == "gaussian_blur":
+        sigma = transform.get("sigma")
+        if not isinstance(sigma, int | float) or sigma <= 0:
+            raise ValueError("gaussian_blur sigma must be positive")
+    elif transform.get("type") == "lowres_nearest":
+        scale = transform.get("scale")
+        if not isinstance(scale, int | float) or not 0 < float(scale) < 1:
+            raise ValueError("lowres_nearest scale must be in (0, 1)")
+    else:
+        raise ValueError("degraded image transform must be gaussian_blur or lowres_nearest")
 
     if require_paths:
         for field, path in (("full_image.path", full_path), ("degraded_image.path", degraded_path)):

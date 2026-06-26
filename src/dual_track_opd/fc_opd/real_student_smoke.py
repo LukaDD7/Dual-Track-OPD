@@ -44,6 +44,12 @@ _DTYPES = {
 }
 
 TWO_CONDITIONS: tuple[Condition, ...] = (Condition.FULL, Condition.BLUR)
+FOUR_CLEAN_CONDITIONS: tuple[Condition, ...] = (
+    Condition.FULL,
+    Condition.DEGRADED,
+    Condition.FREE,
+    Condition.TASK,
+)
 TWO_CONDITION_ROUTER = RouterConfig(
     mode="chunk",
     chunk_condition={
@@ -52,6 +58,15 @@ TWO_CONDITION_ROUTER = RouterConfig(
         "answer": Condition.FULL,
     },
     invalid_format_condition=Condition.BLUR,
+)
+FOUR_CLEAN_CONDITION_ROUTER = RouterConfig(
+    mode="chunk",
+    chunk_condition={
+        "visual_evidence": Condition.TASK,
+        "reasoning": Condition.FREE,
+        "answer": Condition.FULL,
+    },
+    invalid_format_condition=Condition.DEGRADED,
 )
 
 
@@ -869,9 +884,11 @@ def _result_to_json(result: RealStudentResult) -> dict[str, Any]:
 def _condition_set(value: str) -> tuple[RouterConfig, tuple[Condition, ...]]:
     if value == "4c":
         return FOUR_CONDITION_ROUTER, FOUR_CONDITIONS
+    if value == "4c-clean":
+        return FOUR_CLEAN_CONDITION_ROUTER, FOUR_CLEAN_CONDITIONS
     if value == "2c":
         return TWO_CONDITION_ROUTER, TWO_CONDITIONS
-    raise argparse.ArgumentTypeError("condition set must be '4c' or '2c'")
+    raise argparse.ArgumentTypeError("condition set must be '4c', '4c-clean', or '2c'")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -887,7 +904,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--limit", type=int, default=1)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--dtype", default="bfloat16", choices=tuple(_DTYPES))
-    parser.add_argument("--condition-set", choices=("4c", "2c"), default="4c")
+    parser.add_argument("--condition-set", choices=("4c", "4c-clean", "2c"), default="4c")
     parser.add_argument("--freeze-all-but-lm-head", action="store_true")
     parser.add_argument("--max-prompt-length", type=int, default=None)
     parser.add_argument("--max-response-tokens", type=int, default=None)
@@ -960,7 +977,7 @@ def min_train_main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--dtype", default="bfloat16", choices=tuple(_DTYPES))
-    parser.add_argument("--condition-set", choices=("4c", "2c"), default="4c")
+    parser.add_argument("--condition-set", choices=("4c", "4c-clean", "2c"), default="4c")
     parser.add_argument(
         "--freeze-all-but-lm-head",
         action=argparse.BooleanOptionalAction,

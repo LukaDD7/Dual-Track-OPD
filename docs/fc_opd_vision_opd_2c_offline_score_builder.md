@@ -1,8 +1,12 @@
 # Vision-OPD-6K 2C Offline Score Builder
 
 This builder turns the validated structured student-rollout audit path into a
-trainable FC-OPD offline score JSONL for the first Vision-OPD-6K experiment.
+trainable FC-OPD offline score JSONL for Vision-OPD infrastructure validation.
 It does not touch `third_party/verl`, and it does not start full training.
+
+Important: Vision-OPD is currently red-box-contaminated / localization-cued in
+the local data. Builder outputs are valid for infrastructure validation and
+explicit contaminated ablations, not main clean-data experimental evidence.
 
 ## Scope
 
@@ -11,7 +15,7 @@ It does not touch `third_party/verl`, and it does not start full training.
 - Teacher service: Qwen3-VL-32B-Instruct at `http://127.0.0.1:18080`
 - Conditions: `full,blur`
 - Rollout format: `fc_opd_structured`
-- Default crop policy: no crop; original/global image with red bbox is used
+- Default crop policy: no crop; original/global image is used
 - Bbox/crop image paths are preserved only as metadata
 
 Each output JSONL row is one prompt-rollout pair. The row includes the structured
@@ -92,3 +96,9 @@ error rates, image/degraded-image missing rates, response length and diversity
 diagnostics, full-vs-blur signal statistics, high visual signal ratio, gradient
 cosines, tokenizer hash, teacher model ID, student model path, output path/file
 size, and best-effort git commit/dirty status.
+
+Full-ish Vision-OPD runs are guarded by default because red-box contamination is
+suspected. Use `--allow-red-box-contaminated-images` only for an explicit
+localization-cued ablation; the summary then records
+`red_box_contaminated=true`, `localization_cued_ablation=true`, and
+`not_main_experiment=true`.

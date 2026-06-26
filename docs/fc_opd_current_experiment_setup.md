@@ -24,12 +24,12 @@ protocol/path/condition audit. It is useful for checking full-vs-blur signal and
 teacher scoring health, but it is not a student-rollout signal audit. Formal
 OPD-compatible evidence requires `response_source=student_rollout`.
 
-For Vision-OPD, answer-only rollouts are not sufficient for token-level OPD
-training because the model tends to emit 3-4 token option answers. Use structured
-student responses with `<visual_evidence>`, `<reasoning>`, and `<answer>` spans,
-or another format with enough token-level visual evidence and reasoning content.
-Report `duplicate_rollout_rate`; increasing K only matters when same-prompt
-rollouts are not duplicates.
+For Vision-OPD, the validated 2C student-rollout builder and real-student
+optimizer-step smoke are now infrastructure validation only. The local
+Vision-OPD images likely contain baked-in red bounding-box localization cues,
+and any Gaussian-blur degraded image derived from those loaded images carries
+the same cue. Do not treat current Vision-OPD outputs as main experimental
+evidence.
 
 The latest real student optimizer-step smoke verified that the tied Qwen3-VL-4B
 `lm_head.weight` / `model.language_model.embed_tokens.weight` parameter receives
@@ -37,7 +37,7 @@ gradient and changes after Adam steps.
 
 ## Current Conditions
 
-The implemented real pipeline uses four conditions:
+The legacy implemented pipeline uses four conditions:
 
 - `full`: original image + question.
 - `blur`: degraded image + question, currently Gaussian blur metadata with
@@ -47,9 +47,20 @@ The implemented real pipeline uses four conditions:
 
 For Vision-OPD path and prompt audits, `task_evidence_mode=none` is a safe
 non-informative placeholder mode. It is useful for verifying prompts and image
-paths, but it is not final 4C training evidence. First real Vision-OPD training
-should use FC-OPD-2C (`full,blur`) or wait for audited non-oracle free/task
-evidence generators before using FC-OPD-4C.
+paths, but it is not final 4C training evidence. Vision-OPD full 2C and 4C runs
+are frozen as main-data experiments unless clean no-red-box source images are
+recovered.
+
+The clean-data main path is now Geometry3K first, then ViRL39K after schema
+inspection. Its condition set is named `4c_full_degraded_free_task`:
+
+- `full`: clean original image + question.
+- `degraded`: clean degraded image + question; default
+  `lowres_10pct_nearest`.
+- `free`: cached image-only caption/evidence + question, no image at
+  forced-scoring time.
+- `task`: cached question-conditioned evidence + question, no final answer and
+  no gold-answer access.
 
 Answer fields such as `reward_model.ground_truth` and `extra_info.answer` are
 preserved as answer metadata for later evaluation, correctness estimation, and
@@ -84,16 +95,18 @@ not available in the verified real-student pipeline.
 
 Implemented today:
 
-- condition decomposition (`full`, `blur`, `free`, `task`);
+- condition decomposition (`full`, `blur`, `free`, `task`) and clean-data
+  schema support for (`full`, `degraded`, `free`, `task`);
 - offline top-k teacher score recording;
 - chunk parsing for `visual_evidence`, `reasoning`, and `answer`;
 - router-weighted FC-OPD distillation loss;
 - synthetic loss/backward and optimizer-update smokes;
-- real student logits/backward and optimizer-step smokes.
+- real student logits/backward and optimizer-step smokes;
+- no-op alignment hook schema for future correctness/success-failure
+  calibration.
 
 Not implemented yet:
 
-- alignment-aware condition selection;
 - success-conditioned ideal-gradient estimation;
 - verl trainer integration.
 

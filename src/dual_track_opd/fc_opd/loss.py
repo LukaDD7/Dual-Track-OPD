@@ -18,6 +18,10 @@ class FCOPDLossConfig:
     include_tail: bool = True
     reduction: str = "mean"
     eps: float = 1e-8
+    alignment_strategy: str = "none"
+    token_weights: torch.Tensor | None = None
+    chunk_weights: Mapping[str, float] | None = None
+    condition_pair_weights: Mapping[str, float] | None = None
 
 
 def _validate_student_and_teacher(student_logits: torch.Tensor, teacher: TeacherTopK) -> None:

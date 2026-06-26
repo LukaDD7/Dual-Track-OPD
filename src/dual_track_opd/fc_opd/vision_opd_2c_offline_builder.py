@@ -78,6 +78,8 @@ class VisionOPD2COfflineScoreConfig:
     resume: bool = False
     shard_id: int | None = None
     num_shards: int | None = None
+    allow_red_box_contaminated_images: bool = False
+    red_box_full_run_guard_limit: int = 64
     min_response_tokens_for_warning: int = 16
     high_signal_threshold: float = 0.01
     high_cosine_threshold: float = 0.98
@@ -108,6 +110,13 @@ class VisionOPD2COfflineScoreConfig:
                 raise ValueError("num_shards must be positive")
             if self.shard_id is None or not 0 <= self.shard_id < self.num_shards:
                 raise ValueError("shard_id must be in [0, num_shards)")
+        is_vision_opd = self.source_dataset.lower().replace("_", "-").startswith("vision-opd")
+        fullish_run = self.limit is None or self.limit > self.red_box_full_run_guard_limit
+        if is_vision_opd and fullish_run and not self.allow_red_box_contaminated_images:
+            raise ValueError(
+                "Vision-OPD full-run builder is blocked because red-box contamination is suspected. "
+                "Use --allow-red-box-contaminated-images only for a localization-cued ablation."
+            )
 
 
 @dataclass
@@ -444,7 +453,11 @@ def summarize_vision_opd_2c_rows(
             "seed": config.seed,
             "blur_sigma": config.blur_sigma,
             "crop_bbox_policy": CROP_BBOX_POLICY,
+            "allow_red_box_contaminated_images": config.allow_red_box_contaminated_images,
         },
+        "red_box_contaminated": bool(config.allow_red_box_contaminated_images),
+        "localization_cued_ablation": bool(config.allow_red_box_contaminated_images),
+        "not_main_experiment": bool(config.allow_red_box_contaminated_images),
     }
 
 
@@ -721,6 +734,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--shard-id", type=int, default=None)
     parser.add_argument("--num-shards", type=int, default=None)
+    parser.add_argument("--allow-red-box-contaminated-images", action="store_true")
     parser.add_argument("--validate-only", action="store_true")
     return parser
 
@@ -760,6 +774,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             resume=args.resume,
             shard_id=args.shard_id,
             num_shards=args.num_shards,
+            allow_red_box_contaminated_images=args.allow_red_box_contaminated_images,
         )
     )
     validation = validate_vision_opd_2c_offline_scores(args.output_jsonl)

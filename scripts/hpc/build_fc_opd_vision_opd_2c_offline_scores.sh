@@ -80,6 +80,9 @@ fi
 if [[ -n "${NUM_SHARDS:-}" ]]; then
   EXTRA_ARGS+=(--num-shards "${NUM_SHARDS}")
 fi
+if [[ -n "${ALLOW_RED_BOX_CONTAMINATED_IMAGES:-}" ]]; then
+  EXTRA_ARGS+=(--allow-red-box-contaminated-images)
+fi
 
 python "${REPO_ROOT}/scripts/hpc/build_fc_opd_vision_opd_2c_offline_scores.py" \
   --dataset "${DATASET}" \
