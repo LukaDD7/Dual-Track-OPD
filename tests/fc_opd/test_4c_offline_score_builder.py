@@ -12,10 +12,12 @@ from dual_track_opd.fc_opd.evidence_generation import (
 )
 from dual_track_opd.fc_opd.four_condition_offline_builder import (
     FourConditionOfflineBuilderConfig,
+    materialize_degraded_image,
     summarize_rows,
     validate_four_condition_rows,
     run_four_condition_offline_builder,
 )
+from dual_track_opd.fc_opd.geometry3k_adapter import load_geometry3k_records
 from dual_track_opd.fc_opd.offline_loss import offline_record_to_tensors
 from dual_track_opd.fc_opd.offline_scoring import ByteTokenizer
 from dual_track_opd.fc_opd.student_rollout_signal_audit import FixedFakeRolloutGenerator
@@ -44,6 +46,49 @@ def _dataset(tmp_path):
         encoding="utf-8",
     )
     return dataset
+
+
+def _official_geometry_sample(tmp_path):
+    root = tmp_path / "unzipped"
+    sample_dir = root / "train" / "train" / "0"
+    sample_dir.mkdir(parents=True)
+    Image.new("RGB", (20, 20), "white").save(sample_dir / "img_diagram.png")
+    (sample_dir / "data.json").write_text(
+        json.dumps(
+            {
+                "id": "0",
+                "compact_text": "Use the diagram.",
+                "choices": ["30", "45"],
+                "answer": "B",
+                "data_type": "train",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (sample_dir / "logic_form.json").write_text("{}", encoding="utf-8")
+    return root, sample_dir
+
+
+def test_default_degradation_cache_does_not_pollute_geometry3k_sample_dir(tmp_path, monkeypatch):
+    root, sample_dir = _official_geometry_sample(tmp_path)
+    output_root = tmp_path / "outputs"
+    monkeypatch.setenv("DTOPD_OUTPUT_ROOT", str(output_root))
+    before = load_geometry3k_records(root)[0]["image_path"]
+
+    config = FourConditionOfflineBuilderConfig(
+        dataset=root,
+        evidence_cache=tmp_path / "evidence.jsonl",
+        output_jsonl=tmp_path / "scores.jsonl",
+        summary_json=tmp_path / "summary.json",
+    )
+    first_degraded = materialize_degraded_image(before, config)
+    second_degraded = materialize_degraded_image(before, config)
+    after = load_geometry3k_records(root)[0]["image_path"]
+
+    assert before == after == str((sample_dir / "img_diagram.png").resolve(strict=False))
+    assert first_degraded == second_degraded
+    assert str(first_degraded).startswith(str(output_root / "fc_opd" / "degraded_images"))
+    assert not (sample_dir / "img_diagram.lowres_10pct_nearest.png").exists()
 
 
 def test_4c_builder_writes_trainable_full_degraded_free_task_rows(tmp_path):

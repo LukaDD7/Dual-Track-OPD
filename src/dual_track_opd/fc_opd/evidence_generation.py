@@ -12,7 +12,11 @@ from pathlib import Path
 from typing import Any, Mapping, Protocol, Sequence
 
 from .dataset_adapters import load_normalized_records
-from .geometry3k_adapter import inspect_geometry3k_dataset, load_geometry3k_records
+from .geometry3k_adapter import (
+    inspect_geometry3k_dataset,
+    is_generated_degraded_image_path,
+    load_geometry3k_records,
+)
 from .virl39k_adapter import load_virl39k_records
 
 FREE_CAPTION_PROMPTS = {
@@ -145,6 +149,7 @@ class EvidenceGenerationConfig:
     condition_set: str = "4c-clean"
     include_prompts_in_output: bool = False
     task_evidence_mode: str = "visible"
+    allow_degraded_source_images: bool = False
 
     def __post_init__(self) -> None:
         if self.condition_set not in CONDITION_SETS:
@@ -249,6 +254,9 @@ def build_evidence_row(
     errors = []
     if config.strict_leakage and any(item.startswith("hard_") for item in leakage):
         errors.append("hard_leakage_detected")
+    degraded_source_image = is_generated_degraded_image_path(image_path)
+    if degraded_source_image and not config.allow_degraded_source_images:
+        errors.append("degraded_source_image_path")
     prompt_hashes = {
         "free_caption_prompt": text_hash(free_prompt),
         "task_visible_prompt": text_hash(task_visible_prompt),
@@ -269,6 +277,14 @@ def build_evidence_row(
         "choices": choices,
         "image_path": image_path,
         "image_hash": file_sha256(image_path),
+        "degraded_source_image": degraded_source_image,
+        "degraded_source_image_allowed": bool(config.allow_degraded_source_images),
+        "condition_evidence": {
+            "free": free_caption,
+            "task_visible": task_visible_evidence,
+            "task_infer": task_infer_evidence,
+            "task_solve": task_solve_evidence,
+        },
         "free_caption": free_caption,
         "task_evidence": task_evidence,
         "task_visible_evidence": task_visible_evidence,
@@ -389,6 +405,8 @@ def validate_evidence_row(row: Mapping[str, Any]) -> list[str]:
         errors.append("task_evidence_prompt_missing_answer_forbid_instruction")
     if row.get("gold_answer_seen_by_prompt") is not False:
         errors.append("gold_answer_seen_by_prompt_not_false")
+    if is_generated_degraded_image_path(str(row.get("image_path", ""))) and row.get("degraded_source_image_allowed") is not True:
+        errors.append("degraded_source_image_path")
     if row.get("final_solution_detected_in_task_visible"):
         errors.append("final_solution_detected_in_task_visible")
     if row.get("final_solution_detected_in_task_infer"):
@@ -406,6 +424,9 @@ def summarize_evidence(
 ) -> dict[str, Any]:
     validation_errors = [error for row in rows for error in validate_evidence_row(row)]
     leakage_rows = [row for row in rows if row.get("leakage_warnings")]
+    degraded_source_image_count = sum(
+        1 for row in rows if is_generated_degraded_image_path(str(row.get("image_path", "")))
+    )
     return {
         "source_dataset": config.source_dataset,
         "dataset_type": config.dataset_type,
@@ -414,6 +435,7 @@ def summarize_evidence(
         "condition_set_name": config.condition_set,
         "conditions": list(CONDITION_SETS[config.condition_set]),
         "leakage_warning_rate": None if not rows else len(leakage_rows) / len(rows),
+        "degraded_source_image_count": degraded_source_image_count,
         "validation_error_count": len(validation_errors),
         "validation_errors_top10": validation_errors[:10],
         "output_jsonl": str(config.output_jsonl),
@@ -549,6 +571,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--condition-set", choices=tuple(CONDITION_SETS), default="4c-clean")
     parser.add_argument("--include-prompts-in-output", action="store_true")
     parser.add_argument("--task-evidence-mode", choices=("visible", "infer", "solve"), default="visible")
+    parser.add_argument("--allow-degraded-source-images", action="store_true")
     parser.add_argument(
         "--dry-run-inspect",
         action="store_true",
@@ -600,6 +623,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             condition_set=args.condition_set,
             include_prompts_in_output=args.include_prompts_in_output,
             task_evidence_mode=args.task_evidence_mode,
+            allow_degraded_source_images=args.allow_degraded_source_images,
         )
     )
     print(json.dumps(result.summary, indent=2))

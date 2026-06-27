@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from collections import Counter
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -15,6 +16,14 @@ CHOICE_KEYS = ("choices", "compact_choices", "options", "answer_choices", "candi
 ANSWER_KEYS = ("answer", "label", "target", "gold", "ground_truth")
 OFFICIAL_IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg")
 OFFICIAL_SPLITS = ("train", "val", "test")
+GENERATED_DEGRADED_MARKERS = (
+    ".lowres_",
+    ".lowres-",
+    ".gaussian_blur",
+    ".degraded",
+    ".blurred",
+)
+PREFERRED_OFFICIAL_IMAGE_STEMS = ("img_diagram", "diagram")
 
 
 def load_geometry3k_records(path: str | Path, *, source_dataset: str = "geometry3k") -> list[dict[str, Any]]:
@@ -203,12 +212,34 @@ def _read_json_object(path: Path) -> dict[str, Any]:
 
 
 def _find_sample_image(sample_dir: Path) -> Path | None:
-    candidates = sorted(
+    candidates = [
         item
         for item in sample_dir.iterdir()
         if item.is_file() and item.suffix.lower() in OFFICIAL_IMAGE_SUFFIXES
-    )
-    return candidates[0] if candidates else None
+    ]
+    clean_candidates = sorted(item for item in candidates if not is_generated_degraded_image_path(item))
+    for stem in PREFERRED_OFFICIAL_IMAGE_STEMS:
+        for suffix in OFFICIAL_IMAGE_SUFFIXES:
+            preferred = sample_dir / f"{stem}{suffix}"
+            if preferred in clean_candidates:
+                return preferred
+    return clean_candidates[0] if clean_candidates else None
+
+
+def is_generated_degraded_image_path(path: str | Path) -> bool:
+    """True when an image path looks like a generated degraded/cache artifact."""
+
+    name = Path(path).name.lower()
+    return any(marker in name for marker in GENERATED_DEGRADED_MARKERS)
+
+
+def default_degraded_image_dir() -> Path:
+    """Default degraded-image cache outside source dataset directories."""
+
+    output_root = os.environ.get("DTOPD_OUTPUT_ROOT")
+    if output_root:
+        return Path(output_root).expanduser() / "fc_opd" / "degraded_images"
+    return Path.cwd() / "artifacts" / "fc_opd" / "degraded_images"
 
 
 def _infer_split(path: Path) -> str | None:

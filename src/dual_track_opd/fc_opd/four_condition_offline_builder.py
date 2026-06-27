@@ -16,7 +16,7 @@ from .chunk_parser import parse_response_chunks
 from .conditions import Condition, ConditionInputs, ImageInput
 from .dataset_signal_audit import compute_pairwise_kd_gradient_cosines, hash_text, hash_token_ids, materialize_gaussian_blur
 from .evidence_generation import validate_evidence_row
-from .geometry3k_adapter import load_geometry3k_records
+from .geometry3k_adapter import default_degraded_image_dir, load_geometry3k_records
 from .offline_loss import offline_record_to_tensors
 from .offline_scoring import DEFAULT_TEACHER_URL, _serialize_chunks, _serialize_topk
 from .signal_decomposer import compute_condition_signals
@@ -216,6 +216,7 @@ def _build_rows(
             "question": question,
             "clean_question_text": str(record.get("clean_question_text", question)),
             "choices": list(record.get("choices", [])),
+            "original_image_path": image_path,
             "image_path": image_path,
             "degraded_image_path": degraded_path,
             "degraded_mode": config.degraded_mode,
@@ -276,7 +277,7 @@ def _build_rows(
 def materialize_degraded_image(image_path: str, config: FourConditionOfflineBuilderConfig) -> str:
     source = Path(image_path).expanduser()
     suffix = source.suffix or ".png"
-    degraded_dir = Path(config.degraded_dir).expanduser() if config.degraded_dir else source.parent
+    degraded_dir = Path(config.degraded_dir).expanduser() if config.degraded_dir else default_degraded_image_dir()
     if config.degraded_mode == "gaussian_blur_s2":
         target = degraded_dir / f"{source.stem}.gaussian_blur_s2{suffix}"
         materialize_gaussian_blur(str(source), str(target), config.blur_sigma)

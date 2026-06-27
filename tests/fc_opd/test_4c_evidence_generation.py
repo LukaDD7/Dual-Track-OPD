@@ -146,6 +146,10 @@ def test_prompt_debug_fields_are_hidden_by_default(tmp_path):
     assert "task_visible_prompt" not in row
     assert row["prompt_hashes"]["task_solve_prompt"]
     assert row["conditions"] == ["full", "degraded", "free", "task_visible", "task_infer", "task_solve"]
+    assert row["condition_evidence"]["free"]
+    assert row["condition_evidence"]["task_visible"]
+    assert row["condition_evidence"]["task_infer"]
+    assert row["condition_evidence"]["task_solve"]
 
 
 def test_geometry3k_official_directory_evidence_generation_does_not_prompt_with_answer(tmp_path):
@@ -178,3 +182,74 @@ def test_geometry3k_official_directory_evidence_generation_does_not_prompt_with_
     assert "42-gold" not in (generator.task_question or "")
     assert "42-gold" not in "\n".join(generator.task_choices or [])
     assert validate_evidence_row(row) == []
+
+
+def test_evidence_generation_flags_degraded_source_image_by_default(tmp_path):
+    image = tmp_path / "diagram.lowres_10pct_nearest.png"
+    image.write_bytes(b"placeholder")
+    dataset = tmp_path / "geometry.json"
+    dataset.write_text(
+        json.dumps(
+            [
+                {
+                    "id": "g1",
+                    "diagram_path": str(image),
+                    "question": "What is angle ABC?",
+                    "choices": ["30", "45"],
+                    "answer": "B",
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    result = run_evidence_generation(
+        EvidenceGenerationConfig(
+            dataset=dataset,
+            dataset_type="geometry3k",
+            output_jsonl=tmp_path / "evidence.jsonl",
+            summary_json=tmp_path / "summary.json",
+            limit=1,
+        ),
+        generator=TemplateEvidenceGenerator(),
+    )
+
+    assert result.summary["degraded_source_image_count"] == 1
+    assert "degraded_source_image_path" in result.rows[0]["errors"]
+    assert "degraded_source_image_path" in validate_evidence_row(result.rows[0])
+    assert result.summary["validation_error_count"] > 0
+
+
+def test_evidence_generation_can_explicitly_allow_degraded_source_image(tmp_path):
+    image = tmp_path / "diagram.lowres_10pct_nearest.png"
+    image.write_bytes(b"placeholder")
+    dataset = tmp_path / "geometry.json"
+    dataset.write_text(
+        json.dumps(
+            [
+                {
+                    "id": "g1",
+                    "diagram_path": str(image),
+                    "question": "What is angle ABC?",
+                    "choices": ["30", "45"],
+                    "answer": "B",
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    result = run_evidence_generation(
+        EvidenceGenerationConfig(
+            dataset=dataset,
+            dataset_type="geometry3k",
+            output_jsonl=tmp_path / "evidence_allowed.jsonl",
+            summary_json=tmp_path / "summary_allowed.json",
+            limit=1,
+            allow_degraded_source_images=True,
+        ),
+        generator=TemplateEvidenceGenerator(),
+    )
+
+    assert result.summary["degraded_source_image_count"] == 1
+    assert validate_evidence_row(result.rows[0]) == []

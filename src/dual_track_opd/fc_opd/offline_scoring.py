@@ -23,6 +23,7 @@ import torch
 
 from .chunk_parser import parse_response_chunks
 from .conditions import Condition, ConditionInputs, ImageInput
+from .geometry3k_adapter import default_degraded_image_dir
 from .signal_decomposer import TeacherTopK, compute_condition_signals
 from .teacher_client import TeacherClient, score_teacher_conditions
 from .teacher_protocol import tokenizer_fingerprint
@@ -229,7 +230,7 @@ def derive_degraded_path(full_path: str, sigma: float, degraded_dir: str | None)
     suffix = source.suffix or ".png"
     sigma_tag = f"{sigma:g}".replace(".", "_")
     name = f"{stem}.gaussian_blur_s{sigma_tag}{suffix}"
-    target_dir = Path(degraded_dir).expanduser() if degraded_dir else source.parent
+    target_dir = Path(degraded_dir).expanduser() if degraded_dir else default_degraded_image_dir()
     return str(target_dir / name)
 
 

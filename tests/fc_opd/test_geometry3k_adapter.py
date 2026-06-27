@@ -98,6 +98,19 @@ def test_geometry3k_adapter_loads_official_directory_root(tmp_path):
     assert row["circle_instances"] == []
 
 
+def test_geometry3k_adapter_prefers_original_img_diagram_over_degraded_artifacts(tmp_path):
+    root, sample_dir = _write_official_geometry3k_sample(tmp_path)
+    (sample_dir / "diagram.png").unlink()
+    original = sample_dir / "img_diagram.png"
+    original.write_bytes(b"original")
+    (sample_dir / "img_diagram.lowres_10pct_nearest.png").write_bytes(b"lowres")
+    (sample_dir / "aaa.lowres_10pct_nearest.png").write_bytes(b"would-sort-first")
+
+    rows = load_geometry3k_records(root)
+
+    assert rows[0]["image_path"] == str(original.resolve(strict=False))
+
+
 def test_geometry3k_adapter_loads_official_split_subdir(tmp_path):
     root, _sample_dir = _write_official_geometry3k_sample(tmp_path)
 
