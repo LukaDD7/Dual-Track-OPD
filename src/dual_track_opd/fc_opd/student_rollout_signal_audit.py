@@ -65,17 +65,18 @@ Final option letter and short answer.
 </answer>"""
 STRUCTURED_ROLLOUT_V2_INSTRUCTION = """Respond using exactly this XML structure:
 <visible_evidence>
-Directly visible visual facts from the image.
+Directly visible visual facts from the image. Keep this block concise.
 </visible_evidence>
 <diagram_inference>
-Intermediate visual/geometric facts derived from diagram marks. Do not write the final answer here.
+Intermediate visual/geometric facts derived from diagram marks. Keep this block concise. Do not write the final answer here.
 </diagram_inference>
 <reasoning>
-Briefly reason from the evidence and answer choices.
+Briefly reason from the evidence and answer choices. Keep this block concise.
 </reasoning>
 <answer>
-Final option letter and short answer.
-</answer>"""
+Final option letter and short answer. This block must be present.
+</answer>
+Always emit all four XML blocks exactly once. Do not continue after </answer>."""
 
 
 @dataclass(frozen=True)

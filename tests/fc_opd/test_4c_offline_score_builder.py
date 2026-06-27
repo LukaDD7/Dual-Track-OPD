@@ -1,5 +1,7 @@
 import json
+import math
 from contextlib import ExitStack
+from types import SimpleNamespace
 
 from PIL import Image
 
@@ -10,6 +12,7 @@ from dual_track_opd.fc_opd.evidence_generation import (
 )
 from dual_track_opd.fc_opd.four_condition_offline_builder import (
     FourConditionOfflineBuilderConfig,
+    summarize_rows,
     validate_four_condition_rows,
     run_four_condition_offline_builder,
 )
@@ -156,6 +159,11 @@ def test_6c_builder_writes_expanded_condition_schema(tmp_path):
     assert result.summary["conditions"] == expected
     assert result.summary["chunk_parse_success_rate"] == 1.0
     assert result.summary["gate_ready_fields_available"] is True
+    assert math.isfinite(result.summary["delta_means"]["visual_detail_delta"])
+    assert result.summary["visual_detail_delta_count"] == 1
+    assert result.summary["visual_detail_delta_invalid_count"] == 0
+    assert result.summary["validation_valid"] is True
+    assert result.summary["validation_error_count"] == 0
     assert len(result.rows) == 1
     row = result.rows[0]
     assert row["conditions"] == expected
@@ -164,3 +172,55 @@ def test_6c_builder_writes_expanded_condition_schema(tmp_path):
 
     validation = validate_four_condition_rows(output, condition_set="6c-solve")
     assert validation["valid"], validation["errors"]
+
+
+def test_summary_reports_chunk_and_delta_validation_errors(tmp_path):
+    config = FourConditionOfflineBuilderConfig(
+        dataset=tmp_path / "dataset.json",
+        evidence_cache=tmp_path / "evidence.jsonl",
+        output_jsonl=tmp_path / "scores.jsonl",
+        summary_json=tmp_path / "summary.json",
+        condition_set="6c-solve",
+        rollout_response_format="fc_opd_structured_v2",
+        max_new_tokens=384,
+    )
+    row = {
+        "sample_uid": "row-1",
+        "prompt_sample_uid": "prompt-1",
+        "conditions": ["full", "degraded", "free", "task_visible", "task_infer", "task_solve"],
+        "response_token_count": 384,
+        "response_text_hash": "abc",
+        "response_source": "student_rollout",
+        "tokenizer_hash": "tok",
+        "chunk_spans": {
+            "format_valid": False,
+            "errors": ["reasoning:close_tag_count=0", "answer:open_tag_count=0"],
+            "token_counts": {"visible_evidence": 4, "diagram_inference": 3, "reasoning": 377, "answer": 0},
+        },
+        "condition_signal_summary": {
+            "visual_detail_delta": {"mean": float("nan"), "p50": None, "p90": None},
+            "task_selection_delta": {"mean": 0.1, "p50": 0.1, "p90": 0.1},
+            "diagram_infer_delta": {"mean": 0.2, "p50": 0.2, "p90": 0.2},
+            "solve_delta": {"mean": 0.3, "p50": 0.3, "p90": 0.3},
+        },
+    }
+
+    summary = summarize_rows(
+        [row],
+        config=config,
+        teacher_client=SimpleNamespace(metadata=SimpleNamespace(model_id="teacher")),
+    )
+
+    assert summary["validation_valid"] is False
+    assert summary["validation_error_count"] > 0
+    assert "row-1" in summary["rows_with_chunk_parse_failure"]
+    assert "row-1" in summary["rows_with_invalid_delta"]
+    assert summary["visual_detail_delta_count"] == 0
+    assert summary["visual_detail_delta_invalid_count"] == 1
+    assert summary["delta_means"]["visual_detail_delta"] is None
+    assert not any(
+        isinstance(value, float) and math.isnan(value)
+        for value in summary["delta_means"].values()
+    )
+    assert "reasoning:close_tag_count=0" in summary["validation_errors_top10"][0]
+    assert summary["max_new_tokens_recommendation"]

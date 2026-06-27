@@ -44,12 +44,14 @@ def test_duplicate_ids_are_coalesced():
 
 def test_compute_condition_signals_and_sampled_delta():
     full = _scores([1, 2], [0.8, 0.1], tail=0.1)
-    blur = _scores([1, 2], [0.4, 0.5], tail=0.1)
+    degraded = _scores([1, 2], [0.4, 0.5], tail=0.1)
+    blur = _scores([1, 2], [0.5, 0.4], tail=0.1)
     task = _scores([1, 2], [0.7, 0.2], tail=0.1)
     free = _scores([1, 2], [0.3, 0.6], tail=0.1)
     signals = compute_condition_signals(
         {
             Condition.FULL: full,
+            Condition.DEGRADED: degraded,
             Condition.BLUR: blur,
             Condition.TASK: task,
             Condition.FREE: free,
@@ -59,11 +61,31 @@ def test_compute_condition_signals_and_sampled_delta():
     assert set(signals) == {
         "visual_detail",
         "visual_detail_sampled_logprob_delta",
+        "visual_detail_delta",
+        "visual_detail_delta_sampled_logprob_delta",
+        "visual_detail_blur",
+        "visual_detail_blur_sampled_logprob_delta",
         "task_extraction",
         "task_extraction_sampled_logprob_delta",
     }
     assert signals["visual_detail"].item() > 0
     assert signals["visual_detail_sampled_logprob_delta"].item() > 0
+
+
+def test_visual_detail_delta_uses_full_minus_degraded_not_blur():
+    full = _scores([1, 2], [0.8, 0.1], tail=0.1)
+    degraded = _scores([1, 2], [0.8, 0.1], tail=0.1)
+    blur = _scores([1, 2], [0.1, 0.8], tail=0.1)
+    signals = compute_condition_signals(
+        {
+            Condition.FULL: full,
+            Condition.DEGRADED: degraded,
+            Condition.BLUR: blur,
+        }
+    )
+
+    assert torch.allclose(signals["visual_detail_delta"], torch.zeros_like(signals["visual_detail_delta"]))
+    assert signals["visual_detail_blur"].item() > 0
 
 
 def test_non_finite_teacher_scores_are_rejected():

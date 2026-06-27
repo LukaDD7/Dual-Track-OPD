@@ -119,9 +119,9 @@ def compute_condition_signals(
     signals: dict[str, torch.Tensor] = {}
 
     pairs = (
-        ("visual_detail", Condition.FULL, Condition.DEGRADED),
         ("visual_detail_delta", Condition.FULL, Condition.DEGRADED),
-        ("visual_detail", Condition.FULL, Condition.BLUR),
+        ("visual_detail", Condition.FULL, Condition.DEGRADED),
+        ("visual_detail_blur", Condition.FULL, Condition.BLUR),
         ("task_extraction", Condition.TASK, Condition.FREE),
         ("task_selection_delta", Condition.TASK_VISIBLE, Condition.FREE),
         ("diagram_infer_delta", Condition.TASK_INFER, Condition.TASK_VISIBLE),
@@ -135,4 +135,8 @@ def compute_condition_signals(
                 signals[f"{name}_sampled_logprob_delta"] = sampled_token_log_prob(
                     normalized[left], sampled_token_ids
                 ) - sampled_token_log_prob(normalized[right], sampled_token_ids)
+    if "visual_detail" not in signals and "visual_detail_blur" in signals:
+        signals["visual_detail"] = signals["visual_detail_blur"]
+        if "visual_detail_blur_sampled_logprob_delta" in signals:
+            signals["visual_detail_sampled_logprob_delta"] = signals["visual_detail_blur_sampled_logprob_delta"]
     return signals

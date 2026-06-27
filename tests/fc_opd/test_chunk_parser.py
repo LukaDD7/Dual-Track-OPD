@@ -162,6 +162,21 @@ def test_v2_response_returns_four_chunk_labels():
     assert parsed.token_counts["diagram_inference"] == len("altitude bisects the base")
 
 
+def test_truncated_v2_response_reports_missing_tag_names():
+    text = (
+        "<visible_evidence>labels 13 and 10</visible_evidence>"
+        "<diagram_inference>altitude bisects the base</diagram_inference>"
+        "<reasoning>starts reasoning but never closes"
+    )
+    parsed = _parse(text)
+
+    assert not parsed.format_valid
+    assert "reasoning:close_tag_count=0" in parsed.errors
+    assert "answer:open_tag_count=0" in parsed.errors
+    assert "answer:close_tag_count=0" in parsed.errors
+    assert len(parsed.chunk_labels) == len(TOKENIZER.encode(text))
+
+
 def test_truncated_response_is_invalid():
     parsed = _parse(
         "<visual_evidence>x</visual_evidence><reasoning>unfinished",

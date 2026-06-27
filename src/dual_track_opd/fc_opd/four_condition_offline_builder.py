@@ -330,6 +330,12 @@ def validate_four_condition_rows(path: str | Path, *, condition_set: str | None 
         evidence_meta = row.get("evidence_generation_metadata")
         if not isinstance(evidence_meta, Mapping):
             errors.append(f"{uid}: missing evidence_generation_metadata")
+        chunk_spans = row.get("chunk_spans", {})
+        if isinstance(chunk_spans, Mapping) and chunk_spans.get("format_valid") is not True:
+            chunk_errors = chunk_spans.get("errors", [])
+            errors.append(f"{uid}: chunk parse failed: {chunk_errors}")
+        delta_errors = _row_delta_validation_errors(row)
+        errors.extend(f"{uid}: {error}" for error in delta_errors)
     return {"num_rows": len(rows), "valid": bool(rows) and not errors, "errors": errors}
 
 
@@ -345,26 +351,20 @@ def summarize_rows(
         bool(row.get("chunk_spans", {}).get("format_valid", False))
         for row in rows
     ]
+    rows_with_chunk_parse_failure = [
+        str(row.get("sample_uid", "unknown"))
+        for row in rows
+        if row.get("chunk_spans", {}).get("format_valid") is not True
+    ]
     chunk_counts: Counter[str] = Counter()
-    delta_means: dict[str, float | None] = {}
     for row in rows:
         token_counts = row.get("chunk_spans", {}).get("token_counts", {})
         if isinstance(token_counts, Mapping):
             for key, value in token_counts.items():
                 chunk_counts[str(key)] += int(value)
-        signal_summary = row.get("condition_signal_summary", {})
-        if isinstance(signal_summary, Mapping):
-            for name in ("visual_detail_delta", "task_selection_delta", "diagram_infer_delta", "solve_delta"):
-                block = signal_summary.get(name)
-                if isinstance(block, Mapping) and block.get("mean") is not None:
-                    delta_means.setdefault(name, 0.0)
-    for name in ("visual_detail_delta", "task_selection_delta", "diagram_infer_delta", "solve_delta"):
-        values = []
-        for row in rows:
-            block = row.get("condition_signal_summary", {}).get(name, {})
-            if isinstance(block, Mapping) and block.get("mean") is not None:
-                values.append(float(block["mean"]))
-        delta_means[name] = None if not values else float(mean(values))
+    delta_report = _summarize_delta_fields(rows)
+    validation_errors = _summary_validation_errors(rows, delta_report)
+    validation_valid = bool(rows) and not validation_errors
     return {
         "source_dataset": config.source_dataset,
         "condition_set_name": config.condition_set,
@@ -377,10 +377,20 @@ def summarize_rows(
         "chunk_parse_success_rate": None if not parse_success else sum(parse_success) / len(parse_success),
         "chunk_token_counts": dict(chunk_counts),
         "condition_score_success_rate": {condition: 1.0 for condition in conditions},
-        "delta_means": delta_means,
+        "delta_means": delta_report["delta_means"],
+        "visual_detail_delta_count": delta_report["counts"]["visual_detail_delta"],
+        "visual_detail_delta_invalid_count": delta_report["invalid_counts"]["visual_detail_delta"],
+        "delta_counts": delta_report["counts"],
+        "delta_invalid_counts": delta_report["invalid_counts"],
         "gate_ready_fields_available": bool(rows),
+        "validation_valid": validation_valid,
+        "validation_error_count": len(validation_errors),
+        "validation_errors_top10": validation_errors[:10],
+        "rows_with_chunk_parse_failure": rows_with_chunk_parse_failure,
+        "rows_with_invalid_delta": delta_report["rows_with_invalid_delta"],
         "response_length_p50": _quantile(lengths, 0.5),
         "response_length_p90": _quantile(lengths, 0.9),
+        "max_new_tokens_recommendation": _max_new_tokens_recommendation(config),
         "unique_response_text_hash_count": len({row.get("response_text_hash") for row in rows}),
         "response_source_counts": dict(Counter(str(row.get("response_source", "unknown")) for row in rows)),
         "teacher_model_id": teacher_client.metadata.model_id,
@@ -390,6 +400,107 @@ def summarize_rows(
         "red_box_contaminated": False,
         "not_main_experiment": False,
     }
+
+
+DELTA_SIGNAL_NAMES = ("visual_detail_delta", "task_selection_delta", "diagram_infer_delta", "solve_delta")
+
+
+def _finite_float(value: object) -> float | None:
+    if value is None:
+        return None
+    try:
+        candidate = float(value)
+    except (TypeError, ValueError):
+        return None
+    return candidate if math.isfinite(candidate) else None
+
+
+def _row_delta_validation_errors(row: Mapping[str, Any]) -> list[str]:
+    errors: list[str] = []
+    row_conditions = set(str(condition) for condition in row.get("conditions", []))
+    required_pairs = {
+        "visual_detail_delta": ("full", "degraded"),
+        "task_selection_delta": ("task_visible", "free"),
+        "diagram_infer_delta": ("task_infer", "task_visible"),
+        "solve_delta": ("task_solve", "task_infer"),
+    }
+    signal_summary = row.get("condition_signal_summary", {})
+    for name, pair in required_pairs.items():
+        if not set(pair).issubset(row_conditions):
+            continue
+        block = signal_summary.get(name) if isinstance(signal_summary, Mapping) else None
+        if not isinstance(block, Mapping):
+            errors.append(f"{name} missing")
+            continue
+        if _finite_float(block.get("mean")) is None:
+            errors.append(f"{name} invalid mean")
+    return errors
+
+
+def _summarize_delta_fields(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    values: dict[str, list[float]] = {name: [] for name in DELTA_SIGNAL_NAMES}
+    invalid_counts: dict[str, int] = {name: 0 for name in DELTA_SIGNAL_NAMES}
+    rows_with_invalid_delta: list[str] = []
+
+    for row in rows:
+        row_invalid = False
+        row_conditions = set(str(condition) for condition in row.get("conditions", []))
+        required = {
+            "visual_detail_delta": {"full", "degraded"}.issubset(row_conditions),
+            "task_selection_delta": {"task_visible", "free"}.issubset(row_conditions),
+            "diagram_infer_delta": {"task_infer", "task_visible"}.issubset(row_conditions),
+            "solve_delta": {"task_solve", "task_infer"}.issubset(row_conditions),
+        }
+        signal_summary = row.get("condition_signal_summary", {})
+        for name in DELTA_SIGNAL_NAMES:
+            if not required[name]:
+                continue
+            block = signal_summary.get(name) if isinstance(signal_summary, Mapping) else None
+            mean_value = _finite_float(block.get("mean") if isinstance(block, Mapping) else None)
+            if mean_value is None:
+                invalid_counts[name] += 1
+                row_invalid = True
+            else:
+                values[name].append(mean_value)
+        if row_invalid:
+            rows_with_invalid_delta.append(str(row.get("sample_uid", "unknown")))
+
+    delta_means = {
+        name: (None if not signal_values else float(mean(signal_values)))
+        for name, signal_values in values.items()
+    }
+    return {
+        "delta_means": delta_means,
+        "counts": {name: len(signal_values) for name, signal_values in values.items()},
+        "invalid_counts": invalid_counts,
+        "rows_with_invalid_delta": rows_with_invalid_delta,
+    }
+
+
+def _summary_validation_errors(rows: Sequence[Mapping[str, Any]], delta_report: Mapping[str, Any]) -> list[str]:
+    errors: list[str] = []
+    if not rows:
+        errors.append("no rows produced")
+        return errors
+    for row in rows:
+        uid = str(row.get("sample_uid", "unknown"))
+        chunk_spans = row.get("chunk_spans", {})
+        if isinstance(chunk_spans, Mapping) and chunk_spans.get("format_valid") is not True:
+            errors.append(f"{uid}: chunk parse failed: {chunk_spans.get('errors', [])}")
+        elif not isinstance(chunk_spans, Mapping):
+            errors.append(f"{uid}: missing chunk_spans")
+        for error in _row_delta_validation_errors(row):
+            errors.append(f"{uid}: {error}")
+    for name, invalid_count in delta_report["invalid_counts"].items():
+        if int(invalid_count) > 0:
+            errors.append(f"{name}: invalid_count={invalid_count}")
+    return errors
+
+
+def _max_new_tokens_recommendation(config: FourConditionOfflineBuilderConfig) -> str | None:
+    if config.rollout_response_format == "fc_opd_structured_v2" and config.condition_set == "6c-solve" and config.max_new_tokens < 768:
+        return "For Geometry3K 6C fc_opd_structured_v2 smoke, prefer --max-new-tokens >= 768 unless using a deliberately concise model prompt."
+    return None
 
 
 def _attach_group_stats(rows: list[dict[str, Any]]) -> None:
@@ -432,9 +543,10 @@ def _read_jsonl(path: str | Path) -> list[dict[str, Any]]:
 
 
 def _stats(values: Sequence[float]) -> dict[str, float | None]:
-    if not values:
+    cleaned = [float(value) for value in values if math.isfinite(float(value))]
+    if not cleaned:
         return {"mean": None, "p50": None, "p90": None}
-    return {"mean": float(mean(values)), "p50": _quantile(values, 0.5), "p90": _quantile(values, 0.9)}
+    return {"mean": float(mean(cleaned)), "p50": _quantile(cleaned, 0.5), "p90": _quantile(cleaned, 0.9)}
 
 
 def _quantile(values: Sequence[float | int], fraction: float) -> float | None:
