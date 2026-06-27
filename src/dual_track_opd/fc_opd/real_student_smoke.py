@@ -50,6 +50,14 @@ FOUR_CLEAN_CONDITIONS: tuple[Condition, ...] = (
     Condition.FREE,
     Condition.TASK,
 )
+SIX_C_SOLVE_CONDITIONS: tuple[Condition, ...] = (
+    Condition.FULL,
+    Condition.DEGRADED,
+    Condition.FREE,
+    Condition.TASK_VISIBLE,
+    Condition.TASK_INFER,
+    Condition.TASK_SOLVE,
+)
 TWO_CONDITION_ROUTER = RouterConfig(
     mode="chunk",
     chunk_condition={
@@ -68,6 +76,11 @@ FOUR_CLEAN_CONDITION_ROUTER = RouterConfig(
     },
     invalid_format_condition=Condition.DEGRADED,
 )
+SIX_C_CHUNK_GATED_ROUTER = RouterConfig(
+    mode="chunk_gated",
+    invalid_format_condition=Condition.FULL,
+)
+ROUTING_MODES = ("chunk", "uniform_all_conditions", "chunk_gated")
 
 
 # ---------------------------------------------------------------------------
@@ -119,6 +132,15 @@ def condition_inputs_from_record(record: Mapping[str, Any]) -> ConditionInputs:
         ),
         free_caption=str(raw["free_caption"]),
         task_evidence=str(raw["task_evidence"]),
+        task_visible_evidence=(
+            None if raw.get("task_visible_evidence") is None else str(raw["task_visible_evidence"])
+        ),
+        task_infer_evidence=(
+            None if raw.get("task_infer_evidence") is None else str(raw["task_infer_evidence"])
+        ),
+        task_solve_evidence=(
+            None if raw.get("task_solve_evidence") is None else str(raw["task_solve_evidence"])
+        ),
         verified_facts=None if raw.get("verified_facts") is None else str(raw["verified_facts"]),
         verified_facts_source=(
             None if raw.get("verified_facts_source") is None else str(raw["verified_facts_source"])
@@ -406,6 +428,9 @@ class RealStudentResult:
     lm_head_embed_tied: bool = False
     tied_parameter_names: list[list[str]] = field(default_factory=list)
     expected_conditions: tuple[Condition, ...] = FOUR_CONDITIONS
+    routing_mode: str = "chunk"
+    chunk_format_valid: bool = True
+    fallback_bad_chunk_rows: int = 0
     metrics: dict[str, float] = field(default_factory=dict)
 
     @property
@@ -443,6 +468,64 @@ def _first_finite_nonzero_grad(
     return name, norm, True
 
 
+def _uniform_condition_weights(
+    teacher_scores: Mapping[Condition, Any],
+    response_mask: torch.Tensor,
+    *,
+    expected_conditions: Sequence[Condition] | None = None,
+) -> dict[Condition, torch.Tensor]:
+    available = tuple(condition for condition in (expected_conditions or tuple(teacher_scores)) if condition in teacher_scores)
+    if not available:
+        available = tuple(teacher_scores)
+    if not available:
+        raise ValueError("uniform routing requires at least one available condition")
+    value = 1.0 / len(available)
+    weights = {
+        condition: torch.zeros_like(response_mask, dtype=torch.float32)
+        for condition in teacher_scores
+    }
+    for condition in available:
+        weights[condition][response_mask.bool()] = value
+    return weights
+
+
+def _condition_weights_for_record(
+    *,
+    routing_mode: str,
+    teacher_scores: Mapping[Condition, Any],
+    chunk_masks: Mapping[str, torch.Tensor],
+    router_config: RouterConfig,
+    response_mask: torch.Tensor,
+    format_valid: torch.Tensor,
+    expected_conditions: Sequence[Condition],
+) -> tuple[dict[Condition, torch.Tensor], bool]:
+    if routing_mode == "uniform_all_conditions":
+        return _uniform_condition_weights(
+            teacher_scores,
+            response_mask,
+            expected_conditions=expected_conditions,
+        ), False
+    if routing_mode == "chunk_gated" and not bool(format_valid.bool().all().item()):
+        return _uniform_condition_weights(
+            teacher_scores,
+            response_mask,
+            expected_conditions=expected_conditions,
+        ), True
+    if routing_mode not in ROUTING_MODES:
+        raise ValueError(f"routing_mode must be one of {ROUTING_MODES}")
+    effective_router = router_config
+    if routing_mode == "chunk_gated" and router_config.mode != "chunk_gated":
+        effective_router = SIX_C_CHUNK_GATED_ROUTER
+    return route_condition_weights(
+        signals={},
+        chunk_masks=chunk_masks,
+        router_config=effective_router,
+        response_mask=response_mask,
+        available_conditions=tuple(teacher_scores),
+        format_valid=format_valid,
+    ), False
+
+
 def run_real_student_record(
     record: Mapping[str, Any],
     provider: StudentLogitsProvider,
@@ -450,6 +533,7 @@ def run_real_student_record(
     router_config: RouterConfig = FOUR_CONDITION_ROUTER,
     loss_config: FCOPDLossConfig | None = None,
     expected_conditions: tuple[Condition, ...] = FOUR_CONDITIONS,
+    routing_mode: str = "chunk",
     require_decoded_match: bool = True,
     device: torch.device | str = "cpu",
 ) -> RealStudentResult:
@@ -488,13 +572,14 @@ def run_real_student_record(
     response_mask = tensors.response_mask.to(target_device)
     format_valid = tensors.format_valid.to(target_device)
 
-    weights = route_condition_weights(
-        signals={},
+    weights, fallback_bad_chunk = _condition_weights_for_record(
+        routing_mode=routing_mode,
+        teacher_scores=teacher_scores,
         chunk_masks=chunk_masks,
         router_config=router_config,
         response_mask=response_mask,
-        available_conditions=tuple(teacher_scores),
         format_valid=format_valid,
+        expected_conditions=expected_conditions,
     )
     loss, metrics = compute_fc_opd_loss(
         logits,
@@ -551,6 +636,9 @@ def run_real_student_record(
         lm_head_embed_tied=lm_head_embed_tied(tied_groups),
         tied_parameter_names=tied_groups,
         expected_conditions=expected_conditions,
+        routing_mode=routing_mode,
+        chunk_format_valid=bool(format_valid.bool().all().item()),
+        fallback_bad_chunk_rows=1 if fallback_bad_chunk else 0,
         metrics={key: float(value.item()) for key, value in metrics.items()},
     )
 
@@ -575,6 +663,7 @@ def run_real_student_smoke(
     router_config: RouterConfig = FOUR_CONDITION_ROUTER,
     loss_config: FCOPDLossConfig | None = None,
     expected_conditions: tuple[Condition, ...] = FOUR_CONDITIONS,
+    routing_mode: str = "chunk",
     require_decoded_match: bool = True,
     device: torch.device | str = "cpu",
 ) -> RealStudentSmokeReport:
@@ -587,6 +676,7 @@ def run_real_student_smoke(
                 router_config=router_config,
                 loss_config=loss_config,
                 expected_conditions=expected_conditions,
+                routing_mode=routing_mode,
                 require_decoded_match=require_decoded_match,
                 device=device,
             )
@@ -626,6 +716,10 @@ class RealMinTrainReport:
     lm_head_embed_tied: bool = False
     tied_parameter_names: list[list[str]] = field(default_factory=list)
     expected_conditions: tuple[Condition, ...] = FOUR_CONDITIONS
+    routing_mode: str = "chunk"
+    skipped_bad_chunk_rows: int = 0
+    fallback_bad_chunk_rows: int = 0
+    chunk_gated_valid_rows: int = 0
     steps: list[RealMinTrainStep] = field(default_factory=list)
 
     @property
@@ -708,6 +802,7 @@ def run_real_student_min_train(
     router_config: RouterConfig = FOUR_CONDITION_ROUTER,
     loss_config: FCOPDLossConfig | None = None,
     expected_conditions: tuple[Condition, ...] = FOUR_CONDITIONS,
+    routing_mode: str = "chunk",
     require_decoded_match: bool = True,
     device: torch.device | str = "cpu",
 ) -> RealMinTrainReport:
@@ -764,6 +859,7 @@ def run_real_student_min_train(
         lm_head_embed_tied=lm_head_embed_tied(tied_groups),
         tied_parameter_names=tied_groups,
         expected_conditions=expected_conditions,
+        routing_mode=routing_mode,
     )
 
     for step in range(num_steps):
@@ -794,14 +890,20 @@ def run_real_student_min_train(
                 prep.response_mask = cpu_tensors.response_mask.to(logits.device)
                 prep.format_valid = cpu_tensors.format_valid.to(logits.device)
 
-            weights = route_condition_weights(
-                signals={},
+            weights, fallback_bad_chunk = _condition_weights_for_record(
+                routing_mode=routing_mode,
+                teacher_scores=prep.teacher_scores,
                 chunk_masks=prep.chunk_masks,
                 router_config=router_config,
                 response_mask=prep.response_mask,
-                available_conditions=tuple(prep.teacher_scores),
                 format_valid=prep.format_valid,
+                expected_conditions=expected_conditions,
             )
+            if step == 0 and routing_mode == "chunk_gated":
+                if fallback_bad_chunk:
+                    report.fallback_bad_chunk_rows += 1
+                else:
+                    report.chunk_gated_valid_rows += 1
             loss, metrics = compute_fc_opd_loss(
                 logits,
                 prep.teacher_scores,
@@ -875,6 +977,9 @@ def _result_to_json(result: RealStudentResult) -> dict[str, Any]:
         "tied_parameter_names": result.tied_parameter_names,
         "expected_conditions": [condition.value for condition in result.expected_conditions],
         "consumed_conditions": sorted(c.value for c in result.consumed_conditions),
+        "routing_mode": result.routing_mode,
+        "chunk_format_valid": result.chunk_format_valid,
+        "fallback_bad_chunk_rows": result.fallback_bad_chunk_rows,
         "four_conditions_consumed": result.four_conditions_consumed,
         "expected_conditions_consumed": result.expected_conditions_consumed,
         "passed": result.passed,
@@ -886,9 +991,35 @@ def _condition_set(value: str) -> tuple[RouterConfig, tuple[Condition, ...]]:
         return FOUR_CONDITION_ROUTER, FOUR_CONDITIONS
     if value == "4c-clean":
         return FOUR_CLEAN_CONDITION_ROUTER, FOUR_CLEAN_CONDITIONS
+    if value == "6c-solve":
+        return SIX_C_CHUNK_GATED_ROUTER, SIX_C_SOLVE_CONDITIONS
     if value == "2c":
         return TWO_CONDITION_ROUTER, TWO_CONDITIONS
-    raise argparse.ArgumentTypeError("condition set must be '4c', '4c-clean', or '2c'")
+    raise argparse.ArgumentTypeError("condition set must be '4c', '4c-clean', '6c-solve', or '2c'")
+
+
+def _expected_conditions_for_routing(
+    score_conditions: tuple[Condition, ...],
+    *,
+    routing_mode: str,
+    router_config: RouterConfig,
+) -> tuple[Condition, ...]:
+    if routing_mode != "chunk_gated":
+        return score_conditions
+    available = set(score_conditions)
+    expected: list[Condition] = []
+    for candidates in router_config.chunk_condition_routing.values():
+        for condition_like in list(candidates)[: router_config.max_conditions_per_token]:
+            condition = Condition(condition_like)
+            if condition in available and condition not in expected:
+                expected.append(condition)
+            elif condition is Condition.TASK and Condition.TASK_VISIBLE in available and Condition.TASK_VISIBLE not in expected:
+                expected.append(Condition.TASK_VISIBLE)
+            elif condition is Condition.TASK_VISIBLE and Condition.TASK in available and Condition.TASK not in expected:
+                expected.append(Condition.TASK)
+    if not expected:
+        return score_conditions
+    return tuple(expected)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -904,7 +1035,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--limit", type=int, default=1)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--dtype", default="bfloat16", choices=tuple(_DTYPES))
-    parser.add_argument("--condition-set", choices=("4c", "4c-clean", "2c"), default="4c")
+    parser.add_argument("--condition-set", choices=("4c", "4c-clean", "6c-solve", "2c"), default="4c")
+    parser.add_argument("--routing-mode", choices=ROUTING_MODES, default="chunk")
     parser.add_argument("--freeze-all-but-lm-head", action="store_true")
     parser.add_argument("--max-prompt-length", type=int, default=None)
     parser.add_argument("--max-response-tokens", type=int, default=None)
@@ -931,13 +1063,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         max_response_tokens=args.max_response_tokens,
     )
     provider = HFStudentProvider.load(config)
-    router_config, expected_conditions = _condition_set(args.condition_set)
+    router_config, score_conditions = _condition_set(args.condition_set)
+    expected_conditions = _expected_conditions_for_routing(
+        score_conditions,
+        routing_mode=args.routing_mode,
+        router_config=router_config,
+    )
 
     report = run_real_student_smoke(
         records,
         provider,
         router_config=router_config,
         expected_conditions=expected_conditions,
+        routing_mode=args.routing_mode,
         require_decoded_match=not args.allow_retokenize_mismatch,
         device="cpu",
     )
@@ -949,6 +1087,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             {
                 "model_path": args.model_path,
                 "condition_set": args.condition_set,
+                "routing_mode": args.routing_mode,
                 "num_records": report.num_records,
                 "passed": report.passed,
             },
@@ -977,7 +1116,8 @@ def min_train_main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--dtype", default="bfloat16", choices=tuple(_DTYPES))
-    parser.add_argument("--condition-set", choices=("4c", "4c-clean", "2c"), default="4c")
+    parser.add_argument("--condition-set", choices=("4c", "4c-clean", "6c-solve", "2c"), default="4c")
+    parser.add_argument("--routing-mode", choices=ROUTING_MODES, default="chunk")
     parser.add_argument(
         "--freeze-all-but-lm-head",
         action=argparse.BooleanOptionalAction,
@@ -1009,7 +1149,12 @@ def min_train_main(argv: Sequence[str] | None = None) -> int:
         max_response_tokens=args.max_response_tokens,
     )
     provider = HFStudentProvider.load(config)
-    router_config, expected_conditions = _condition_set(args.condition_set)
+    router_config, score_conditions = _condition_set(args.condition_set)
+    expected_conditions = _expected_conditions_for_routing(
+        score_conditions,
+        routing_mode=args.routing_mode,
+        router_config=router_config,
+    )
 
     report = run_real_student_min_train(
         records,
@@ -1018,6 +1163,7 @@ def min_train_main(argv: Sequence[str] | None = None) -> int:
         learning_rate=args.lr,
         router_config=router_config,
         expected_conditions=expected_conditions,
+        routing_mode=args.routing_mode,
         require_decoded_match=not args.allow_retokenize_mismatch,
     )
 
@@ -1037,6 +1183,7 @@ def min_train_main(argv: Sequence[str] | None = None) -> int:
     summary = {
         "model_path": args.model_path,
         "condition_set": args.condition_set,
+        "routing_mode": args.routing_mode,
         "num_records": report.num_records,
         "num_steps": report.num_steps,
         "learning_rate": report.learning_rate,
@@ -1056,6 +1203,9 @@ def min_train_main(argv: Sequence[str] | None = None) -> int:
         "four_conditions_consumed": report.four_conditions_consumed,
         "expected_conditions": [condition.value for condition in report.expected_conditions],
         "expected_conditions_consumed": report.expected_conditions_consumed,
+        "skipped_bad_chunk_rows": report.skipped_bad_chunk_rows,
+        "fallback_bad_chunk_rows": report.fallback_bad_chunk_rows,
+        "chunk_gated_valid_rows": report.chunk_gated_valid_rows,
         "initial_loss": report.steps[0].loss,
         "final_loss": report.steps[-1].loss,
         "loss_decreased": report.loss_decreased,

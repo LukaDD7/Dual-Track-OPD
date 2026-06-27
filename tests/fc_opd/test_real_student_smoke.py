@@ -1,4 +1,5 @@
 from contextlib import ExitStack
+from pathlib import Path
 
 import pytest
 import torch
@@ -18,6 +19,8 @@ from dual_track_opd.fc_opd.offline_scoring import (
 from dual_track_opd.fc_opd.real_student_smoke import (
     FOUR_CLEAN_CONDITIONS,
     FOUR_CLEAN_CONDITION_ROUTER,
+    SIX_C_CHUNK_GATED_ROUTER,
+    SIX_C_SOLVE_CONDITIONS,
     StudentForwardOutput,
     TWO_CONDITIONS,
     TWO_CONDITION_ROUTER,
@@ -29,6 +32,7 @@ from dual_track_opd.fc_opd.real_student_smoke import (
     run_real_student_smoke,
     teacher_scores_to_device,
 )
+import dual_track_opd.fc_opd.real_student_smoke as real_student_smoke
 from dual_track_opd.fc_opd.signal_decomposer import TeacherTopK
 from dual_track_opd.fc_opd.teacher_client import TeacherClient
 from dual_track_opd.fc_opd.teacher_protocol import tokenizer_fingerprint
@@ -109,6 +113,50 @@ def _build_4c_clean_offline_payloads(num_samples: int = 2) -> list[dict]:
             )
         )
     return [record.payload for record in scored]
+
+
+def _manual_payload(
+    conditions,
+    *,
+    format_valid: bool = True,
+    legacy_visual: bool = False,
+) -> dict:
+    tokenizer = ByteTokenizer()
+    response_text = "abcde"
+    response_ids = tokenizer.encode(response_text)
+    topk = [[token_id, (token_id + 1) % 256] for token_id in response_ids]
+    log_probs = [[-0.4, -1.1] for _ in response_ids]
+    block = {
+        "token_ids": topk,
+        "log_probs": log_probs,
+        "tail_log_prob": [-4.0 for _ in response_ids],
+        "entropy": [0.5 for _ in response_ids],
+        "top_k": 2,
+    }
+    chunks = {
+        "visible_evidence": [[0, 1]],
+        "diagram_inference": [[1, 2]],
+        "reasoning": [[2, 4]],
+        "answer": [[4, 5]],
+        "format_valid": format_valid,
+        "errors": [] if format_valid else ["reasoning:close_tag_count=0", "answer:open_tag_count=0"],
+    }
+    if legacy_visual:
+        chunks["visual_evidence"] = chunks.pop("visible_evidence")
+    if not format_valid:
+        chunks["visible_evidence"] = []
+        chunks["diagram_inference"] = []
+        chunks["reasoning"] = []
+        chunks["answer"] = []
+    return {
+        "sample_uid": "manual-1",
+        "question": "Question?",
+        "response_text": response_text,
+        "response_token_ids": response_ids,
+        "tokenizer_hash": tokenizer_fingerprint(tokenizer),
+        "condition_scores": {condition.value: dict(block) for condition in conditions},
+        "chunk_spans": chunks,
+    }
 
 
 class FakeStudentModel(nn.Module):
@@ -193,6 +241,15 @@ def test_response_logit_slice_picks_next_token_positions():
     assert sliced.shape == (1, 5, vocab)
     # Positions 3..7 predict response tokens at absolute positions 4..8.
     assert sliced[0, :, 0].tolist() == [3.0, 4.0, 5.0, 6.0, 7.0]
+
+
+def test_geometry3k_wrapper_passes_routing_mode_to_python():
+    script = Path("scripts/hpc/run_fc_opd_geometry3k_4c_real_student_min_train_smoke.sh").read_text(
+        encoding="utf-8"
+    )
+
+    assert '--routing-mode "${FC_OPD_ROUTING_MODE:-uniform_all_conditions}"' in script
+    assert '--condition-set "${FC_OPD_CONDITION_SET:-4c-clean}"' in script
 
 
 def test_response_logit_slice_rejects_out_of_range():
@@ -439,6 +496,71 @@ def test_min_train_supports_clean_4c_router():
     assert report.expected_conditions_consumed
     assert report.consumed_conditions == set(FOUR_CLEAN_CONDITIONS)
     assert not report.four_conditions_consumed
+
+
+def test_uniform_all_conditions_does_not_call_router(monkeypatch):
+    payloads = [_manual_payload(SIX_C_SOLVE_CONDITIONS)]
+    provider = _provider_for(payloads)
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("route_condition_weights should not be called")
+
+    monkeypatch.setattr(real_student_smoke, "route_condition_weights", fail_if_called)
+    report = run_real_student_min_train(
+        payloads,
+        provider,
+        router_config=SIX_C_CHUNK_GATED_ROUTER,
+        expected_conditions=SIX_C_SOLVE_CONDITIONS,
+        routing_mode="uniform_all_conditions",
+        num_steps=1,
+        learning_rate=0.1,
+    )
+
+    assert report.passed
+    assert report.consumed_conditions == set(SIX_C_SOLVE_CONDITIONS)
+
+
+def test_min_train_6c_chunk_gated_routes_visible_evidence():
+    payloads = [_manual_payload(SIX_C_SOLVE_CONDITIONS)]
+    provider = _provider_for(payloads)
+    report = run_real_student_min_train(
+        payloads,
+        provider,
+        router_config=SIX_C_CHUNK_GATED_ROUTER,
+        expected_conditions=(
+            Condition.TASK_VISIBLE,
+            Condition.FULL,
+            Condition.TASK_INFER,
+            Condition.TASK_SOLVE,
+        ),
+        routing_mode="chunk_gated",
+        num_steps=1,
+        learning_rate=0.1,
+    )
+
+    assert report.passed
+    assert report.chunk_gated_valid_rows == 1
+    assert report.fallback_bad_chunk_rows == 0
+    assert Condition.TASK_VISIBLE in report.consumed_conditions
+
+
+def test_min_train_chunk_gated_falls_back_for_malformed_chunks():
+    payloads = [_manual_payload(SIX_C_SOLVE_CONDITIONS, format_valid=False)]
+    provider = _provider_for(payloads)
+    report = run_real_student_min_train(
+        payloads,
+        provider,
+        router_config=SIX_C_CHUNK_GATED_ROUTER,
+        expected_conditions=SIX_C_SOLVE_CONDITIONS,
+        routing_mode="chunk_gated",
+        num_steps=1,
+        learning_rate=0.1,
+    )
+
+    assert report.passed
+    assert report.fallback_bad_chunk_rows == 1
+    assert report.chunk_gated_valid_rows == 0
+    assert report.consumed_conditions == set(SIX_C_SOLVE_CONDITIONS)
 
 
 def test_min_train_actually_moves_a_parameter(offline_payloads):

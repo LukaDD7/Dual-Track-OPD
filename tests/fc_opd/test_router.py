@@ -98,6 +98,26 @@ def test_chunk_gated_routing_is_sparse_and_chunk_aware():
     assert weights[Condition.TASK_INFER][0, 2] > 0
 
 
+def test_chunk_router_maps_legacy_task_to_task_visible_when_needed():
+    response_mask = torch.ones((1, 5), dtype=torch.bool)
+    weights = route_condition_weights(
+        {},
+        _masks(),
+        RouterConfig(
+            mode="chunk",
+            chunk_condition={
+                "visual_evidence": Condition.TASK,
+                "reasoning": Condition.FULL,
+                "answer": Condition.FULL,
+            },
+        ),
+        response_mask=response_mask,
+        available_conditions=[Condition.FULL, Condition.TASK_VISIBLE],
+    )
+
+    assert torch.equal(weights[Condition.TASK_VISIBLE], torch.tensor([[1, 1, 0, 0, 0]], dtype=torch.float32))
+
+
 def test_uniform_all_conditions_remains_available_for_ablation():
     response_mask = torch.ones((1, 5), dtype=torch.bool)
     weights = route_condition_weights(

@@ -17,6 +17,7 @@ DEFAULT_CHUNK_CONDITION_ROUTING: dict[str, tuple[Condition, ...]] = {
 }
 LEGACY_CHUNK_ALIASES = {"visual_evidence": "visible_evidence"}
 CONDITION_FALLBACKS: dict[Condition, tuple[Condition, ...]] = {
+    Condition.TASK: (Condition.TASK_VISIBLE,),
     Condition.TASK_VISIBLE: (Condition.TASK,),
     Condition.TASK_INFER: (Condition.TASK, Condition.FULL),
     Condition.TASK_SOLVE: (Condition.FULL,),
