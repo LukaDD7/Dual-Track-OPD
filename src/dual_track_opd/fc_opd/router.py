@@ -15,6 +15,12 @@ DEFAULT_CHUNK_CONDITION_ROUTING: dict[str, tuple[Condition, ...]] = {
     "reasoning": (Condition.TASK_INFER, Condition.TASK_SOLVE),
     "answer": (Condition.TASK_SOLVE,),
 }
+CONTRASTIVE_CHUNK_CONDITION_ROUTING: dict[str, tuple[Condition, ...]] = {
+    "visible_evidence": (Condition.FULL, Condition.DEGRADED, Condition.TASK_VISIBLE, Condition.FREE),
+    "diagram_inference": (Condition.TASK_INFER, Condition.TASK_VISIBLE, Condition.FULL, Condition.DEGRADED),
+    "reasoning": (Condition.TASK_SOLVE, Condition.TASK_INFER),
+    "answer": (Condition.TASK_SOLVE, Condition.TASK_INFER),
+}
 LEGACY_CHUNK_ALIASES = {"visual_evidence": "visible_evidence"}
 CONDITION_FALLBACKS: dict[Condition, tuple[Condition, ...]] = {
     Condition.TASK: (Condition.TASK_VISIBLE,),
@@ -184,7 +190,7 @@ def route_condition_weights(
             if fallback_condition not in available:
                 raise ValueError(f"fallback condition is unavailable: {fallback_condition}")
             weights[fallback_condition][uncovered] = 1.0
-    elif router_config.mode == "chunk_gated":
+    elif router_config.mode in {"chunk_gated", "chunk_gated_primary", "chunk_gated_contrastive"}:
         entropy_ok = _entropy_gate(
             signals,
             threshold=router_config.entropy_max,
@@ -192,7 +198,10 @@ def route_condition_weights(
             device=response_mask.device,
         )
         for chunk_name, mask in chunk_masks.items():
-            candidate_raw = router_config.chunk_condition_routing.get(chunk_name, ())
+            if router_config.mode == "chunk_gated_contrastive":
+                candidate_raw = CONTRASTIVE_CHUNK_CONDITION_ROUTING.get(chunk_name, ())
+            else:
+                candidate_raw = router_config.chunk_condition_routing.get(chunk_name, ())
             candidates: list[Condition] = []
             for condition_like in candidate_raw:
                 condition = _available_condition(Condition(condition_like), available)
@@ -225,7 +234,10 @@ def route_condition_weights(
                 raise ValueError(f"fallback condition is unavailable: {router_config.invalid_format_condition}")
             weights[fallback_condition][uncovered] = 1.0
     else:
-        raise ValueError("router mode must be 'single', 'chunk', 'chunk_gated', or 'uniform_all_conditions'")
+        raise ValueError(
+            "router mode must be 'single', 'chunk', 'chunk_gated', "
+            "'chunk_gated_primary', 'chunk_gated_contrastive', or 'uniform_all_conditions'"
+        )
 
     weight_sum = sum(weights.values())
     max_allowed = 1.0 + 1e-6 if router_config.normalize_weights_per_token else router_config.max_conditions_per_token + 1e-6

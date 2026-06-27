@@ -542,6 +542,35 @@ def test_min_train_6c_chunk_gated_routes_visible_evidence():
     assert report.chunk_gated_valid_rows == 1
     assert report.fallback_bad_chunk_rows == 0
     assert Condition.TASK_VISIBLE in report.consumed_conditions
+    assert Condition.FREE in report.unused_conditions
+    assert Condition.DEGRADED in report.unused_conditions
+    assert report.condition_token_weight_sums["task_visible"] > 0
+    assert report.chunk_condition_weight_sums["visible_evidence"]["task_visible"] > 0
+
+
+def test_min_train_6c_contrastive_consumes_free_and_degraded():
+    payloads = [_manual_payload(SIX_C_SOLVE_CONDITIONS)]
+    provider = _provider_for(payloads)
+    report = run_real_student_min_train(
+        payloads,
+        provider,
+        router_config=SIX_C_CHUNK_GATED_ROUTER,
+        expected_conditions=SIX_C_SOLVE_CONDITIONS,
+        routing_mode="chunk_gated_contrastive",
+        num_steps=1,
+        learning_rate=0.1,
+    )
+
+    assert report.passed
+    assert Condition.FREE in report.consumed_conditions
+    assert Condition.DEGRADED in report.consumed_conditions
+    assert Condition.FREE not in report.unused_conditions
+    assert Condition.DEGRADED not in report.unused_conditions
+    assert report.condition_token_weight_sums["free"] > 0
+    assert report.condition_token_weight_sums["degraded"] > 0
+    assert report.condition_token_weight_nonzero_counts["free"] > 0
+    assert report.chunk_condition_weight_sums["visible_evidence"]["free"] > 0
+    assert report.chunk_condition_weight_sums["visible_evidence"]["degraded"] > 0
 
 
 def test_min_train_chunk_gated_falls_back_for_malformed_chunks():

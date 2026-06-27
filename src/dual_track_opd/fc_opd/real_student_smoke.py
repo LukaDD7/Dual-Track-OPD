@@ -80,7 +80,13 @@ SIX_C_CHUNK_GATED_ROUTER = RouterConfig(
     mode="chunk_gated",
     invalid_format_condition=Condition.FULL,
 )
-ROUTING_MODES = ("chunk", "uniform_all_conditions", "chunk_gated")
+ROUTING_MODES = (
+    "chunk",
+    "uniform_all_conditions",
+    "chunk_gated",
+    "chunk_gated_primary",
+    "chunk_gated_contrastive",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -431,7 +437,15 @@ class RealStudentResult:
     routing_mode: str = "chunk"
     chunk_format_valid: bool = True
     fallback_bad_chunk_rows: int = 0
+    available_conditions: tuple[Condition, ...] = ()
+    condition_token_weight_sums: dict[str, float] = field(default_factory=dict)
+    condition_token_weight_nonzero_counts: dict[str, int] = field(default_factory=dict)
+    chunk_condition_weight_sums: dict[str, dict[str, float]] = field(default_factory=dict)
     metrics: dict[str, float] = field(default_factory=dict)
+
+    @property
+    def unused_conditions(self) -> set[Condition]:
+        return set(self.available_conditions) - set(self.consumed_conditions)
 
     @property
     def four_conditions_consumed(self) -> bool:
@@ -489,6 +503,35 @@ def _uniform_condition_weights(
     return weights
 
 
+def _routing_diagnostics(
+    *,
+    weights: Mapping[Condition, torch.Tensor],
+    chunk_masks: Mapping[str, torch.Tensor],
+    teacher_scores: Mapping[Condition, Any],
+) -> dict[str, Any]:
+    condition_sums = {
+        condition.value: float(weight.detach().float().sum().item())
+        for condition, weight in weights.items()
+    }
+    condition_counts = {
+        condition.value: int((weight.detach().float() > 0).sum().item())
+        for condition, weight in weights.items()
+    }
+    chunk_sums: dict[str, dict[str, float]] = {}
+    for chunk_name, mask in chunk_masks.items():
+        chunk_mask = mask.detach().float()
+        chunk_sums[chunk_name] = {
+            condition.value: float((weight.detach().float() * chunk_mask).sum().item())
+            for condition, weight in weights.items()
+        }
+    return {
+        "available_conditions": tuple(teacher_scores),
+        "condition_token_weight_sums": condition_sums,
+        "condition_token_weight_nonzero_counts": condition_counts,
+        "chunk_condition_weight_sums": chunk_sums,
+    }
+
+
 def _condition_weights_for_record(
     *,
     routing_mode: str,
@@ -505,7 +548,7 @@ def _condition_weights_for_record(
             response_mask,
             expected_conditions=expected_conditions,
         ), False
-    if routing_mode == "chunk_gated" and not bool(format_valid.bool().all().item()):
+    if routing_mode in {"chunk_gated", "chunk_gated_primary", "chunk_gated_contrastive"} and not bool(format_valid.bool().all().item()):
         return _uniform_condition_weights(
             teacher_scores,
             response_mask,
@@ -516,6 +559,27 @@ def _condition_weights_for_record(
     effective_router = router_config
     if routing_mode == "chunk_gated" and router_config.mode != "chunk_gated":
         effective_router = SIX_C_CHUNK_GATED_ROUTER
+    elif routing_mode == "chunk_gated_primary":
+        effective_router = RouterConfig(
+            mode="chunk_gated_primary",
+            invalid_format_condition=router_config.invalid_format_condition,
+            chunk_condition_routing=router_config.chunk_condition_routing,
+            delta_threshold=router_config.delta_threshold,
+            entropy_max=router_config.entropy_max,
+            topk_mass_min=router_config.topk_mass_min,
+            max_conditions_per_token=router_config.max_conditions_per_token,
+            normalize_weights_per_token=router_config.normalize_weights_per_token,
+        )
+    elif routing_mode == "chunk_gated_contrastive":
+        effective_router = RouterConfig(
+            mode="chunk_gated_contrastive",
+            invalid_format_condition=router_config.invalid_format_condition,
+            delta_threshold=router_config.delta_threshold,
+            entropy_max=router_config.entropy_max,
+            topk_mass_min=router_config.topk_mass_min,
+            max_conditions_per_token=max(router_config.max_conditions_per_token, 4),
+            normalize_weights_per_token=router_config.normalize_weights_per_token,
+        )
     return route_condition_weights(
         signals={},
         chunk_masks=chunk_masks,
@@ -607,6 +671,11 @@ def run_real_student_record(
         for condition in tensors.teacher_scores
         if metrics.get(f"selection/{condition.value}", torch.zeros(())).item() > 0.0
     }
+    diagnostics = _routing_diagnostics(
+        weights=weights,
+        chunk_masks=chunk_masks,
+        teacher_scores=teacher_scores,
+    )
 
     num_tensors, num_elements, trainable_names = _trainable_summary(provider)
     tied_groups = detect_tied_parameter_groups(provider)
@@ -639,6 +708,10 @@ def run_real_student_record(
         routing_mode=routing_mode,
         chunk_format_valid=bool(format_valid.bool().all().item()),
         fallback_bad_chunk_rows=1 if fallback_bad_chunk else 0,
+        available_conditions=diagnostics["available_conditions"],
+        condition_token_weight_sums=diagnostics["condition_token_weight_sums"],
+        condition_token_weight_nonzero_counts=diagnostics["condition_token_weight_nonzero_counts"],
+        chunk_condition_weight_sums=diagnostics["chunk_condition_weight_sums"],
         metrics={key: float(value.item()) for key, value in metrics.items()},
     )
 
@@ -720,6 +793,10 @@ class RealMinTrainReport:
     skipped_bad_chunk_rows: int = 0
     fallback_bad_chunk_rows: int = 0
     chunk_gated_valid_rows: int = 0
+    available_conditions: tuple[Condition, ...] = ()
+    condition_token_weight_sums: dict[str, float] = field(default_factory=dict)
+    condition_token_weight_nonzero_counts: dict[str, int] = field(default_factory=dict)
+    chunk_condition_weight_sums: dict[str, dict[str, float]] = field(default_factory=dict)
     steps: list[RealMinTrainStep] = field(default_factory=list)
 
     @property
@@ -748,6 +825,10 @@ class RealMinTrainReport:
     @property
     def expected_conditions_consumed(self) -> bool:
         return set(self.expected_conditions).issubset(self.consumed_conditions)
+
+    @property
+    def unused_conditions(self) -> set[Condition]:
+        return set(self.available_conditions) - set(self.consumed_conditions)
 
     @property
     def loss_decreased(self) -> bool:
@@ -904,6 +985,11 @@ def run_real_student_min_train(
                     report.fallback_bad_chunk_rows += 1
                 else:
                     report.chunk_gated_valid_rows += 1
+            elif step == 0 and routing_mode in {"chunk_gated_primary", "chunk_gated_contrastive"}:
+                if fallback_bad_chunk:
+                    report.fallback_bad_chunk_rows += 1
+                else:
+                    report.chunk_gated_valid_rows += 1
             loss, metrics = compute_fc_opd_loss(
                 logits,
                 prep.teacher_scores,
@@ -918,6 +1004,27 @@ def run_real_student_min_train(
                 for condition in prep.teacher_scores
                 if metrics.get(f"selection/{condition.value}", torch.zeros(())).item() > 0.0
             }
+            if step == 0:
+                diagnostics = _routing_diagnostics(
+                    weights=weights,
+                    chunk_masks=prep.chunk_masks,
+                    teacher_scores=prep.teacher_scores,
+                )
+                report.available_conditions = tuple(
+                    dict.fromkeys((*report.available_conditions, *diagnostics["available_conditions"]))
+                )
+                for condition, value in diagnostics["condition_token_weight_sums"].items():
+                    report.condition_token_weight_sums[condition] = (
+                        report.condition_token_weight_sums.get(condition, 0.0) + float(value)
+                    )
+                for condition, value in diagnostics["condition_token_weight_nonzero_counts"].items():
+                    report.condition_token_weight_nonzero_counts[condition] = (
+                        report.condition_token_weight_nonzero_counts.get(condition, 0) + int(value)
+                    )
+                for chunk_name, condition_values in diagnostics["chunk_condition_weight_sums"].items():
+                    chunk_report = report.chunk_condition_weight_sums.setdefault(chunk_name, {})
+                    for condition, value in condition_values.items():
+                        chunk_report[condition] = chunk_report.get(condition, 0.0) + float(value)
 
         loss_is_finite = bool(torch.isfinite(total_loss).all().item())
         total_loss.backward()
@@ -977,9 +1084,14 @@ def _result_to_json(result: RealStudentResult) -> dict[str, Any]:
         "tied_parameter_names": result.tied_parameter_names,
         "expected_conditions": [condition.value for condition in result.expected_conditions],
         "consumed_conditions": sorted(c.value for c in result.consumed_conditions),
+        "available_conditions": sorted(c.value for c in result.available_conditions),
+        "unused_conditions": sorted(c.value for c in result.unused_conditions),
         "routing_mode": result.routing_mode,
         "chunk_format_valid": result.chunk_format_valid,
         "fallback_bad_chunk_rows": result.fallback_bad_chunk_rows,
+        "condition_token_weight_sums": result.condition_token_weight_sums,
+        "condition_token_weight_nonzero_counts": result.condition_token_weight_nonzero_counts,
+        "chunk_condition_weight_sums": result.chunk_condition_weight_sums,
         "four_conditions_consumed": result.four_conditions_consumed,
         "expected_conditions_consumed": result.expected_conditions_consumed,
         "passed": result.passed,
@@ -1004,12 +1116,23 @@ def _expected_conditions_for_routing(
     routing_mode: str,
     router_config: RouterConfig,
 ) -> tuple[Condition, ...]:
-    if routing_mode != "chunk_gated":
+    if routing_mode not in {"chunk_gated", "chunk_gated_primary", "chunk_gated_contrastive"}:
         return score_conditions
     available = set(score_conditions)
     expected: list[Condition] = []
-    for candidates in router_config.chunk_condition_routing.values():
-        for condition_like in list(candidates)[: router_config.max_conditions_per_token]:
+    routing = (
+        {
+            "visible_evidence": (Condition.FULL, Condition.DEGRADED, Condition.TASK_VISIBLE, Condition.FREE),
+            "diagram_inference": (Condition.TASK_INFER, Condition.TASK_VISIBLE, Condition.FULL, Condition.DEGRADED),
+            "reasoning": (Condition.TASK_SOLVE, Condition.TASK_INFER),
+            "answer": (Condition.TASK_SOLVE, Condition.TASK_INFER),
+        }
+        if routing_mode == "chunk_gated_contrastive"
+        else router_config.chunk_condition_routing
+    )
+    max_conditions = max(router_config.max_conditions_per_token, 4) if routing_mode == "chunk_gated_contrastive" else router_config.max_conditions_per_token
+    for candidates in routing.values():
+        for condition_like in list(candidates)[:max_conditions]:
             condition = Condition(condition_like)
             if condition in available and condition not in expected:
                 expected.append(condition)
@@ -1200,9 +1323,14 @@ def min_train_main(argv: Sequence[str] | None = None) -> int:
         "all_grads_finite": report.all_grads_finite,
         "every_step_updates_params": report.every_step_updates_params,
         "consumed_conditions": sorted(c.value for c in report.consumed_conditions),
+        "available_conditions": sorted(c.value for c in report.available_conditions),
+        "unused_conditions": sorted(c.value for c in report.unused_conditions),
         "four_conditions_consumed": report.four_conditions_consumed,
         "expected_conditions": [condition.value for condition in report.expected_conditions],
         "expected_conditions_consumed": report.expected_conditions_consumed,
+        "condition_token_weight_sums": report.condition_token_weight_sums,
+        "condition_token_weight_nonzero_counts": report.condition_token_weight_nonzero_counts,
+        "chunk_condition_weight_sums": report.chunk_condition_weight_sums,
         "skipped_bad_chunk_rows": report.skipped_bad_chunk_rows,
         "fallback_bad_chunk_rows": report.fallback_bad_chunk_rows,
         "chunk_gated_valid_rows": report.chunk_gated_valid_rows,

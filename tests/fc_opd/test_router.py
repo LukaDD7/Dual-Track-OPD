@@ -98,6 +98,36 @@ def test_chunk_gated_routing_is_sparse_and_chunk_aware():
     assert weights[Condition.TASK_INFER][0, 2] > 0
 
 
+def test_chunk_gated_contrastive_keeps_visual_condition_pairs():
+    response_mask = torch.ones((1, 5), dtype=torch.bool)
+    masks = {
+        "visible_evidence": torch.tensor([[1, 1, 0, 0, 0]], dtype=torch.bool),
+        "diagram_inference": torch.tensor([[0, 0, 1, 0, 0]], dtype=torch.bool),
+        "reasoning": torch.tensor([[0, 0, 0, 1, 0]], dtype=torch.bool),
+        "answer": torch.tensor([[0, 0, 0, 0, 1]], dtype=torch.bool),
+    }
+    weights = route_condition_weights(
+        {},
+        masks,
+        RouterConfig(mode="chunk_gated_contrastive", max_conditions_per_token=4),
+        response_mask=response_mask,
+        available_conditions=[
+            Condition.FULL,
+            Condition.DEGRADED,
+            Condition.FREE,
+            Condition.TASK_VISIBLE,
+            Condition.TASK_INFER,
+            Condition.TASK_SOLVE,
+        ],
+    )
+
+    assert weights[Condition.FULL][0, 0] > 0
+    assert weights[Condition.DEGRADED][0, 0] > 0
+    assert weights[Condition.TASK_VISIBLE][0, 0] > 0
+    assert weights[Condition.FREE][0, 0] > 0
+    assert torch.allclose(sum(weights.values()), torch.ones_like(response_mask, dtype=torch.float32))
+
+
 def test_chunk_router_maps_legacy_task_to_task_visible_when_needed():
     response_mask = torch.ones((1, 5), dtype=torch.bool)
     weights = route_condition_weights(
