@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, Mapping, Protocol, Sequence
 
 from .dataset_adapters import load_normalized_records
-from .geometry3k_adapter import load_geometry3k_records
+from .geometry3k_adapter import inspect_geometry3k_dataset, load_geometry3k_records
 from .virl39k_adapter import load_virl39k_records
 
 FREE_CAPTION_PROMPTS = {
@@ -379,15 +379,40 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--temperature", type=float, default=0.2)
     parser.add_argument("--top-p", type=float, default=0.9)
     parser.add_argument("--max-new-tokens", type=int, default=256)
-    parser.add_argument("--output-jsonl", type=Path, required=True)
-    parser.add_argument("--summary-json", type=Path, required=True)
+    parser.add_argument("--output-jsonl", type=Path)
+    parser.add_argument("--summary-json", type=Path)
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--skip-existing", action="store_true")
+    parser.add_argument(
+        "--dry-run-inspect",
+        action="store_true",
+        help="Load and summarize dataset records without generating evidence or requiring output paths.",
+    )
+    parser.add_argument("--inspect-examples", type=int, default=3)
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.dry_run_inspect:
+        if args.dataset_type != "geometry3k":
+            raise ValueError("--dry-run-inspect is currently implemented for dataset-type geometry3k")
+        print(
+            json.dumps(
+                inspect_geometry3k_dataset(
+                    args.dataset,
+                    source_dataset=args.source_dataset,
+                    examples=args.inspect_examples,
+                ),
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        return 0
+    if args.output_jsonl is None:
+        raise SystemExit("--output-jsonl is required unless --dry-run-inspect is set")
+    if args.summary_json is None:
+        raise SystemExit("--summary-json is required unless --dry-run-inspect is set")
     result = run_evidence_generation(
         EvidenceGenerationConfig(
             dataset=args.dataset,

@@ -5,7 +5,7 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "${REPO_ROOT}"
 
-: "${DATASET:?set DATASET to Geometry3K data file}"
+: "${DATASET:?set DATASET to Geometry3K JSON/JSONL file or official unzipped directory root}"
 : "${EVIDENCE_CACHE:?set EVIDENCE_CACHE to evidence_cache.jsonl}"
 : "${DTOPD_OUTPUT_ROOT:?set DTOPD_OUTPUT_ROOT}"
 

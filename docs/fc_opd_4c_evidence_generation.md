@@ -13,11 +13,28 @@ Condition evidence:
 Build a Geometry3K evidence cache smoke:
 
 ```bash
-DATASET=/path/to/geometry3k.json \
+DATASET=/path/to/Geometry3K_official/unzipped \
 DTOPD_OUTPUT_ROOT=/path/to/outputs \
 LIMIT=8 \
 scripts/hpc/build_fc_opd_4c_evidence_cache.sh
 ```
+
+`DATASET` may be a legacy Geometry3K JSON/JSONL file or the official
+directory-style root. For official Geometry3K, the adapter recursively loads
+sample directories containing `data.json`, optional `logic_form.json`, and a
+same-directory `.png`/`.jpg`/`.jpeg` diagram.
+
+Probe the dataset shape without generating evidence:
+
+```bash
+set -o pipefail
+DATASET=/path/to/Geometry3K_official/unzipped \
+DRY_RUN_INSPECT=1 \
+scripts/hpc/build_fc_opd_4c_evidence_cache.sh 2>&1 | tee geometry3k_probe.log
+```
+
+Keep `set -o pipefail` when piping through `tee`; otherwise Python adapter
+failures can be hidden by `tee` exiting successfully.
 
 Rows include prompt hashes, image hash, generator metadata,
 `no_gold_field_used=true`, answer/final-answer forbid flags, leakage warnings,

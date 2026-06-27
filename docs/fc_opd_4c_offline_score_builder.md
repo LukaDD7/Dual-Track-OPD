@@ -13,7 +13,7 @@ available only as an ablation.
 Build Geometry3K 4C scores after evidence cache generation:
 
 ```bash
-DATASET=/path/to/geometry3k.json \
+DATASET=/path/to/Geometry3K_official/unzipped \
 EVIDENCE_CACHE=/path/to/evidence_cache.jsonl \
 DTOPD_OUTPUT_ROOT=/path/to/outputs \
 LIMIT=8 \
@@ -31,7 +31,7 @@ Validate an existing file:
 
 ```bash
 python scripts/hpc/build_fc_opd_geometry3k_4c_offline_scores.py \
-  --dataset /path/to/geometry3k.json \
+  --dataset /path/to/Geometry3K_official/unzipped \
   --evidence-cache /path/to/evidence_cache.jsonl \
   --output-jsonl /path/to/geometry3k_4c_offline_scores.jsonl \
   --summary-json /path/to/summary.json \

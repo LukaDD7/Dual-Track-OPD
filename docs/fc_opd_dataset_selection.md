@@ -106,16 +106,30 @@ The clean-data condition set is `4c_full_degraded_free_task`:
 Build the evidence cache first:
 
 ```bash
-DATASET=/path/to/geometry3k.json \
+DATASET=/path/to/Geometry3K_official/unzipped \
 DTOPD_OUTPUT_ROOT=/path/to/outputs \
 LIMIT=8 \
 scripts/hpc/build_fc_opd_4c_evidence_cache.sh
 ```
 
+`DATASET` can point to a legacy JSON/JSONL file or the official Geometry3K
+unzipped directory root with `train/train/<id>/data.json`,
+`val/val/<id>/data.json`, and `test/test/<id>/data.json` samples. The adapter
+discovers same-directory diagrams and preserves `logic_form.json` metadata.
+
+Before generation on HPC, inspect the adapter view:
+
+```bash
+set -o pipefail
+DATASET=/path/to/Geometry3K_official/unzipped \
+DRY_RUN_INSPECT=1 \
+scripts/hpc/build_fc_opd_4c_evidence_cache.sh 2>&1 | tee geometry3k_probe.log
+```
+
 Then build trainable 4C scores:
 
 ```bash
-DATASET=/path/to/geometry3k.json \
+DATASET=/path/to/Geometry3K_official/unzipped \
 EVIDENCE_CACHE=/path/to/evidence_cache.jsonl \
 DTOPD_OUTPUT_ROOT=/path/to/outputs \
 LIMIT=8 \
