@@ -16,6 +16,9 @@ class Condition(str, Enum):
     DEGRADED = "degraded"
     FREE = "free"
     TASK = "task"
+    TASK_VISIBLE = "task_visible"
+    TASK_INFER = "task_infer"
+    TASK_SOLVE = "task_solve"
     FACT = "fact"
 
 
@@ -33,6 +36,9 @@ class ConditionInputs:
     degraded_image: ImageInput
     free_caption: str
     task_evidence: str
+    task_visible_evidence: str | None = None
+    task_infer_evidence: str | None = None
+    task_solve_evidence: str | None = None
     verified_facts: str | None = None
     verified_facts_source: str | None = None
 
@@ -41,6 +47,13 @@ class ConditionInputs:
             raise ValueError("condition image paths must be non-empty")
         if not self.free_caption.strip() or not self.task_evidence.strip():
             raise ValueError("caption and task evidence must be non-empty")
+        for field, value in (
+            ("task_visible_evidence", self.task_visible_evidence),
+            ("task_infer_evidence", self.task_infer_evidence),
+            ("task_solve_evidence", self.task_solve_evidence),
+        ):
+            if value is not None and not value.strip():
+                raise ValueError(f"{field} must be non-empty when provided")
         transform = self.degraded_image.transform
         if not isinstance(transform, Mapping):
             raise ValueError("degraded image must record a transform")
@@ -63,6 +76,12 @@ class ConditionInputs:
 
     def available_conditions(self) -> tuple[Condition, ...]:
         conditions = [Condition.FULL, Condition.BLUR, Condition.FREE, Condition.TASK]
+        if self.task_visible_evidence is not None:
+            conditions.append(Condition.TASK_VISIBLE)
+        if self.task_infer_evidence is not None:
+            conditions.append(Condition.TASK_INFER)
+        if self.task_solve_evidence is not None:
+            conditions.append(Condition.TASK_SOLVE)
         if self.verified_facts is not None:
             conditions.append(Condition.FACT)
         return tuple(conditions)
@@ -78,9 +97,16 @@ class ConditionInputs:
             },
             "free_caption": self.free_caption,
             "task_evidence": self.task_evidence,
+            "task_visible_evidence": self.task_visible_text,
+            "task_infer_evidence": self.task_infer_evidence,
+            "task_solve_evidence": self.task_solve_evidence,
             "verified_facts": self.verified_facts,
             "verified_facts_source": self.verified_facts_source,
         }
+
+    @property
+    def task_visible_text(self) -> str:
+        return self.task_visible_evidence or self.task_evidence
 
 
 def _nonempty_string(value: object, field: str) -> str:
@@ -166,6 +192,9 @@ def build_condition_inputs(
         degraded_image=ImageInput(path=degraded_path, transform=dict(transform)),
         free_caption=_nonempty_string(raw.get("free_caption"), "free_caption"),
         task_evidence=_nonempty_string(raw.get("task_evidence"), "task_evidence"),
+        task_visible_evidence=_optional_string(raw.get("task_visible_evidence"), "task_visible_evidence"),
+        task_infer_evidence=_optional_string(raw.get("task_infer_evidence"), "task_infer_evidence"),
+        task_solve_evidence=_optional_string(raw.get("task_solve_evidence"), "task_solve_evidence"),
         verified_facts=facts,
         verified_facts_source=facts_source,
     )

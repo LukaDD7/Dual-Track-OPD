@@ -104,6 +104,15 @@ class TeacherScoreRequest:
             ),
             free_caption=str(raw_inputs["free_caption"]),
             task_evidence=str(raw_inputs["task_evidence"]),
+            task_visible_evidence=(
+                None if raw_inputs.get("task_visible_evidence") is None else str(raw_inputs["task_visible_evidence"])
+            ),
+            task_infer_evidence=(
+                None if raw_inputs.get("task_infer_evidence") is None else str(raw_inputs["task_infer_evidence"])
+            ),
+            task_solve_evidence=(
+                None if raw_inputs.get("task_solve_evidence") is None else str(raw_inputs["task_solve_evidence"])
+            ),
             verified_facts=(
                 None if raw_inputs.get("verified_facts") is None else str(raw_inputs["verified_facts"])
             ),

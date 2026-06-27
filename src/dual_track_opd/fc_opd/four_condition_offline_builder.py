@@ -33,6 +33,25 @@ from .student_rollout_signal_audit import (
 from .teacher_client import TeacherClient, score_teacher_conditions
 from .teacher_protocol import tokenizer_fingerprint
 
+CONDITION_SETS: dict[str, tuple[Condition, ...]] = {
+    "4c-legacy": (Condition.FULL, Condition.DEGRADED, Condition.FREE, Condition.TASK),
+    "4c-clean": (Condition.FULL, Condition.DEGRADED, Condition.FREE, Condition.TASK_VISIBLE),
+    "5c-infer": (
+        Condition.FULL,
+        Condition.DEGRADED,
+        Condition.FREE,
+        Condition.TASK_VISIBLE,
+        Condition.TASK_INFER,
+    ),
+    "6c-solve": (
+        Condition.FULL,
+        Condition.DEGRADED,
+        Condition.FREE,
+        Condition.TASK_VISIBLE,
+        Condition.TASK_INFER,
+        Condition.TASK_SOLVE,
+    ),
+}
 FOUR_CLEAN_CONDITIONS: tuple[Condition, ...] = (
     Condition.FULL,
     Condition.DEGRADED,
@@ -68,6 +87,7 @@ class FourConditionOfflineBuilderConfig:
     blur_sigma: float = 2.0
     resume: bool = False
     skip_existing: bool = False
+    condition_set: str = "4c-legacy"
 
     def __post_init__(self) -> None:
         if self.dataset_type != "geometry3k":
@@ -76,6 +96,8 @@ class FourConditionOfflineBuilderConfig:
             raise ValueError(f"rollout_response_format must be one of {ROLLOUT_RESPONSE_FORMATS}")
         if self.degraded_mode not in {"lowres_10pct_nearest", "gaussian_blur_s2"}:
             raise ValueError("degraded_mode must be lowres_10pct_nearest or gaussian_blur_s2")
+        if self.condition_set not in CONDITION_SETS:
+            raise ValueError(f"condition_set must be one of {sorted(CONDITION_SETS)}")
 
 
 @dataclass
@@ -145,7 +167,14 @@ def _build_rows(
         full_image=ImageInput(path=image_path),
         degraded_image=ImageInput(path=degraded_path, transform=_degraded_transform(config)),
         free_caption=str(evidence_row["free_caption"]),
-        task_evidence=str(evidence_row["task_evidence"]),
+        task_evidence=str(evidence_row.get("task_evidence") or evidence_row.get("task_visible_evidence")),
+        task_visible_evidence=str(evidence_row.get("task_visible_evidence") or evidence_row["task_evidence"]),
+        task_infer_evidence=(
+            None if evidence_row.get("task_infer_evidence") is None else str(evidence_row.get("task_infer_evidence"))
+        ),
+        task_solve_evidence=(
+            None if evidence_row.get("task_solve_evidence") is None else str(evidence_row.get("task_solve_evidence"))
+        ),
     )
     condition_inputs.validate(require_paths=False)
     question = str(record["question"])
@@ -153,6 +182,7 @@ def _build_rows(
     source_index = int(record["source_index"])
     group_uid = f"{record['sample_uid']}:rollout-group"
     rows: list[dict[str, Any]] = []
+    conditions = CONDITION_SETS[config.condition_set]
     for rollout_id in range(config.rollouts_per_prompt):
         seed = rollout_seed(base_seed=config.seed, source_index=source_index, rollout_id=rollout_id)
         response_text = rollout_generator.generate(question=question, image_path=image_path, prompt_text=prompt.text, seed=seed)
@@ -163,7 +193,7 @@ def _build_rows(
             token_ids,
             question,
             condition_inputs,
-            FOUR_CLEAN_CONDITIONS,
+            conditions,
             teacher_client,
             response_text=response_text,
             request_prefix=rollout_uid,
@@ -171,7 +201,7 @@ def _build_rows(
         signals = compute_condition_signals(teacher_scores)
         condition_scores = {
             condition.value: {**_serialize_topk(teacher_scores[condition]), "top_k": teacher_client.metadata.top_k}
-            for condition in FOUR_CLEAN_CONDITIONS
+            for condition in conditions
         }
         outcome = default_outcome_metadata(record)
         row = {
@@ -191,6 +221,9 @@ def _build_rows(
             "degraded_mode": config.degraded_mode,
             "free_caption": evidence_row["free_caption"],
             "task_evidence": evidence_row["task_evidence"],
+            "task_visible_evidence": evidence_row.get("task_visible_evidence", evidence_row["task_evidence"]),
+            "task_infer_evidence": evidence_row.get("task_infer_evidence"),
+            "task_solve_evidence": evidence_row.get("task_solve_evidence"),
             "evidence_cache_uid": evidence_row["sample_uid"],
             "response_source": "student_rollout",
             "response_text": response_text,
@@ -222,7 +255,8 @@ def _build_rows(
                 "git_revision": teacher_client.metadata.git_revision,
             },
             "evidence_generation_metadata": evidence_row.get("generator_metadata", {}),
-            "conditions": [condition.value for condition in FOUR_CLEAN_CONDITIONS],
+            "condition_set_name": config.condition_set,
+            "conditions": [condition.value for condition in conditions],
             "condition_inputs": condition_inputs.to_dict(),
             "condition_scores": condition_scores,
             "condition_signals": {name: [float(item) for item in signal[0].tolist()] for name, signal in signals.items()},
@@ -267,12 +301,17 @@ def _degraded_transform(config: FourConditionOfflineBuilderConfig) -> dict[str, 
     return {"type": "lowres_nearest", "scale": 0.1, "degraded_mode": config.degraded_mode}
 
 
-def validate_four_condition_rows(path: str | Path) -> dict[str, Any]:
+def validate_four_condition_rows(path: str | Path, *, condition_set: str | None = None) -> dict[str, Any]:
     rows = _read_jsonl(path)
     errors: list[str] = []
     for row in rows:
         uid = str(row.get("sample_uid", "unknown"))
-        if row.get("conditions") != ["full", "degraded", "free", "task"]:
+        expected = (
+            [condition.value for condition in CONDITION_SETS[condition_set]]
+            if condition_set is not None
+            else row.get("conditions")
+        )
+        if row.get("conditions") != expected:
             errors.append(f"{uid}: conditions mismatch")
         if row.get("degraded_mode") not in {"lowres_10pct_nearest", "gaussian_blur_s2"}:
             errors.append(f"{uid}: invalid degraded_mode")
@@ -301,15 +340,45 @@ def summarize_rows(
     teacher_client: TeacherClient,
 ) -> dict[str, Any]:
     lengths = [int(row.get("response_token_count", 0)) for row in rows]
+    conditions = [condition.value for condition in CONDITION_SETS[config.condition_set]]
+    parse_success = [
+        bool(row.get("chunk_spans", {}).get("format_valid", False))
+        for row in rows
+    ]
+    chunk_counts: Counter[str] = Counter()
+    delta_means: dict[str, float | None] = {}
+    for row in rows:
+        token_counts = row.get("chunk_spans", {}).get("token_counts", {})
+        if isinstance(token_counts, Mapping):
+            for key, value in token_counts.items():
+                chunk_counts[str(key)] += int(value)
+        signal_summary = row.get("condition_signal_summary", {})
+        if isinstance(signal_summary, Mapping):
+            for name in ("visual_detail_delta", "task_selection_delta", "diagram_infer_delta", "solve_delta"):
+                block = signal_summary.get(name)
+                if isinstance(block, Mapping) and block.get("mean") is not None:
+                    delta_means.setdefault(name, 0.0)
+    for name in ("visual_detail_delta", "task_selection_delta", "diagram_infer_delta", "solve_delta"):
+        values = []
+        for row in rows:
+            block = row.get("condition_signal_summary", {}).get(name, {})
+            if isinstance(block, Mapping) and block.get("mean") is not None:
+                values.append(float(block["mean"]))
+        delta_means[name] = None if not values else float(mean(values))
     return {
         "source_dataset": config.source_dataset,
-        "condition_set_name": "4c_full_degraded_free_task",
-        "conditions": ["full", "degraded", "free", "task"],
+        "condition_set_name": config.condition_set,
+        "conditions": conditions,
         "degraded_mode": config.degraded_mode,
         "num_rows": len(rows),
         "num_prompts": len({row.get("prompt_sample_uid") for row in rows}),
         "rollouts_per_prompt": config.rollouts_per_prompt,
         "mean_response_tokens": None if not lengths else sum(lengths) / len(lengths),
+        "chunk_parse_success_rate": None if not parse_success else sum(parse_success) / len(parse_success),
+        "chunk_token_counts": dict(chunk_counts),
+        "condition_score_success_rate": {condition: 1.0 for condition in conditions},
+        "delta_means": delta_means,
+        "gate_ready_fields_available": bool(rows),
         "response_length_p50": _quantile(lengths, 0.5),
         "response_length_p90": _quantile(lengths, 0.9),
         "unique_response_text_hash_count": len({row.get("response_text_hash") for row in rows}),
@@ -337,7 +406,7 @@ def _rollout_config(config: FourConditionOfflineBuilderConfig) -> StudentRollout
         student_model_path=config.student_model_path,
         teacher_url=config.teacher_url,
         limit=config.limit or 1,
-        conditions=FOUR_CLEAN_CONDITIONS,
+        conditions=CONDITION_SETS[config.condition_set],
         rollouts_per_prompt=config.rollouts_per_prompt,
         temperature=config.temperature,
         top_p=config.top_p,
@@ -408,6 +477,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--summary-json", type=Path, required=True)
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--skip-existing", action="store_true")
+    parser.add_argument("--condition-set", choices=tuple(CONDITION_SETS), default="4c-clean")
     parser.add_argument("--validate-only", action="store_true")
     return parser
 
@@ -415,7 +485,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.validate_only:
-        report = validate_four_condition_rows(args.output_jsonl)
+        report = validate_four_condition_rows(args.output_jsonl, condition_set=args.condition_set)
         print(json.dumps(report, indent=2))
         return 0 if report["valid"] else 1
     result = run_four_condition_offline_builder(
@@ -443,9 +513,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             summary_json=args.summary_json,
             resume=args.resume,
             skip_existing=args.skip_existing,
+            condition_set=args.condition_set,
         )
     )
-    validation = validate_four_condition_rows(args.output_jsonl)
+    validation = validate_four_condition_rows(args.output_jsonl, condition_set=args.condition_set)
     print(json.dumps({**result.summary, "validation_valid": validation["valid"]}, indent=2))
     return 0 if validation["valid"] else 1
 

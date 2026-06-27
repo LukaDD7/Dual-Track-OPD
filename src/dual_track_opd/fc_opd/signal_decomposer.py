@@ -120,8 +120,12 @@ def compute_condition_signals(
 
     pairs = (
         ("visual_detail", Condition.FULL, Condition.DEGRADED),
+        ("visual_detail_delta", Condition.FULL, Condition.DEGRADED),
         ("visual_detail", Condition.FULL, Condition.BLUR),
         ("task_extraction", Condition.TASK, Condition.FREE),
+        ("task_selection_delta", Condition.TASK_VISIBLE, Condition.FREE),
+        ("diagram_infer_delta", Condition.TASK_INFER, Condition.TASK_VISIBLE),
+        ("solve_delta", Condition.TASK_SOLVE, Condition.TASK_INFER),
         ("fact_gap", Condition.FACT, Condition.TASK),
     )
     for name, left, right in pairs:

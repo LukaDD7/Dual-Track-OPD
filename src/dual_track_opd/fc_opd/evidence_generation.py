@@ -45,6 +45,38 @@ TASK_EVIDENCE_PROMPTS = {
         "values. Return only evidence grounded in the diagram."
     ),
 }
+TASK_VISIBLE_PROMPTS = TASK_EVIDENCE_PROMPTS
+TASK_INFER_PROMPTS = {
+    "natural": (
+        "You are given an image and a multiple-choice visual reasoning question. Do not answer "
+        "the question. Do not output an option letter. Infer only intermediate visual relations "
+        "or constraints needed for solving. Do not compute the final requested quantity."
+    ),
+    "geometry": (
+        "You are given a geometry diagram and a question. May infer intermediate geometric facts "
+        "from diagram marks and structure, and may write usable equations. Must not compute the "
+        "final requested quantity, choose an option, or write a complete solution. If a derived "
+        "numeric value is exactly the asked final answer, omit it."
+    ),
+}
+TASK_SOLVE_PROMPTS = {
+    "natural": (
+        "You are given an image and a multiple-choice visual reasoning question. Solve the problem "
+        "fully using only the image, question, and choices provided in this prompt. Do not use any "
+        "dataset gold answer or hidden label."
+    ),
+    "geometry": (
+        "You are given a geometry diagram and a question. Solve the problem fully using only the "
+        "image, question, and choices provided in this prompt. Do not use any dataset gold answer "
+        "or hidden label."
+    ),
+}
+
+CONDITION_SETS: dict[str, tuple[str, ...]] = {
+    "4c-clean": ("full", "degraded", "free", "task_visible"),
+    "5c-infer": ("full", "degraded", "free", "task_visible", "task_infer"),
+    "6c-solve": ("full", "degraded", "free", "task_visible", "task_infer", "task_solve"),
+}
 
 
 class EvidenceGenerator(Protocol):
@@ -82,8 +114,12 @@ class TemplateEvidenceGenerator:
         prompt: str,
         seed: int,
     ) -> str:
-        del prompt, seed
+        del seed
         basis = question.splitlines()[0][:80]
+        if "Solve the problem fully" in prompt or "Solve the problem" in prompt:
+            return f"Teacher-inferred solution should be generated from {Path(image_path).name}: {basis}"
+        if "usable equations" in prompt or "intermediate" in prompt:
+            return f"Intermediate diagram relations and equations should be inferred from {Path(image_path).name}: {basis}"
         return f"Question-relevant visual evidence should be extracted from {Path(image_path).name}: {basis}"
 
 
@@ -106,6 +142,15 @@ class EvidenceGenerationConfig:
     resume: bool = False
     skip_existing: bool = False
     strict_leakage: bool = True
+    condition_set: str = "4c-clean"
+    include_prompts_in_output: bool = False
+    task_evidence_mode: str = "visible"
+
+    def __post_init__(self) -> None:
+        if self.condition_set not in CONDITION_SETS:
+            raise ValueError(f"condition_set must be one of {sorted(CONDITION_SETS)}")
+        if self.task_evidence_mode not in {"visible", "infer", "solve"}:
+            raise ValueError("task_evidence_mode must be visible, infer, or solve")
 
 
 @dataclass
@@ -154,28 +199,69 @@ def build_evidence_row(
 ) -> dict[str, Any]:
     domain = "geometry" if config.dataset_type == "geometry3k" else "natural"
     free_prompt = FREE_CAPTION_PROMPTS[domain]
-    task_prompt = TASK_EVIDENCE_PROMPTS[domain]
+    task_visible_prompt = TASK_VISIBLE_PROMPTS[domain]
+    task_infer_prompt = TASK_INFER_PROMPTS[domain]
+    task_solve_prompt = TASK_SOLVE_PROMPTS[domain]
     image_path = str(record.get("image_path", ""))
     choices = list(record.get("choices", []))
     source_index = int(record.get("source_index", 0))
     seed = int(config.seed) + source_index
     free_caption = generator.generate_free_caption(image_path=image_path, prompt=free_prompt, seed=seed)
-    task_evidence = generator.generate_task_evidence(
+    task_visible_evidence = generator.generate_task_evidence(
         image_path=image_path,
         question=str(record["question"]),
         choices=choices,
-        prompt=task_prompt,
+        prompt=task_visible_prompt,
         seed=seed + 17,
     )
+    task_infer_evidence = None
+    task_solve_evidence = None
+    if "task_infer" in CONDITION_SETS[config.condition_set] or config.task_evidence_mode in {"infer", "solve"}:
+        task_infer_evidence = generator.generate_task_evidence(
+            image_path=image_path,
+            question=str(record["question"]),
+            choices=choices,
+            prompt=task_infer_prompt,
+            seed=seed + 29,
+        )
+    if "task_solve" in CONDITION_SETS[config.condition_set] or config.task_evidence_mode == "solve":
+        task_solve_evidence = generator.generate_task_evidence(
+            image_path=image_path,
+            question=str(record["question"]),
+            choices=choices,
+            prompt=task_solve_prompt,
+            seed=seed + 43,
+        )
+    task_evidence_by_mode = {
+        "visible": task_visible_evidence,
+        "infer": task_infer_evidence or task_visible_evidence,
+        "solve": task_solve_evidence or task_infer_evidence or task_visible_evidence,
+    }
+    task_evidence = task_evidence_by_mode[config.task_evidence_mode]
     leakage = detect_evidence_leakage(
         free_caption=free_caption,
         task_evidence=task_evidence,
+        task_visible_evidence=task_visible_evidence,
+        task_infer_evidence=task_infer_evidence,
+        task_solve_evidence=task_solve_evidence,
         answer=record.get("answer") or record.get("gold") or record.get("answer_metadata"),
     )
     errors = []
     if config.strict_leakage and any(item.startswith("hard_") for item in leakage):
         errors.append("hard_leakage_detected")
-    return {
+    prompt_hashes = {
+        "free_caption_prompt": text_hash(free_prompt),
+        "task_visible_prompt": text_hash(task_visible_prompt),
+        "task_infer_prompt": text_hash(task_infer_prompt),
+        "task_solve_prompt": text_hash(task_solve_prompt),
+    }
+    contamination = contamination_flags(
+        task_visible_evidence=task_visible_evidence,
+        task_infer_evidence=task_infer_evidence,
+        task_solve_evidence=task_solve_evidence,
+        answer=record.get("answer") or record.get("gold") or record.get("answer_metadata"),
+    )
+    row = {
         "sample_uid": str(record["sample_uid"]),
         "source_dataset": config.source_dataset,
         "source_index": source_index,
@@ -185,10 +271,15 @@ def build_evidence_row(
         "image_hash": file_sha256(image_path),
         "free_caption": free_caption,
         "task_evidence": task_evidence,
-        "free_caption_prompt": free_prompt,
-        "task_evidence_prompt": task_prompt,
-        "free_caption_prompt_hash": text_hash(free_prompt),
-        "task_evidence_prompt_hash": text_hash(task_prompt),
+        "task_visible_evidence": task_visible_evidence,
+        "task_infer_evidence": task_infer_evidence,
+        "task_solve_evidence": task_solve_evidence,
+        "free_caption_prompt_hash": prompt_hashes["free_caption_prompt"],
+        "task_evidence_prompt_hash": prompt_hashes["task_visible_prompt"],
+        "task_visible_prompt_hash": prompt_hashes["task_visible_prompt"],
+        "task_infer_prompt_hash": prompt_hashes["task_infer_prompt"],
+        "task_solve_prompt_hash": prompt_hashes["task_solve_prompt"],
+        "prompt_hashes": prompt_hashes,
         "generator_model_id": generator.model_id,
         "generator_metadata": {
             "generator_model_path": config.generator_model_path,
@@ -197,17 +288,52 @@ def build_evidence_row(
             "top_p": config.top_p,
             "max_new_tokens": config.max_new_tokens,
             "seed": seed,
+            "condition_set": config.condition_set,
+            "task_evidence_mode": config.task_evidence_mode,
         },
+        "condition_set_name": config.condition_set,
+        "conditions": list(CONDITION_SETS[config.condition_set]),
         "no_gold_field_used": True,
+        "gold_answer_seen_by_prompt": False,
         "answer_letter_forbidden": True,
         "final_answer_forbidden": True,
+        **contamination,
         "leakage_warnings": leakage,
         "errors": errors,
     }
+    if config.include_prompts_in_output:
+        row.update(
+            {
+                "free_caption_prompt": free_prompt,
+                "task_evidence_prompt": task_visible_prompt,
+                "task_visible_prompt": task_visible_prompt,
+                "task_infer_prompt": task_infer_prompt,
+                "task_solve_prompt": task_solve_prompt,
+            }
+        )
+    return row
 
 
-def detect_evidence_leakage(*, free_caption: str, task_evidence: str, answer: Any) -> list[str]:
-    text = f"{free_caption}\n{task_evidence}"
+def detect_evidence_leakage(
+    *,
+    free_caption: str,
+    task_evidence: str,
+    answer: Any,
+    task_visible_evidence: str | None = None,
+    task_infer_evidence: str | None = None,
+    task_solve_evidence: str | None = None,
+) -> list[str]:
+    text = "\n".join(
+        item
+        for item in (
+            free_caption,
+            task_evidence,
+            task_visible_evidence,
+            task_infer_evidence,
+            task_solve_evidence,
+        )
+        if item
+    )
     lower = text.lower()
     warnings: list[str] = []
     if "answer is" in lower or "the answer" in lower:
@@ -222,6 +348,35 @@ def detect_evidence_leakage(*, free_caption: str, task_evidence: str, answer: An
     return sorted(set(warnings))
 
 
+def contamination_flags(
+    *,
+    task_visible_evidence: str,
+    task_infer_evidence: str | None,
+    task_solve_evidence: str | None,
+    answer: Any,
+) -> dict[str, bool]:
+    visible_lower = task_visible_evidence.lower()
+    infer_lower = (task_infer_evidence or "").lower()
+    solve_lower = (task_solve_evidence or "").lower()
+    answer_text = "" if answer is None else _normalize(str(answer))
+    generated_text = _normalize("\n".join(item for item in (task_visible_evidence, task_infer_evidence, task_solve_evidence) if item))
+    exact_answer = bool(answer_text and len(answer_text) >= 3 and answer_text in generated_text)
+    answer_letter = any(
+        phrase in f"{visible_lower}\n{infer_lower}\n{solve_lower}"
+        for letter in ("a", "b", "c", "d", "e")
+        for phrase in (f"answer {letter}", f"option {letter}")
+    )
+    visible_final = "answer is" in visible_lower or "the answer" in visible_lower
+    infer_final = "answer is" in infer_lower or "the answer" in infer_lower
+    return {
+        "answer_letter_in_generated_evidence": answer_letter,
+        "exact_answer_in_generated_evidence": exact_answer,
+        "final_solution_detected_in_task_visible": visible_final,
+        "final_solution_detected_in_task_infer": infer_final,
+        "solution_contaminated": bool(task_solve_evidence and ("solution" in solve_lower or "answer" in solve_lower)),
+    }
+
+
 def validate_evidence_row(row: Mapping[str, Any]) -> list[str]:
     errors = []
     if row.get("no_gold_field_used") is not True:
@@ -229,9 +384,15 @@ def validate_evidence_row(row: Mapping[str, Any]) -> list[str]:
     free_prompt = str(row.get("free_caption_prompt", ""))
     if str(row.get("question", "")) and str(row.get("question", "")) in free_prompt:
         errors.append("free_caption_prompt_contains_question")
-    task_prompt = str(row.get("task_evidence_prompt", "")).lower()
-    if "do not" not in task_prompt or "answer" not in task_prompt:
+    task_prompt = str(row.get("task_evidence_prompt") or row.get("task_visible_prompt") or "").lower()
+    if task_prompt and ("do not" not in task_prompt or "answer" not in task_prompt):
         errors.append("task_evidence_prompt_missing_answer_forbid_instruction")
+    if row.get("gold_answer_seen_by_prompt") is not False:
+        errors.append("gold_answer_seen_by_prompt_not_false")
+    if row.get("final_solution_detected_in_task_visible"):
+        errors.append("final_solution_detected_in_task_visible")
+    if row.get("final_solution_detected_in_task_infer"):
+        errors.append("final_solution_detected_in_task_infer")
     if row.get("errors"):
         errors.extend(str(item) for item in row["errors"])
     return errors
@@ -250,6 +411,8 @@ def summarize_evidence(
         "dataset_type": config.dataset_type,
         "num_rows": len(rows),
         "generator_model_id": generator.model_id,
+        "condition_set_name": config.condition_set,
+        "conditions": list(CONDITION_SETS[config.condition_set]),
         "leakage_warning_rate": None if not rows else len(leakage_rows) / len(rows),
         "validation_error_count": len(validation_errors),
         "validation_errors_top10": validation_errors[:10],
@@ -383,6 +546,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--summary-json", type=Path)
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--skip-existing", action="store_true")
+    parser.add_argument("--condition-set", choices=tuple(CONDITION_SETS), default="4c-clean")
+    parser.add_argument("--include-prompts-in-output", action="store_true")
+    parser.add_argument("--task-evidence-mode", choices=("visible", "infer", "solve"), default="visible")
     parser.add_argument(
         "--dry-run-inspect",
         action="store_true",
@@ -431,6 +597,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             summary_json=args.summary_json,
             resume=args.resume,
             skip_existing=args.skip_existing,
+            condition_set=args.condition_set,
+            include_prompts_in_output=args.include_prompts_in_output,
+            task_evidence_mode=args.task_evidence_mode,
         )
     )
     print(json.dumps(result.summary, indent=2))

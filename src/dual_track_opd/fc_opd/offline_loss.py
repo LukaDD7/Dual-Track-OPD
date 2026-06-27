@@ -25,7 +25,8 @@ from .loss import FCOPDLossConfig, compute_fc_opd_loss
 from .router import RouterConfig, route_condition_weights
 from .signal_decomposer import TeacherTopK
 
-CHUNK_NAMES = ("visual_evidence", "reasoning", "answer")
+CHUNK_NAMES = ("visible_evidence", "diagram_inference", "reasoning", "answer")
+LEGACY_CHUNK_NAMES = ("visual_evidence", "reasoning", "answer")
 FOUR_CONDITIONS: tuple[Condition, ...] = (
     Condition.FULL,
     Condition.BLUR,
@@ -153,9 +154,17 @@ def offline_record_to_tensors(
     chunk_spans = payload.get("chunk_spans")
     if not isinstance(chunk_spans, Mapping):
         raise ValueError("payload is missing chunk_spans")
-    chunk_masks = {
-        name: _spans_to_mask(chunk_spans.get(name, ()), seq_len, device) for name in CHUNK_NAMES
-    }
+    if "visible_evidence" in chunk_spans or "diagram_inference" in chunk_spans:
+        chunk_masks = {
+            name: _spans_to_mask(chunk_spans.get(name, ()), seq_len, device) for name in CHUNK_NAMES
+        }
+    else:
+        chunk_masks = {
+            "visible_evidence": _spans_to_mask(chunk_spans.get("visual_evidence", ()), seq_len, device),
+            "diagram_inference": torch.zeros((1, seq_len), dtype=torch.bool, device=device),
+            "reasoning": _spans_to_mask(chunk_spans.get("reasoning", ()), seq_len, device),
+            "answer": _spans_to_mask(chunk_spans.get("answer", ()), seq_len, device),
+        }
     format_valid = torch.tensor([bool(chunk_spans.get("format_valid", False))], device=device)
     response_mask = torch.ones((1, seq_len), dtype=torch.bool, device=device)
 

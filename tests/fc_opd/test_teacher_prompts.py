@@ -13,6 +13,9 @@ def _inputs(with_facts: bool = True) -> ConditionInputs:
         ),
         free_caption="A red square is left of a blue circle.",
         task_evidence="Objects: red square, blue circle. Relation: square left of circle.",
+        task_visible_evidence="Objects: red square, blue circle. Relation: square left of circle.",
+        task_infer_evidence="The square is left of the circle, so left/right relation is usable.",
+        task_solve_evidence="The square is on the left, so the answer is left.",
         verified_facts="There are exactly two objects." if with_facts else None,
         verified_facts_source="human annotation" if with_facts else None,
     )
@@ -24,7 +27,10 @@ def _inputs(with_facts: bool = True) -> ConditionInputs:
         (Condition.FULL, ("/data/full.png",), "full image"),
         (Condition.BLUR, ("/data/blur.png",), "degraded image"),
         (Condition.FREE, (), "Image description"),
-        (Condition.TASK, (), "Question-conditioned visual evidence"),
+        (Condition.TASK, (), "Question-conditioned visible evidence"),
+        (Condition.TASK_VISIBLE, (), "Question-conditioned visible evidence"),
+        (Condition.TASK_INFER, (), "Task-conditioned diagram/geometric inference"),
+        (Condition.TASK_SOLVE, (), "Teacher-inferred solution context"),
         (Condition.FACT, (), "Externally verified visual facts"),
     ],
 )
@@ -34,7 +40,8 @@ def test_all_conditions_render(condition, image_paths, fragment):
     content = rendered.messages[0]["content"]
     text = next(item["text"] for item in content if item["type"] == "text")
     assert fragment in text
-    assert "<visual_evidence>" in text
+    assert "<visible_evidence>" in text
+    assert "<diagram_inference>" in text
     assert "<answer>" in text
 
 

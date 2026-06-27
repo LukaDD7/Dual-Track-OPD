@@ -68,7 +68,8 @@ def test_valid_response_excludes_split_tag_tokens():
     assert parsed.format_valid
     assert parsed.errors == ()
     assert parsed.token_counts == {
-        "visual_evidence": len("two red circles"),
+        "visible_evidence": len("two red circles"),
+        "diagram_inference": 0,
         "reasoning": len("two objects imply two"),
         "answer": 1,
     }
@@ -83,7 +84,7 @@ def test_empty_evidence_is_valid():
         "<answer>A</answer>"
     )
     assert parsed.format_valid
-    assert parsed.token_counts["visual_evidence"] == 0
+    assert parsed.token_counts["visible_evidence"] == 0
 
 
 @pytest.mark.parametrize(
@@ -121,7 +122,7 @@ def test_chinese_text_is_token_aligned():
         "<answer>三</answer>"
     )
     assert parsed.format_valid
-    assert parsed.token_counts["visual_evidence"] == len("图中有三个蓝色方块")
+    assert parsed.token_counts["visible_evidence"] == len("图中有三个蓝色方块")
     assert parsed.token_counts["answer"] == 1
 
 
@@ -134,7 +135,7 @@ def test_byte_split_chinese_tokens_share_semantic_character_span():
     ids = tokenizer.encode(text)
     parsed = parse_response_chunks(ids, text, tokenizer)
     assert parsed.format_valid
-    assert parsed.token_counts["visual_evidence"] == 2
+    assert parsed.token_counts["visible_evidence"] == 2
 
 
 def test_long_ocr_string_remains_in_evidence_chunk():
@@ -144,7 +145,21 @@ def test_long_ocr_string_remains_in_evidence_chunk():
         "<reasoning>read the serial</reasoning><answer>valid</answer>"
     )
     assert parsed.format_valid
-    assert parsed.token_counts["visual_evidence"] == len(ocr)
+    assert parsed.token_counts["visible_evidence"] == len(ocr)
+
+
+def test_v2_response_returns_four_chunk_labels():
+    text = (
+        "<visible_evidence>labels 13 and 10</visible_evidence>"
+        "<diagram_inference>altitude bisects the base</diagram_inference>"
+        "<reasoning>use the inferred right triangle</reasoning>"
+        "<answer>B</answer>"
+    )
+    parsed = _parse(text)
+    assert parsed.format_valid
+    assert len(parsed.chunk_labels) == len(TOKENIZER.encode(text))
+    assert parsed.token_counts["visible_evidence"] == len("labels 13 and 10")
+    assert parsed.token_counts["diagram_inference"] == len("altitude bisects the base")
 
 
 def test_truncated_response_is_invalid():

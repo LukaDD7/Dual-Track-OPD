@@ -8,9 +8,12 @@ from .conditions import Condition, ConditionInputs
 
 
 STRUCTURED_RESPONSE_INSTRUCTION = """Continue using exactly this structure:
-<visual_evidence>
-Only image-grounded facts relevant to the question.
-</visual_evidence>
+<visible_evidence>
+Directly visible image-grounded facts relevant to the question.
+</visible_evidence>
+<diagram_inference>
+Intermediate visual or geometric facts derived from diagram marks and structure.
+</diagram_inference>
 <reasoning>
 Reason from the available evidence and the question.
 </reasoning>
@@ -53,10 +56,28 @@ def render_teacher_prompt(
             f"Image description:\n{inputs.free_caption}",
             question,
         )
-    elif condition is Condition.TASK:
+    elif condition in {Condition.TASK, Condition.TASK_VISIBLE}:
         image_path = None
         text = _text_prompt(
-            f"Question-conditioned visual evidence:\n{inputs.task_evidence}",
+            f"Question-conditioned visible evidence:\n{inputs.task_visible_text}",
+            question,
+        )
+    elif condition is Condition.TASK_INFER:
+        if inputs.task_infer_evidence is None:
+            raise ValueError("task_infer condition requires task_infer_evidence")
+        image_path = None
+        text = _text_prompt(
+            "Task-conditioned diagram/geometric inference. These are intermediate "
+            f"facts and equations, not a final solution:\n{inputs.task_infer_evidence}",
+            question,
+        )
+    elif condition is Condition.TASK_SOLVE:
+        if inputs.task_solve_evidence is None:
+            raise ValueError("task_solve condition requires task_solve_evidence")
+        image_path = None
+        text = _text_prompt(
+            "Teacher-inferred solution context. This may contain a full solution generated "
+            f"without using the dataset gold answer:\n{inputs.task_solve_evidence}",
             question,
         )
     else:

@@ -52,13 +52,26 @@ class StudentRolloutGenerator(Protocol):
     ) -> str: ...
 
 
-ROLLOUT_RESPONSE_FORMATS = ("answer_only", "fc_opd_structured")
+ROLLOUT_RESPONSE_FORMATS = ("answer_only", "fc_opd_structured", "fc_opd_structured_v2")
 STRUCTURED_ROLLOUT_INSTRUCTION = """Respond using exactly this XML structure:
 <visual_evidence>
 Question-relevant visual observations from the image. Do not use the gold answer.
 </visual_evidence>
 <reasoning>
 Briefly reason from the visual evidence and answer choices.
+</reasoning>
+<answer>
+Final option letter and short answer.
+</answer>"""
+STRUCTURED_ROLLOUT_V2_INSTRUCTION = """Respond using exactly this XML structure:
+<visible_evidence>
+Directly visible visual facts from the image.
+</visible_evidence>
+<diagram_inference>
+Intermediate visual/geometric facts derived from diagram marks. Do not write the final answer here.
+</diagram_inference>
+<reasoning>
+Briefly reason from the evidence and answer choices.
 </reasoning>
 <answer>
 Final option letter and short answer.
@@ -145,6 +158,21 @@ class FixedFakeRolloutGenerator:
         seed: int,
     ) -> str:
         del image_path
+        if "<visible_evidence>" in prompt_text:
+            return (
+                "<visible_evidence>\n"
+                f"Fake visible evidence seed {seed} for: {question[:48]}\n"
+                "</visible_evidence>\n"
+                "<diagram_inference>\n"
+                "This is a deterministic intermediate diagram inference.\n"
+                "</diagram_inference>\n"
+                "<reasoning>\n"
+                "This is a deterministic test rollout with routed reasoning.\n"
+                "</reasoning>\n"
+                "<answer>\n"
+                f"{chr(ord('A') + seed % 4)}. fake answer\n"
+                "</answer>"
+            )
         if "<visual_evidence>" not in prompt_text:
             return f"{chr(ord('A') + seed % 4)}. fake"
         return (
@@ -419,12 +447,19 @@ def build_rollout_prompt(question: str, *, response_format: str) -> RolloutPromp
             text=f"{question}\n\n{STRUCTURED_ROLLOUT_INSTRUCTION}",
             format_mode=response_format,
         )
+    if response_format == "fc_opd_structured_v2":
+        return RolloutPrompt(
+            text=f"{question}\n\n{STRUCTURED_ROLLOUT_V2_INSTRUCTION}",
+            format_mode=response_format,
+        )
     raise ValueError(f"unsupported rollout_response_format: {response_format}")
 
 
 def response_format_note(response_format: str) -> str:
     if response_format == "answer_only":
         return "mechanical smoke only; too short for token-level FC-OPD training"
+    if response_format == "fc_opd_structured_v2":
+        return "OPD-compatible structured response with visible evidence, diagram inference, reasoning, and answer spans"
     return "OPD-compatible structured response with visual evidence, reasoning, and answer spans"
 
 

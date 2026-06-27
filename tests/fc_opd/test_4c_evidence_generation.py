@@ -94,6 +94,7 @@ def test_evidence_generation_writes_auditable_rows_without_gold_use(tmp_path):
             output_jsonl=output,
             summary_json=summary,
             limit=1,
+            include_prompts_in_output=True,
         ),
         generator=TemplateEvidenceGenerator(),
     )
@@ -107,6 +108,44 @@ def test_evidence_generation_writes_auditable_rows_without_gold_use(tmp_path):
     assert validate_evidence_row(row) == []
     assert result.summary["validation_error_count"] == 0
     assert output.is_file() and summary.is_file()
+
+
+def test_prompt_debug_fields_are_hidden_by_default(tmp_path):
+    image = tmp_path / "diagram.png"
+    image.write_bytes(b"placeholder")
+    dataset = tmp_path / "geometry.json"
+    dataset.write_text(
+        json.dumps(
+            [
+                {
+                    "id": "g1",
+                    "diagram_path": str(image),
+                    "question": "What is angle ABC?",
+                    "choices": ["30", "45"],
+                    "answer": "B",
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    result = run_evidence_generation(
+        EvidenceGenerationConfig(
+            dataset=dataset,
+            dataset_type="geometry3k",
+            output_jsonl=tmp_path / "evidence.jsonl",
+            summary_json=tmp_path / "summary.json",
+            limit=1,
+            condition_set="6c-solve",
+        ),
+        generator=TemplateEvidenceGenerator(),
+    )
+
+    row = result.rows[0]
+    assert "free_caption_prompt" not in row
+    assert "task_visible_prompt" not in row
+    assert row["prompt_hashes"]["task_solve_prompt"]
+    assert row["conditions"] == ["full", "degraded", "free", "task_visible", "task_infer", "task_solve"]
 
 
 def test_geometry3k_official_directory_evidence_generation_does_not_prompt_with_answer(tmp_path):
@@ -123,6 +162,7 @@ def test_geometry3k_official_directory_evidence_generation_does_not_prompt_with_
             output_jsonl=output,
             summary_json=summary,
             limit=1,
+            include_prompts_in_output=True,
         ),
         generator=generator,
     )

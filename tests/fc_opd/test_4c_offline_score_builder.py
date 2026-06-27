@@ -103,3 +103,64 @@ def test_4c_builder_writes_trainable_full_degraded_free_task_rows(tmp_path):
 
     validation = validate_four_condition_rows(output)
     assert validation["valid"], validation["errors"]
+
+
+def test_6c_builder_writes_expanded_condition_schema(tmp_path):
+    dataset = _dataset(tmp_path)
+    evidence_jsonl = tmp_path / "evidence_6c.jsonl"
+    run_evidence_generation(
+        EvidenceGenerationConfig(
+            dataset=dataset,
+            dataset_type="geometry3k",
+            output_jsonl=evidence_jsonl,
+            summary_json=tmp_path / "evidence_6c_summary.json",
+            limit=1,
+            condition_set="6c-solve",
+        ),
+        generator=TemplateEvidenceGenerator(),
+    )
+
+    tokenizer = ByteTokenizer()
+    with ExitStack() as stack:
+        scorer = SyntheticTeacherScorer(
+            vocab_size=320,
+            top_k=8,
+            tokenizer_hash=tokenizer_fingerprint(tokenizer),
+        )
+        server = stack.enter_context(running_teacher_server(scorer))
+        host, port = server.server_address
+        client = TeacherClient(
+            f"http://{host}:{port}",
+            expected_tokenizer_hash=tokenizer_fingerprint(tokenizer),
+        )
+        output = tmp_path / "scores_6c.jsonl"
+        result = run_four_condition_offline_builder(
+            FourConditionOfflineBuilderConfig(
+                dataset=dataset,
+                evidence_cache=evidence_jsonl,
+                output_jsonl=output,
+                summary_json=tmp_path / "summary_6c.json",
+                limit=1,
+                rollouts_per_prompt=1,
+                student_model_path="fake/student",
+                degraded_dir=str(tmp_path / "degraded_6c"),
+                condition_set="6c-solve",
+                rollout_response_format="fc_opd_structured_v2",
+            ),
+            rollout_generator=FixedFakeRolloutGenerator(tokenizer),
+            teacher_client=client,
+        )
+
+    expected = ["full", "degraded", "free", "task_visible", "task_infer", "task_solve"]
+    assert result.summary["condition_set_name"] == "6c-solve"
+    assert result.summary["conditions"] == expected
+    assert result.summary["chunk_parse_success_rate"] == 1.0
+    assert result.summary["gate_ready_fields_available"] is True
+    assert len(result.rows) == 1
+    row = result.rows[0]
+    assert row["conditions"] == expected
+    assert set(row["condition_scores"]) == set(expected)
+    assert row["chunk_spans"]["token_counts"]["diagram_inference"] > 0
+
+    validation = validate_four_condition_rows(output, condition_set="6c-solve")
+    assert validation["valid"], validation["errors"]

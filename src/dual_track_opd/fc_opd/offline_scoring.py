@@ -259,12 +259,18 @@ def build_condition_inputs_for_record(
     evidence = _coalesce_text(
         record, ("task_evidence", "task_extraction", "evidence"), config.smoke_task_evidence
     )
+    visible = _coalesce_text(record, ("task_visible_evidence", "task_visible"), evidence)
+    infer = _first_present(record, ("task_infer_evidence", "task_infer"))
+    solve = _first_present(record, ("task_solve_evidence", "task_solve"))
 
     inputs = ConditionInputs(
         full_image=ImageInput(path=full_path),
         degraded_image=ImageInput(path=degraded_path, transform=transform),
         free_caption=caption,
         task_evidence=evidence,
+        task_visible_evidence=visible,
+        task_infer_evidence=None if infer is None else str(infer),
+        task_solve_evidence=None if solve is None else str(solve),
     )
     inputs.validate(require_paths=config.require_paths)
     return inputs
@@ -287,6 +293,15 @@ def _condition_inputs_from_mapping(
         ),
         free_caption=str(raw_inputs["free_caption"]),
         task_evidence=str(raw_inputs["task_evidence"]),
+        task_visible_evidence=(
+            None if raw_inputs.get("task_visible_evidence") is None else str(raw_inputs["task_visible_evidence"])
+        ),
+        task_infer_evidence=(
+            None if raw_inputs.get("task_infer_evidence") is None else str(raw_inputs["task_infer_evidence"])
+        ),
+        task_solve_evidence=(
+            None if raw_inputs.get("task_solve_evidence") is None else str(raw_inputs["task_solve_evidence"])
+        ),
         verified_facts=(
             None if raw_inputs.get("verified_facts") is None else str(raw_inputs["verified_facts"])
         ),
@@ -402,13 +417,16 @@ def _serialize_topk(scores: TeacherTopK) -> dict[str, Any]:
 
 def _serialize_chunks(chunk_masks: Any) -> dict[str, Any]:
     return {
+        "visible_evidence": _mask_to_spans(chunk_masks.visible_evidence_mask),
         "visual_evidence": _mask_to_spans(chunk_masks.visual_evidence_mask),
+        "diagram_inference": _mask_to_spans(chunk_masks.diagram_inference_mask),
         "reasoning": _mask_to_spans(chunk_masks.reasoning_mask),
         "answer": _mask_to_spans(chunk_masks.answer_mask),
         "format_valid": chunk_masks.format_valid,
         "errors": list(chunk_masks.errors),
         "fallback": chunk_masks.fallback,
         "token_counts": chunk_masks.token_counts,
+        "chunk_labels": list(chunk_masks.chunk_labels),
     }
 
 
