@@ -7,7 +7,7 @@ from typing import Mapping, Sequence
 
 import torch
 
-from .conditions import Condition
+from .conditions import CAPABILITY_CONTRASTS, Condition
 
 DEFAULT_CHUNK_CONDITION_ROUTING: dict[str, tuple[Condition, ...]] = {
     "visible_evidence": (Condition.TASK_VISIBLE, Condition.FULL, Condition.FREE),
@@ -50,6 +50,11 @@ class RouterConfig:
     topk_mass_min: float | None = None
     max_conditions_per_token: int = 2
     normalize_weights_per_token: bool = True
+
+
+CAPABILITY_POSITIVE_CONDITION: dict[str, Condition] = {
+    name: positive for name, (positive, _negative) in CAPABILITY_CONTRASTS.items()
+}
 
 
 def _normalize_chunk_masks(
@@ -190,6 +195,80 @@ def route_condition_weights(
             if fallback_condition not in available:
                 raise ValueError(f"fallback condition is unavailable: {fallback_condition}")
             weights[fallback_condition][uncovered] = 1.0
+    elif router_config.mode == "student_deficit_chunk_gated":
+        capability_scores = signals.get("capability_scores") if isinstance(signals, Mapping) else None
+        if isinstance(capability_scores, Mapping) and capability_scores:
+            capability_weights: list[tuple[str, Condition, torch.Tensor]] = []
+            for capability, block in capability_scores.items():
+                if not isinstance(block, Mapping) or block.get("valid") is not True:
+                    continue
+                condition = _available_condition(
+                    Condition(block.get("positive", CAPABILITY_POSITIVE_CONDITION.get(str(capability), Condition.FULL))),
+                    available,
+                )
+                if condition is None:
+                    continue
+                raw = block.get("final_token_weight", [])
+                tensor = torch.tensor(raw, dtype=torch.float32, device=response_mask.device).reshape(1, -1)
+                if tensor.shape != response_mask.shape:
+                    raise ValueError(f"{capability} final_token_weight must have shape {tuple(response_mask.shape)}")
+                capability_weights.append((str(capability), condition, tensor.clamp_min(0.0)))
+            if capability_weights:
+                combined = {condition: torch.zeros_like(response_mask, dtype=torch.float32) for condition in available}
+                for _capability, condition, tensor in capability_weights:
+                    combined[condition] = combined[condition] + tensor * valid_tokens.float()
+                weight_sum = sum(combined.values())
+                nonzero = weight_sum > 0
+                if router_config.normalize_weights_per_token and torch.any(nonzero):
+                    for condition in combined:
+                        combined[condition] = torch.where(
+                            nonzero,
+                            combined[condition] / weight_sum.clamp_min(1e-12),
+                            combined[condition],
+                        )
+                uncovered = valid_tokens & ~nonzero
+                if torch.any(uncovered):
+                    fallback_condition = _available_condition(router_config.invalid_format_condition, available)
+                    if fallback_condition is None:
+                        raise ValueError(f"fallback condition is unavailable: {router_config.invalid_format_condition}")
+                    combined[fallback_condition][uncovered] = 1.0
+                weights = combined
+            else:
+                fallback = RouterConfig(
+                    mode="chunk_gated_contrastive",
+                    invalid_format_condition=router_config.invalid_format_condition,
+                    delta_threshold=router_config.delta_threshold,
+                    entropy_max=router_config.entropy_max,
+                    topk_mass_min=router_config.topk_mass_min,
+                    max_conditions_per_token=max(router_config.max_conditions_per_token, 4),
+                    normalize_weights_per_token=router_config.normalize_weights_per_token,
+                )
+                return route_condition_weights(
+                    signals,
+                    chunk_masks,
+                    fallback,
+                    response_mask=response_mask,
+                    available_conditions=available_conditions,
+                    format_valid=format_valid,
+                )
+        else:
+            fallback = RouterConfig(
+                mode="chunk_gated_contrastive",
+                invalid_format_condition=router_config.invalid_format_condition,
+                delta_threshold=router_config.delta_threshold,
+                entropy_max=router_config.entropy_max,
+                topk_mass_min=router_config.topk_mass_min,
+                max_conditions_per_token=max(router_config.max_conditions_per_token, 4),
+                normalize_weights_per_token=router_config.normalize_weights_per_token,
+            )
+            return route_condition_weights(
+                signals,
+                chunk_masks,
+                fallback,
+                response_mask=response_mask,
+                available_conditions=available_conditions,
+                format_valid=format_valid,
+            )
     elif router_config.mode in {"chunk_gated", "chunk_gated_primary", "chunk_gated_contrastive"}:
         entropy_ok = _entropy_gate(
             signals,
@@ -236,7 +315,8 @@ def route_condition_weights(
     else:
         raise ValueError(
             "router mode must be 'single', 'chunk', 'chunk_gated', "
-            "'chunk_gated_primary', 'chunk_gated_contrastive', or 'uniform_all_conditions'"
+            "'chunk_gated_primary', 'chunk_gated_contrastive', "
+            "'student_deficit_chunk_gated', or 'uniform_all_conditions'"
         )
 
     weight_sum = sum(weights.values())

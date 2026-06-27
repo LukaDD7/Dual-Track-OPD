@@ -11,15 +11,26 @@ from pathlib import Path
 from statistics import mean
 from typing import Any, Mapping, Sequence
 
+import torch
+
 from .alignment import compute_alignment_weights, compute_rollout_group_stats, default_outcome_metadata
 from .chunk_parser import parse_response_chunks
-from .conditions import Condition, ConditionInputs, ImageInput
+from .conditions import (
+    CAPABILITY_CONTRASTS,
+    CHUNK_CAPABILITY_COMPATIBILITY,
+    CONDITION_SETS as CONDITION_SET_NAMES,
+    Condition,
+    ConditionInputs,
+    ImageInput,
+)
 from .dataset_signal_audit import compute_pairwise_kd_gradient_cosines, hash_text, hash_token_ids, materialize_gaussian_blur
+from .degradation import DEGRADED_MODES, degraded_transform, materialize_degraded_image as materialize_degraded_image_file
 from .evidence_generation import validate_evidence_row
 from .geometry3k_adapter import default_degraded_image_dir, load_geometry3k_records
 from .offline_loss import offline_record_to_tensors
 from .offline_scoring import DEFAULT_TEACHER_URL, _serialize_chunks, _serialize_topk
 from .signal_decomposer import compute_condition_signals
+from .signal_decomposer import sampled_token_log_prob
 from .student_rollout_signal_audit import (
     DEFAULT_TEACHER_URL as _DEFAULT_TEACHER_URL,
     HFQwenStudentRolloutGenerator,
@@ -32,25 +43,10 @@ from .student_rollout_signal_audit import (
 )
 from .teacher_client import TeacherClient, score_teacher_conditions
 from .teacher_protocol import tokenizer_fingerprint
+from .verifier import verify_geometry3k_response
 
 CONDITION_SETS: dict[str, tuple[Condition, ...]] = {
-    "4c-legacy": (Condition.FULL, Condition.DEGRADED, Condition.FREE, Condition.TASK),
-    "4c-clean": (Condition.FULL, Condition.DEGRADED, Condition.FREE, Condition.TASK_VISIBLE),
-    "5c-infer": (
-        Condition.FULL,
-        Condition.DEGRADED,
-        Condition.FREE,
-        Condition.TASK_VISIBLE,
-        Condition.TASK_INFER,
-    ),
-    "6c-solve": (
-        Condition.FULL,
-        Condition.DEGRADED,
-        Condition.FREE,
-        Condition.TASK_VISIBLE,
-        Condition.TASK_INFER,
-        Condition.TASK_SOLVE,
-    ),
+    name: tuple(Condition(item) for item in values) for name, values in CONDITION_SET_NAMES.items()
 }
 FOUR_CLEAN_CONDITIONS: tuple[Condition, ...] = (
     Condition.FULL,
@@ -88,16 +84,28 @@ class FourConditionOfflineBuilderConfig:
     resume: bool = False
     skip_existing: bool = False
     condition_set: str = "4c-legacy"
+    enable_student_condition_scoring: bool = False
+    student_deficit_gate: bool = False
+    outcome_gate: str = "none"
+    strict_condition_validation: bool = False
+    capability_margin: float = 0.0
+    max_capabilities_per_token: int = 2
+    routing_mode: str = "chunk_gated_contrastive"
+    grouped_loss_schema: str = "none"
 
     def __post_init__(self) -> None:
         if self.dataset_type != "geometry3k":
             raise ValueError("clean-data 4C builder currently supports Geometry3K first")
         if self.rollout_response_format not in ROLLOUT_RESPONSE_FORMATS:
             raise ValueError(f"rollout_response_format must be one of {ROLLOUT_RESPONSE_FORMATS}")
-        if self.degraded_mode not in {"lowres_10pct_nearest", "gaussian_blur_s2"}:
-            raise ValueError("degraded_mode must be lowres_10pct_nearest or gaussian_blur_s2")
+        if self.degraded_mode not in DEGRADED_MODES:
+            raise ValueError(f"degraded_mode must be one of {DEGRADED_MODES}")
         if self.condition_set not in CONDITION_SETS:
             raise ValueError(f"condition_set must be one of {sorted(CONDITION_SETS)}")
+        if self.outcome_gate not in {"none", "geometry3k_verifier"}:
+            raise ValueError("outcome_gate must be none or geometry3k_verifier")
+        if self.max_capabilities_per_token < 1:
+            raise ValueError("max_capabilities_per_token must be at least 1")
 
 
 @dataclass
@@ -133,6 +141,8 @@ def run_four_condition_offline_builder(
             if evidence_row is None:
                 raise ValueError(f"missing evidence cache row for {record['sample_uid']}")
             errors = validate_evidence_row(evidence_row)
+            if config.strict_condition_validation and evidence_row.get("task_infer_class") in {"solve_like", "unusable"}:
+                errors.append(f"task_infer_{evidence_row.get('task_infer_class')}")
             if errors:
                 raise ValueError(f"evidence cache validation failed for {record['sample_uid']}: {errors}")
             for row in _build_rows(record, evidence_row, config, rollout_generator, teacher_client, tokenizer_hash):
@@ -198,12 +208,77 @@ def _build_rows(
             response_text=response_text,
             request_prefix=rollout_uid,
         )
-        signals = compute_condition_signals(teacher_scores)
+        sampled_ids = torch.tensor([list(token_ids)], dtype=torch.int64)
+        signals = compute_condition_signals(teacher_scores, sampled_token_ids=sampled_ids)
         condition_scores = {
-            condition.value: {**_serialize_topk(teacher_scores[condition]), "top_k": teacher_client.metadata.top_k}
+            condition.value: _serialize_condition_score(
+                teacher_scores[condition],
+                token_ids,
+                top_k=teacher_client.metadata.top_k,
+            )
             for condition in conditions
         }
+        student_scores_raw = _score_student_conditions(
+            rollout_generator=rollout_generator,
+            token_ids=token_ids,
+            question=question,
+            condition_inputs=condition_inputs,
+            conditions=conditions,
+            response_text=response_text,
+            top_k=teacher_client.metadata.top_k,
+            enabled=config.enable_student_condition_scoring,
+        )
+        student_score_source = (
+            student_scores_raw
+            if student_scores_raw
+            else teacher_scores
+            if config.enable_student_condition_scoring
+            else {}
+        )
+        student_condition_scores = {
+            condition.value: _serialize_condition_score(
+                student_score_source[condition],
+                token_ids,
+                top_k=teacher_client.metadata.top_k,
+                actual_override=(
+                    [0.0 for _ in token_ids]
+                    if config.enable_student_condition_scoring and not _has_student_condition_scorer(rollout_generator)
+                    else None
+                ),
+            )
+            for condition in conditions
+            if condition in student_score_source
+        }
+        verifier = (
+            verify_geometry3k_response(
+                question=question,
+                choices=list(record.get("choices", [])),
+                response_text=response_text,
+                answer_metadata=record.get("answer_metadata") or record.get("answer") or record.get("gold"),
+            )
+            if config.outcome_gate == "geometry3k_verifier"
+            else None
+        )
+        outcome_gate = build_outcome_gate(verifier)
+        capability_scores = compute_student_deficit_capability_scores(
+            teacher_condition_scores=condition_scores,
+            student_condition_scores=student_condition_scores,
+            chunk_spans=_serialize_chunks(chunk_masks),
+            outcome_gate=outcome_gate,
+            margin=config.capability_margin,
+            max_capabilities_per_token=config.max_capabilities_per_token,
+            task_infer_solve_like=bool(evidence_row.get("task_infer_solve_like")),
+            enable_student_deficit_gate=config.student_deficit_gate,
+        )
         outcome = default_outcome_metadata(record)
+        if verifier is not None:
+            outcome = {
+                **outcome,
+                "verifier": verifier,
+                "correct": verifier["correct"],
+                "format_valid": verifier["format_valid"],
+                "reward": verifier["reward"],
+            }
         row = {
             "sample_uid": rollout_uid,
             "prompt_sample_uid": str(record["sample_uid"]),
@@ -225,6 +300,9 @@ def _build_rows(
             "task_visible_evidence": evidence_row.get("task_visible_evidence", evidence_row["task_evidence"]),
             "task_infer_evidence": evidence_row.get("task_infer_evidence"),
             "task_solve_evidence": evidence_row.get("task_solve_evidence"),
+            "task_infer_class": evidence_row.get("task_infer_class"),
+            "task_infer_solve_like": bool(evidence_row.get("task_infer_solve_like")),
+            "condition_validation_warnings": list(evidence_row.get("condition_validation_warnings", [])),
             "evidence_cache_uid": evidence_row["sample_uid"],
             "response_source": "student_rollout",
             "response_text": response_text,
@@ -260,6 +338,17 @@ def _build_rows(
             "conditions": [condition.value for condition in conditions],
             "condition_inputs": condition_inputs.to_dict(),
             "condition_scores": condition_scores,
+            "student_condition_scores": student_condition_scores,
+            "capability_contrasts": {
+                name: {"positive": positive.value, "negative": negative.value}
+                for name, (positive, negative) in CAPABILITY_CONTRASTS.items()
+            },
+            "capability_scores": capability_scores,
+            "verifier": verifier,
+            "outcome_gate": outcome_gate,
+            "grouped_loss_plan": grouped_loss_plan(config.grouped_loss_schema),
+            "routing_mode": config.routing_mode,
+            "grouped_loss_schema": config.grouped_loss_schema,
             "condition_signals": {name: [float(item) for item in signal[0].tolist()] for name, signal in signals.items()},
             "condition_signal_summary": {name: _stats([float(item) for item in signal[0].tolist()]) for name, signal in signals.items()},
             "gradient_cosines": compute_pairwise_kd_gradient_cosines(teacher_scores),
@@ -275,31 +364,241 @@ def _build_rows(
 
 
 def materialize_degraded_image(image_path: str, config: FourConditionOfflineBuilderConfig) -> str:
-    source = Path(image_path).expanduser()
-    suffix = source.suffix or ".png"
-    degraded_dir = Path(config.degraded_dir).expanduser() if config.degraded_dir else default_degraded_image_dir()
-    if config.degraded_mode == "gaussian_blur_s2":
-        target = degraded_dir / f"{source.stem}.gaussian_blur_s2{suffix}"
-        materialize_gaussian_blur(str(source), str(target), config.blur_sigma)
-        return str(target)
-    target = degraded_dir / f"{source.stem}.lowres_10pct_nearest{suffix}"
-    if target.is_file():
-        return str(target)
-    from PIL import Image
-
-    target.parent.mkdir(parents=True, exist_ok=True)
-    with Image.open(source) as image:
-        original = image.convert("RGB")
-        width, height = original.size
-        low = original.resize((max(1, width // 10), max(1, height // 10)), Image.Resampling.NEAREST)
-        low.resize((width, height), Image.Resampling.NEAREST).save(target)
-    return str(target)
+    return materialize_degraded_image_file(
+        image_path,
+        mode=config.degraded_mode,
+        degraded_dir=config.degraded_dir,
+        blur_sigma=config.blur_sigma,
+    )
 
 
 def _degraded_transform(config: FourConditionOfflineBuilderConfig) -> dict[str, Any]:
-    if config.degraded_mode == "gaussian_blur_s2":
-        return {"type": "gaussian_blur", "sigma": float(config.blur_sigma), "degraded_mode": config.degraded_mode}
-    return {"type": "lowres_nearest", "scale": 0.1, "degraded_mode": config.degraded_mode}
+    return degraded_transform(config.degraded_mode, blur_sigma=config.blur_sigma)
+
+
+def _serialize_condition_score(
+    scores: Any,
+    response_token_ids: Sequence[int],
+    *,
+    top_k: int,
+    actual_override: Sequence[float] | None = None,
+) -> dict[str, Any]:
+    block = {**_serialize_topk(scores), "top_k": top_k}
+    if actual_override is None:
+        sampled = torch.tensor([list(response_token_ids)], dtype=torch.int64, device=scores.token_ids.device)
+        actual = sampled_token_log_prob(scores, sampled)[0].detach().float().cpu().tolist()
+    else:
+        actual = [float(value) for value in actual_override]
+    block["actual_token_log_probs"] = actual
+    return block
+
+
+def _has_student_condition_scorer(rollout_generator: StudentRolloutGenerator) -> bool:
+    return callable(getattr(rollout_generator, "score_conditions", None))
+
+
+def _score_student_conditions(
+    *,
+    rollout_generator: StudentRolloutGenerator,
+    token_ids: Sequence[int],
+    question: str,
+    condition_inputs: ConditionInputs,
+    conditions: Sequence[Condition],
+    response_text: str,
+    top_k: int,
+    enabled: bool,
+) -> dict[Condition, Any]:
+    if not enabled:
+        return {}
+    scorer = getattr(rollout_generator, "score_conditions", None)
+    if callable(scorer):
+        return scorer(
+            response_token_ids=token_ids,
+            question=question,
+            condition_inputs=condition_inputs,
+            conditions=conditions,
+            response_text=response_text,
+            top_k=top_k,
+        )
+    return {}
+
+
+def build_outcome_gate(verifier: Mapping[str, Any] | None) -> dict[str, Any]:
+    if verifier is None:
+        gates = {chunk: 1.0 for chunk in ("visible_evidence", "diagram_inference", "reasoning", "answer")}
+        return {"correct": None, "format_valid": True, "reward": 1.0, "chunk_gates": gates}
+    correct = verifier.get("correct")
+    format_valid = bool(verifier.get("format_valid", False))
+    malformed = bool(verifier.get("malformed", False))
+    if malformed:
+        gates = {chunk: 0.0 for chunk in ("visible_evidence", "diagram_inference", "reasoning", "answer")}
+    elif correct is True:
+        gates = {chunk: 1.0 for chunk in ("visible_evidence", "diagram_inference", "reasoning", "answer")}
+    elif format_valid:
+        gates = {"visible_evidence": 0.5, "diagram_inference": 0.5, "reasoning": 0.25, "answer": 0.0}
+    else:
+        gates = {chunk: 0.0 for chunk in ("visible_evidence", "diagram_inference", "reasoning", "answer")}
+    return {
+        "correct": correct,
+        "format_valid": format_valid,
+        "reward": float(verifier.get("reward", 0.0)),
+        "chunk_gates": gates,
+    }
+
+
+def grouped_loss_plan(schema: str) -> dict[str, list[str]]:
+    if schema != "capability_chunk_v1":
+        return {}
+    return {
+        "visible": ["visual_detail", "evidence_selection"],
+        "infer": ["visual_text_inference"],
+        "solve": ["solving"],
+    }
+
+
+def compute_student_deficit_capability_scores(
+    *,
+    teacher_condition_scores: Mapping[str, Mapping[str, Any]],
+    student_condition_scores: Mapping[str, Mapping[str, Any]],
+    chunk_spans: Mapping[str, Any],
+    outcome_gate: Mapping[str, Any],
+    margin: float = 0.0,
+    max_capabilities_per_token: int = 2,
+    task_infer_solve_like: bool = False,
+    enable_student_deficit_gate: bool = True,
+) -> dict[str, dict[str, Any]]:
+    if not teacher_condition_scores:
+        return {}
+    length = _score_length(next(iter(teacher_condition_scores.values())))
+    chunk_labels = _chunk_labels(chunk_spans, length)
+    raw_weights: dict[str, list[float]] = {}
+    output: dict[str, dict[str, Any]] = {}
+
+    for capability, (positive, negative) in CAPABILITY_CONTRASTS.items():
+        pos = positive.value
+        neg = negative.value
+        valid = pos in teacher_condition_scores and neg in teacher_condition_scores
+        invalid_reason = None
+        effective_negative = neg
+        if capability == "visual_text_inference" and task_infer_solve_like:
+            valid = False
+            invalid_reason = "task_infer_solve_like"
+        if capability == "solving" and task_infer_solve_like and "task_visible" in teacher_condition_scores:
+            effective_negative = "task_visible"
+            valid = pos in teacher_condition_scores
+        if not valid:
+            output[capability] = _invalid_capability(length, pos, effective_negative, invalid_reason or "missing_condition")
+            raw_weights[capability] = [0.0] * length
+            continue
+
+        t_pos = _actual_log_probs(teacher_condition_scores[pos], length)
+        t_neg = _actual_log_probs(teacher_condition_scores[effective_negative], length)
+        if enable_student_deficit_gate and pos in student_condition_scores and effective_negative in student_condition_scores:
+            s_pos = _actual_log_probs(student_condition_scores[pos], length)
+            s_neg = _actual_log_probs(student_condition_scores[effective_negative], length)
+        else:
+            s_pos = [0.0] * length
+            s_neg = [0.0] * length
+        teacher_delta = [a - b for a, b in zip(t_pos, t_neg, strict=True)]
+        student_delta = [a - b for a, b in zip(s_pos, s_neg, strict=True)]
+        teacher_attribution = [max(0.0, value) for value in teacher_delta]
+        student_deficit = [
+            max(0.0, t_value - s_value - float(margin))
+            for t_value, s_value in zip(teacher_delta, student_delta, strict=True)
+        ]
+        chunk_compatibility = [
+            float(CHUNK_CAPABILITY_COMPATIBILITY.get(label, {}).get(capability, 0.0))
+            for label in chunk_labels
+        ]
+        chunk_gates = outcome_gate.get("chunk_gates", {}) if isinstance(outcome_gate, Mapping) else {}
+        outcome_weights = [float(chunk_gates.get(label, 1.0)) for label in chunk_labels]
+        final = [
+            attr * deficit * compat * gate
+            for attr, deficit, compat, gate in zip(
+                teacher_attribution,
+                student_deficit,
+                chunk_compatibility,
+                outcome_weights,
+                strict=True,
+            )
+        ]
+        raw_weights[capability] = final
+        output[capability] = {
+            "positive": pos,
+            "negative": effective_negative,
+            "teacher_delta": teacher_delta,
+            "student_delta": student_delta,
+            "teacher_attribution": teacher_attribution,
+            "student_deficit": student_deficit,
+            "chunk_compatibility": chunk_compatibility,
+            "outcome_gate": outcome_weights,
+            "final_token_weight": final,
+            "valid": True,
+        }
+
+    if max_capabilities_per_token > 0 and raw_weights:
+        kept = {capability: [0.0] * length for capability in raw_weights}
+        for index in range(length):
+            ranked = sorted(
+                ((capability, weights[index]) for capability, weights in raw_weights.items()),
+                key=lambda item: item[1],
+                reverse=True,
+            )
+            for capability, value in ranked[:max_capabilities_per_token]:
+                kept[capability][index] = float(value)
+        for capability, weights in kept.items():
+            if capability in output:
+                output[capability]["final_token_weight"] = weights
+    return output
+
+
+def _invalid_capability(length: int, positive: str, negative: str, reason: str) -> dict[str, Any]:
+    return {
+        "positive": positive,
+        "negative": negative,
+        "teacher_delta": [0.0] * length,
+        "student_delta": [0.0] * length,
+        "teacher_attribution": [0.0] * length,
+        "student_deficit": [0.0] * length,
+        "chunk_compatibility": [0.0] * length,
+        "outcome_gate": [0.0] * length,
+        "final_token_weight": [0.0] * length,
+        "valid": False,
+        "invalid_reason": reason,
+    }
+
+
+def _score_length(block: Mapping[str, Any]) -> int:
+    if isinstance(block.get("actual_token_log_probs"), Sequence):
+        return len(block["actual_token_log_probs"])
+    return len(block.get("token_ids", []))
+
+
+def _actual_log_probs(block: Mapping[str, Any], length: int) -> list[float]:
+    values = block.get("actual_token_log_probs")
+    if isinstance(values, Sequence) and len(values) == length:
+        return [float(value) for value in values]
+    token_log_probs = block.get("log_probs", [])
+    return [float(row[0]) if row else 0.0 for row in token_log_probs][:length]
+
+
+def _chunk_labels(chunk_spans: Mapping[str, Any], length: int) -> list[str]:
+    labels = chunk_spans.get("chunk_labels")
+    if isinstance(labels, Sequence) and len(labels) == length:
+        return [str(label) for label in labels]
+    output = ["reasoning"] * length
+    for chunk in ("visible_evidence", "diagram_inference", "reasoning", "answer", "visual_evidence"):
+        canonical = "visible_evidence" if chunk == "visual_evidence" else chunk
+        spans = chunk_spans.get(chunk, [])
+        if not isinstance(spans, Sequence):
+            continue
+        for span in spans:
+            if not isinstance(span, Sequence) or len(span) != 2:
+                continue
+            start, end = int(span[0]), int(span[1])
+            for index in range(max(0, start), min(length, end)):
+                output[index] = canonical
+    return output
 
 
 def validate_four_condition_rows(path: str | Path, *, condition_set: str | None = None) -> dict[str, Any]:
@@ -314,7 +613,7 @@ def validate_four_condition_rows(path: str | Path, *, condition_set: str | None 
         )
         if row.get("conditions") != expected:
             errors.append(f"{uid}: conditions mismatch")
-        if row.get("degraded_mode") not in {"lowres_10pct_nearest", "gaussian_blur_s2"}:
+        if row.get("degraded_mode") not in set(DEGRADED_MODES):
             errors.append(f"{uid}: invalid degraded_mode")
         if row.get("leakage_warnings"):
             errors.append(f"{uid}: leakage warnings present")
@@ -364,6 +663,8 @@ def summarize_rows(
             for key, value in token_counts.items():
                 chunk_counts[str(key)] += int(value)
     delta_report = _summarize_delta_fields(rows)
+    capability_report = _summarize_capability_fields(rows)
+    outcome_counts = _outcome_counts(rows)
     validation_errors = _summary_validation_errors(rows, delta_report)
     validation_valid = bool(rows) and not validation_errors
     return {
@@ -378,7 +679,21 @@ def summarize_rows(
         "chunk_parse_success_rate": None if not parse_success else sum(parse_success) / len(parse_success),
         "chunk_token_counts": dict(chunk_counts),
         "condition_score_success_rate": {condition: 1.0 for condition in conditions},
+        "student_condition_score_success_rate": _student_condition_success_rate(rows, conditions),
         "delta_means": delta_report["delta_means"],
+        "capability_delta_means_teacher": capability_report["teacher_delta_means"],
+        "capability_delta_means_student": capability_report["student_delta_means"],
+        "capability_deficit_means": capability_report["deficit_means"],
+        "capability_final_weight_sums": capability_report["final_weight_sums"],
+        "capability_nonzero_token_counts": capability_report["nonzero_token_counts"],
+        "capability_by_chunk_weight_sums": capability_report["by_chunk_weight_sums"],
+        "outcome_counts": outcome_counts,
+        "verifier_accuracy_over_rollouts": _verifier_accuracy(rows),
+        "task_infer_class_counts": dict(Counter(str(row.get("task_infer_class", "missing")) for row in rows)),
+        "rows_with_invalid_capability": capability_report["rows_with_invalid_capability"],
+        "degraded_source_image_count": 0,
+        "degraded_image_output_root": str(default_degraded_image_dir()),
+        "grouped_loss_ready": bool(rows) and all(isinstance(row.get("capability_scores"), Mapping) for row in rows),
         "visual_detail_delta_count": delta_report["counts"]["visual_detail_delta"],
         "visual_detail_delta_invalid_count": delta_report["invalid_counts"]["visual_detail_delta"],
         "delta_counts": delta_report["counts"],
@@ -476,6 +791,104 @@ def _summarize_delta_fields(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]
         "invalid_counts": invalid_counts,
         "rows_with_invalid_delta": rows_with_invalid_delta,
     }
+
+
+def _student_condition_success_rate(rows: Sequence[Mapping[str, Any]], conditions: Sequence[str]) -> dict[str, float | None]:
+    if not rows:
+        return {condition: None for condition in conditions}
+    output: dict[str, float | None] = {}
+    for condition in conditions:
+        output[condition] = sum(
+            1
+            for row in rows
+            if isinstance(row.get("student_condition_scores"), Mapping)
+            and condition in row.get("student_condition_scores", {})
+        ) / len(rows)
+    return output
+
+
+def _summarize_capability_fields(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    teacher_values: dict[str, list[float]] = {name: [] for name in CAPABILITY_CONTRASTS}
+    student_values: dict[str, list[float]] = {name: [] for name in CAPABILITY_CONTRASTS}
+    deficit_values: dict[str, list[float]] = {name: [] for name in CAPABILITY_CONTRASTS}
+    final_sums: dict[str, float] = {name: 0.0 for name in CAPABILITY_CONTRASTS}
+    nonzero_counts: dict[str, int] = {name: 0 for name in CAPABILITY_CONTRASTS}
+    by_chunk: dict[str, dict[str, float]] = {name: {} for name in CAPABILITY_CONTRASTS}
+    rows_with_invalid: list[str] = []
+
+    for row in rows:
+        capability_scores = row.get("capability_scores", {})
+        if not isinstance(capability_scores, Mapping):
+            continue
+        labels = _chunk_labels(row.get("chunk_spans", {}) if isinstance(row.get("chunk_spans"), Mapping) else {}, int(row.get("response_token_count", 0)))
+        row_invalid = False
+        for capability in CAPABILITY_CONTRASTS:
+            block = capability_scores.get(capability)
+            if not isinstance(block, Mapping):
+                continue
+            if block.get("valid") is not True:
+                row_invalid = True
+            teacher_values[capability].extend(_finite_values(block.get("teacher_delta", [])))
+            student_values[capability].extend(_finite_values(block.get("student_delta", [])))
+            deficit_values[capability].extend(_finite_values(block.get("student_deficit", [])))
+            weights = _finite_values(block.get("final_token_weight", []))
+            final_sums[capability] += float(sum(weights))
+            nonzero_counts[capability] += sum(1 for value in weights if value > 0)
+            chunk_report = by_chunk[capability]
+            for label, value in zip(labels, weights, strict=False):
+                chunk_report[label] = chunk_report.get(label, 0.0) + float(value)
+        if row_invalid:
+            rows_with_invalid.append(str(row.get("sample_uid", "unknown")))
+
+    return {
+        "teacher_delta_means": _mean_map(teacher_values),
+        "student_delta_means": _mean_map(student_values),
+        "deficit_means": _mean_map(deficit_values),
+        "final_weight_sums": final_sums,
+        "nonzero_token_counts": nonzero_counts,
+        "by_chunk_weight_sums": by_chunk,
+        "rows_with_invalid_capability": rows_with_invalid,
+    }
+
+
+def _outcome_counts(rows: Sequence[Mapping[str, Any]]) -> dict[str, int]:
+    counts = {"correct": 0, "wrong_format_valid": 0, "malformed": 0, "unknown": 0}
+    for row in rows:
+        verifier = row.get("verifier")
+        if not isinstance(verifier, Mapping):
+            counts["unknown"] += 1
+        elif verifier.get("malformed"):
+            counts["malformed"] += 1
+        elif verifier.get("correct") is True:
+            counts["correct"] += 1
+        elif verifier.get("format_valid"):
+            counts["wrong_format_valid"] += 1
+        else:
+            counts["unknown"] += 1
+    return counts
+
+
+def _verifier_accuracy(rows: Sequence[Mapping[str, Any]]) -> float | None:
+    verified = [row.get("verifier") for row in rows if isinstance(row.get("verifier"), Mapping)]
+    usable = [block for block in verified if block.get("correct") is not None]
+    if not usable:
+        return None
+    return sum(1 for block in usable if block.get("correct") is True) / len(usable)
+
+
+def _finite_values(values: object) -> list[float]:
+    if not isinstance(values, Sequence):
+        return []
+    output = []
+    for value in values:
+        finite = _finite_float(value)
+        if finite is not None:
+            output.append(finite)
+    return output
+
+
+def _mean_map(values: Mapping[str, Sequence[float]]) -> dict[str, float | None]:
+    return {key: None if not vals else float(mean(vals)) for key, vals in values.items()}
 
 
 def _summary_validation_errors(rows: Sequence[Mapping[str, Any]], delta_report: Mapping[str, Any]) -> list[str]:
@@ -584,13 +997,30 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--dtype", default="bfloat16")
-    parser.add_argument("--degraded-mode", choices=("lowres_10pct_nearest", "gaussian_blur_s2"), default="lowres_10pct_nearest")
+    parser.add_argument("--degraded-mode", choices=DEGRADED_MODES, default="lowres_10pct_nearest")
     parser.add_argument("--degraded-dir")
     parser.add_argument("--output-jsonl", type=Path, required=True)
     parser.add_argument("--summary-json", type=Path, required=True)
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--skip-existing", action="store_true")
     parser.add_argument("--condition-set", choices=tuple(CONDITION_SETS), default="4c-clean")
+    parser.add_argument("--enable-student-condition-scoring", action="store_true")
+    parser.add_argument("--student-deficit-gate", action="store_true")
+    parser.add_argument("--outcome-gate", choices=("none", "geometry3k_verifier"), default="none")
+    parser.add_argument("--strict-condition-validation", action="store_true")
+    parser.add_argument("--capability-margin", type=float, default=0.0)
+    parser.add_argument("--max-capabilities-per-token", type=int, default=2)
+    parser.add_argument(
+        "--routing-mode",
+        choices=(
+            "uniform_all_conditions",
+            "chunk_gated_primary",
+            "chunk_gated_contrastive",
+            "student_deficit_chunk_gated",
+        ),
+        default="chunk_gated_contrastive",
+    )
+    parser.add_argument("--grouped-loss-schema", choices=("none", "capability_chunk_v1"), default="none")
     parser.add_argument("--validate-only", action="store_true")
     return parser
 
@@ -627,6 +1057,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             resume=args.resume,
             skip_existing=args.skip_existing,
             condition_set=args.condition_set,
+            enable_student_condition_scoring=args.enable_student_condition_scoring,
+            student_deficit_gate=args.student_deficit_gate,
+            outcome_gate=args.outcome_gate,
+            strict_condition_validation=args.strict_condition_validation,
+            capability_margin=args.capability_margin,
+            max_capabilities_per_token=args.max_capabilities_per_token,
+            routing_mode=args.routing_mode,
+            grouped_loss_schema=args.grouped_loss_schema,
         )
     )
     validation = validate_four_condition_rows(args.output_jsonl, condition_set=args.condition_set)

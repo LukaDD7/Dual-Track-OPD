@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping, Protocol, Sequence
 
-from .conditions import Condition
+from .conditions import Condition, ConditionInputs
 from .dataset_adapters import load_normalized_records
 from .dataset_signal_audit import (
     DatasetAuditResult,
@@ -30,7 +30,8 @@ from .dataset_signal_audit import (
 from .offline_scoring import DEFAULT_TEACHER_URL, derive_degraded_path
 from .teacher_client import TeacherClient, score_teacher_conditions
 from .teacher_protocol import tokenizer_fingerprint
-from .signal_decomposer import compute_condition_signals
+from .signal_decomposer import TeacherTopK, compute_condition_signals
+from .teacher_prompts import render_teacher_prompt
 
 
 class StudentRolloutTokenizer(Protocol):
@@ -255,6 +256,60 @@ class HFQwenStudentRolloutGenerator:
         input_len = inputs["input_ids"].shape[-1]
         generated = outputs[:, input_len:]
         return self.tokenizer.batch_decode(generated, skip_special_tokens=True)[0]
+
+    def score_conditions(
+        self,
+        *,
+        response_token_ids: Sequence[int],
+        question: str,
+        condition_inputs: ConditionInputs,
+        conditions: Sequence[Condition],
+        response_text: str | None = None,
+        top_k: int = 32,
+    ) -> dict[Condition, TeacherTopK]:
+        """Teacher-force score the same response under student-side conditions."""
+
+        del response_text
+        import torch
+
+        outputs: dict[Condition, TeacherTopK] = {}
+        response_ids = tuple(int(item) for item in response_token_ids)
+        response_tensor_cpu = torch.tensor([response_ids], dtype=torch.long)
+        for condition in conditions:
+            rendered = render_teacher_prompt(condition, question, condition_inputs)
+            images = None
+            if rendered.image_paths:
+                images = [self._image_cls.open(rendered.image_paths[0]).convert("RGB")]
+            prompt = self.processor.apply_chat_template(
+                list(rendered.messages),
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+            proc = self.processor(text=[prompt], images=images, return_tensors="pt")
+            prompt_ids = proc["input_ids"]
+            prompt_len = int(prompt_ids.shape[1])
+            response_tensor = response_tensor_cpu.to(dtype=prompt_ids.dtype)
+            full_ids = torch.cat([prompt_ids, response_tensor], dim=1).to(self.model.device)
+            model_inputs: dict[str, torch.Tensor] = {}
+            for key, value in proc.items():
+                if key in {"input_ids", "attention_mask"}:
+                    continue
+                model_inputs[key] = value.to(self.model.device)
+            model_inputs["input_ids"] = full_ids
+            model_inputs["attention_mask"] = torch.ones_like(full_ids)
+            with torch.no_grad():
+                logits = self.model(**model_inputs).logits[:, prompt_len - 1 : prompt_len - 1 + len(response_ids), :]
+                log_probs = torch.log_softmax(logits.float(), dim=-1)
+                values, indices = torch.topk(log_probs, k=min(int(top_k), log_probs.shape[-1] - 1), dim=-1)
+                tail_mass = (1.0 - values.exp().sum(dim=-1)).clamp_min(torch.finfo(torch.float32).tiny)
+                entropy = -(log_probs.exp() * log_probs).sum(dim=-1)
+            outputs[Condition(condition)] = TeacherTopK(
+                token_ids=indices.cpu(),
+                log_probs=values.cpu(),
+                tail_log_prob=tail_mass.log().cpu(),
+                entropy=entropy.cpu(),
+            )
+        return outputs
 
 
 def run_student_rollout_signal_audit(

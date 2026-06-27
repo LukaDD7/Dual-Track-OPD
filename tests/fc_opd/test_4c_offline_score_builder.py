@@ -194,6 +194,11 @@ def test_6c_builder_writes_expanded_condition_schema(tmp_path):
                 degraded_dir=str(tmp_path / "degraded_6c"),
                 condition_set="6c-solve",
                 rollout_response_format="fc_opd_structured_v2",
+                enable_student_condition_scoring=True,
+                student_deficit_gate=True,
+                outcome_gate="geometry3k_verifier",
+                routing_mode="student_deficit_chunk_gated",
+                grouped_loss_schema="capability_chunk_v1",
             ),
             rollout_generator=FixedFakeRolloutGenerator(tokenizer),
             teacher_client=client,
@@ -209,11 +214,24 @@ def test_6c_builder_writes_expanded_condition_schema(tmp_path):
     assert result.summary["visual_detail_delta_invalid_count"] == 0
     assert result.summary["validation_valid"] is True
     assert result.summary["validation_error_count"] == 0
+    assert result.summary["student_condition_score_success_rate"]["task_solve"] == 1.0
+    assert result.summary["outcome_counts"]["wrong_format_valid"] == 1
+    assert result.summary["grouped_loss_ready"] is True
     assert len(result.rows) == 1
     row = result.rows[0]
     assert row["conditions"] == expected
     assert set(row["condition_scores"]) == set(expected)
+    assert set(row["student_condition_scores"]) == set(expected)
+    assert row["verifier"]["format_valid"] is True
+    assert row["grouped_loss_plan"]["solve"] == ["solving"]
+    assert row["routing_mode"] == "student_deficit_chunk_gated"
     assert row["chunk_spans"]["token_counts"]["diagram_inference"] > 0
+    assert set(row["capability_scores"]) == {
+        "visual_detail",
+        "evidence_selection",
+        "visual_text_inference",
+        "solving",
+    }
 
     validation = validate_four_condition_rows(output, condition_set="6c-solve")
     assert validation["valid"], validation["errors"]

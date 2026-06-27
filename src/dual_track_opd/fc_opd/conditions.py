@@ -22,6 +22,49 @@ class Condition(str, Enum):
     FACT = "fact"
 
 
+CONDITION_SETS: dict[str, tuple[str, ...]] = {
+    "4c-legacy": ("full", "degraded", "free", "task"),
+    "4c-clean": ("full", "degraded", "free", "task_visible"),
+    "5c-infer": ("full", "degraded", "free", "task_visible", "task_infer"),
+    "6c-solve": ("full", "degraded", "free", "task_visible", "task_infer", "task_solve"),
+}
+
+CAPABILITY_CONTRASTS: dict[str, tuple[Condition, Condition]] = {
+    "visual_detail": (Condition.FULL, Condition.DEGRADED),
+    "evidence_selection": (Condition.TASK_VISIBLE, Condition.FREE),
+    "visual_text_inference": (Condition.TASK_INFER, Condition.TASK_VISIBLE),
+    "solving": (Condition.TASK_SOLVE, Condition.TASK_INFER),
+}
+
+CHUNK_CAPABILITY_COMPATIBILITY: dict[str, dict[str, float]] = {
+    "visible_evidence": {
+        "visual_detail": 1.0,
+        "evidence_selection": 1.0,
+        "visual_text_inference": 0.25,
+        "solving": 0.0,
+    },
+    "diagram_inference": {
+        "visual_detail": 0.25,
+        "evidence_selection": 0.25,
+        "visual_text_inference": 1.0,
+        "solving": 0.25,
+    },
+    "reasoning": {
+        "visual_detail": 0.0,
+        "evidence_selection": 0.25,
+        "visual_text_inference": 0.75,
+        "solving": 1.0,
+    },
+    "answer": {
+        "visual_detail": 0.0,
+        "evidence_selection": 0.0,
+        "visual_text_inference": 0.25,
+        "solving": 1.0,
+    },
+}
+CHUNK_CAPABILITY_COMPATIBILITY["visual_evidence"] = CHUNK_CAPABILITY_COMPATIBILITY["visible_evidence"]
+
+
 @dataclass(frozen=True)
 class ImageInput:
     path: str
@@ -62,12 +105,18 @@ class ConditionInputs:
             sigma = transform.get("sigma")
             if not isinstance(sigma, int | float) or sigma <= 0:
                 raise ValueError("gaussian_blur sigma must be positive")
-        elif transform_type == "lowres_nearest":
+        elif transform_type in {"lowres_nearest", "lowres_bilinear_nearest"}:
             scale = transform.get("scale")
             if not isinstance(scale, int | float) or not 0 < float(scale) < 1:
-                raise ValueError("lowres_nearest scale must be in (0, 1)")
+                raise ValueError(f"{transform_type} scale must be in (0, 1)")
+        elif transform_type == "jpeg":
+            quality = transform.get("quality")
+            if not isinstance(quality, int) or not 1 <= quality <= 100:
+                raise ValueError("jpeg quality must be an integer in [1, 100]")
+        elif transform_type == "blank_control":
+            pass
         else:
-            raise ValueError("degraded image transform must be gaussian_blur or lowres_nearest")
+            raise ValueError("unsupported degraded image transform; expected gaussian_blur-compatible degraded transform")
         _validate_verified_facts(self.verified_facts, self.verified_facts_source)
         if require_paths:
             for path in (self.full_image.path, self.degraded_image.path):
@@ -171,12 +220,18 @@ def build_condition_inputs(
         sigma = transform.get("sigma")
         if not isinstance(sigma, int | float) or sigma <= 0:
             raise ValueError("gaussian_blur sigma must be positive")
-    elif transform.get("type") == "lowres_nearest":
+    elif transform.get("type") in {"lowres_nearest", "lowres_bilinear_nearest"}:
         scale = transform.get("scale")
         if not isinstance(scale, int | float) or not 0 < float(scale) < 1:
-            raise ValueError("lowres_nearest scale must be in (0, 1)")
+            raise ValueError(f"{transform.get('type')} scale must be in (0, 1)")
+    elif transform.get("type") == "jpeg":
+        quality = transform.get("quality")
+        if not isinstance(quality, int) or not 1 <= quality <= 100:
+            raise ValueError("jpeg quality must be an integer in [1, 100]")
+    elif transform.get("type") == "blank_control":
+        pass
     else:
-        raise ValueError("degraded image transform must be gaussian_blur or lowres_nearest")
+        raise ValueError("unsupported degraded image transform; expected gaussian_blur-compatible degraded transform")
 
     if require_paths:
         for field, path in (("full_image.path", full_path), ("degraded_image.path", degraded_path)):

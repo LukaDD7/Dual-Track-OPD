@@ -7,6 +7,11 @@ cd "${REPO_ROOT}"
 
 : "${SCORES:?set SCORES to Geometry3K 4C offline-score JSONL}"
 
+EXTRA_ARGS=()
+if [[ "${FC_OPD_EXPECT_CAPABILITY_SCORES:-0}" == "1" ]]; then
+  EXTRA_ARGS+=(--expect-capability-scores)
+fi
+
 python "${REPO_ROOT}/scripts/hpc/run_fc_opd_real_student_min_train_smoke.py" \
   --scores "${SCORES}" \
   --model-path "${FC_OPD_STUDENT_MODEL:-${DTOPD_MODEL_ROOT}/Qwen3-VL-4B-Instruct}" \
@@ -17,4 +22,5 @@ python "${REPO_ROOT}/scripts/hpc/run_fc_opd_real_student_min_train_smoke.py" \
   --lr "${FC_OPD_REAL_STUDENT_LR:-1e-4}" \
   --device "${FC_OPD_STUDENT_DEVICE:-cuda}" \
   --dtype "${FC_OPD_STUDENT_DTYPE:-bfloat16}" \
-  --freeze-all-but-lm-head
+  --freeze-all-but-lm-head \
+  "${EXTRA_ARGS[@]}"

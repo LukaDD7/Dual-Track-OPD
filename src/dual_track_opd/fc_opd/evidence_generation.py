@@ -7,6 +7,8 @@ import hashlib
 import json
 import os
 import random
+import re
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping, Protocol, Sequence
@@ -145,7 +147,8 @@ class EvidenceGenerationConfig:
     max_new_tokens: int = 256
     resume: bool = False
     skip_existing: bool = False
-    strict_leakage: bool = True
+    strict_leakage: bool = False
+    strict_condition_validation: bool = False
     condition_set: str = "4c-clean"
     include_prompts_in_output: bool = False
     task_evidence_mode: str = "visible"
@@ -269,6 +272,16 @@ def build_evidence_row(
         task_solve_evidence=task_solve_evidence,
         answer=record.get("answer") or record.get("gold") or record.get("answer_metadata"),
     )
+    task_infer_classification = classify_task_infer_evidence(task_infer_evidence or "", choices)
+    condition_validation_warnings = []
+    if task_infer_classification["class"] == "solve_like":
+        condition_validation_warnings.append("task_infer_solve_like")
+        if config.strict_condition_validation:
+            errors.append("task_infer_solve_like")
+    elif task_infer_classification["class"] == "unusable":
+        condition_validation_warnings.append("task_infer_unusable")
+        if config.strict_condition_validation:
+            errors.append("task_infer_unusable")
     row = {
         "sample_uid": str(record["sample_uid"]),
         "source_dataset": config.source_dataset,
@@ -290,6 +303,11 @@ def build_evidence_row(
         "task_visible_evidence": task_visible_evidence,
         "task_infer_evidence": task_infer_evidence,
         "task_solve_evidence": task_solve_evidence,
+        "task_infer_class": task_infer_classification["class"],
+        "task_infer_solve_like": task_infer_classification["class"] == "solve_like",
+        "task_infer_classification_flags": task_infer_classification["flags"],
+        "condition_validation_warnings": condition_validation_warnings,
+        "strict_condition_validation": bool(config.strict_condition_validation),
         "free_caption_prompt_hash": prompt_hashes["free_caption_prompt"],
         "task_evidence_prompt_hash": prompt_hashes["task_visible_prompt"],
         "task_visible_prompt_hash": prompt_hashes["task_visible_prompt"],
@@ -393,6 +411,56 @@ def contamination_flags(
     }
 
 
+def classify_task_infer_evidence(text: str | None, choices: Sequence[str] = ()) -> dict[str, Any]:
+    """Classify whether task_infer evidence stayed intermediate or solved."""
+
+    raw = (text or "").strip()
+    lower = raw.lower()
+    flags: list[str] = []
+    if not raw:
+        return {"class": "unusable", "flags": ["empty"]}
+    if len(raw) < 20:
+        flags.append("too_short")
+    if re.fullmatch(r"\s*[A-Da-d]\s*(?:[\.\):;-]\s*)?(?:[-+]?\d+(?:\.\d+)?|\S{1,20})?\s*", raw):
+        flags.append("option_only")
+    if re.match(r"\s*[A-Da-d]\s*[\.\):;-]", raw):
+        flags.append("starts_with_option")
+    solution_phrases = (
+        "answer is",
+        "therefore the answer",
+        "so the answer",
+        "choose",
+    )
+    if any(phrase in lower for phrase in solution_phrases):
+        flags.append("solution_language")
+    normalized_raw = _normalize(raw)
+    for choice in choices:
+        choice_text = str(choice).strip()
+        if not choice_text:
+            continue
+        normalized_choice = _normalize(choice_text)
+        if len(normalized_choice) >= 2 and normalized_choice in normalized_raw:
+            flags.append("choice_phrase_emitted")
+            break
+    final_markers = (
+        "therefore",
+        "hence",
+        "final answer",
+        "the correct option",
+        "we get",
+        "is equal to",
+    )
+    if any(marker in lower for marker in final_markers) and (
+        "solution_language" in flags or "choice_phrase_emitted" in flags
+    ):
+        flags.append("final_solution_like")
+    if "option_only" in flags or "starts_with_option" in flags or "solution_language" in flags or "final_solution_like" in flags:
+        return {"class": "solve_like", "flags": sorted(set(flags))}
+    if "too_short" in flags:
+        return {"class": "unusable", "flags": sorted(set(flags))}
+    return {"class": "clean_infer", "flags": sorted(set(flags))}
+
+
 def validate_evidence_row(row: Mapping[str, Any]) -> list[str]:
     errors = []
     if row.get("no_gold_field_used") is not True:
@@ -409,8 +477,10 @@ def validate_evidence_row(row: Mapping[str, Any]) -> list[str]:
         errors.append("degraded_source_image_path")
     if row.get("final_solution_detected_in_task_visible"):
         errors.append("final_solution_detected_in_task_visible")
-    if row.get("final_solution_detected_in_task_infer"):
+    if row.get("final_solution_detected_in_task_infer") and row.get("strict_condition_validation"):
         errors.append("final_solution_detected_in_task_infer")
+    if row.get("task_infer_class") in {"solve_like", "unusable"} and row.get("strict_condition_validation"):
+        errors.append(f"task_infer_{row.get('task_infer_class')}")
     if row.get("errors"):
         errors.extend(str(item) for item in row["errors"])
     return errors
@@ -427,6 +497,7 @@ def summarize_evidence(
     degraded_source_image_count = sum(
         1 for row in rows if is_generated_degraded_image_path(str(row.get("image_path", "")))
     )
+    task_infer_class_counts = Counter(str(row.get("task_infer_class", "missing")) for row in rows)
     return {
         "source_dataset": config.source_dataset,
         "dataset_type": config.dataset_type,
@@ -436,6 +507,10 @@ def summarize_evidence(
         "conditions": list(CONDITION_SETS[config.condition_set]),
         "leakage_warning_rate": None if not rows else len(leakage_rows) / len(rows),
         "degraded_source_image_count": degraded_source_image_count,
+        "task_infer_clean_count": task_infer_class_counts.get("clean_infer", 0),
+        "task_infer_solve_like_count": task_infer_class_counts.get("solve_like", 0),
+        "task_infer_unusable_count": task_infer_class_counts.get("unusable", 0),
+        "task_infer_class_counts": dict(task_infer_class_counts),
         "validation_error_count": len(validation_errors),
         "validation_errors_top10": validation_errors[:10],
         "output_jsonl": str(config.output_jsonl),
@@ -572,6 +647,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--include-prompts-in-output", action="store_true")
     parser.add_argument("--task-evidence-mode", choices=("visible", "infer", "solve"), default="visible")
     parser.add_argument("--allow-degraded-source-images", action="store_true")
+    parser.add_argument("--strict-leakage", action="store_true")
+    parser.add_argument("--strict-condition-validation", action="store_true")
     parser.add_argument(
         "--dry-run-inspect",
         action="store_true",
@@ -624,6 +701,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             include_prompts_in_output=args.include_prompts_in_output,
             task_evidence_mode=args.task_evidence_mode,
             allow_degraded_source_images=args.allow_degraded_source_images,
+            strict_leakage=args.strict_leakage,
+            strict_condition_validation=args.strict_condition_validation,
         )
     )
     print(json.dumps(result.summary, indent=2))

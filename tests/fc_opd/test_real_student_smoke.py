@@ -258,6 +258,37 @@ def test_response_logit_slice_rejects_out_of_range():
         response_logit_slice(full, prompt_length=3, num_response_tokens=5)
 
 
+def test_real_student_record_accepts_student_deficit_routing_with_fake_scores():
+    payload = _manual_payload(SIX_C_SOLVE_CONDITIONS)
+    payload["capability_scores"] = {
+        "solving": {
+            "positive": "task_solve",
+            "valid": True,
+            "final_token_weight": [0.0, 0.0, 1.0, 1.0, 1.0],
+        },
+        "visual_text_inference": {
+            "positive": "task_infer",
+            "valid": False,
+            "invalid_reason": "task_infer_solve_like",
+            "final_token_weight": [0.0] * 5,
+        },
+    }
+    provider = _provider_for([payload])
+
+    result = run_real_student_record(
+        payload,
+        provider,
+        router_config=SIX_C_CHUNK_GATED_ROUTER,
+        expected_conditions=tuple(),
+        routing_mode="student_deficit_chunk_gated",
+        require_decoded_match=True,
+    )
+
+    assert result.passed
+    assert result.consumed_capabilities == {"solving"}
+    assert result.capability_weight_sums["solving"] > 0
+
+
 def test_real_student_record_backward_reaches_fake_parameter(offline_payloads):
     provider = _provider_for(offline_payloads)
     result = run_real_student_record(offline_payloads[0], provider)

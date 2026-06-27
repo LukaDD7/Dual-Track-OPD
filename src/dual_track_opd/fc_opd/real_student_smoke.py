@@ -86,7 +86,9 @@ ROUTING_MODES = (
     "chunk_gated",
     "chunk_gated_primary",
     "chunk_gated_contrastive",
+    "student_deficit_chunk_gated",
 )
+STUDENT_DEFICIT_ROUTER = RouterConfig(mode="student_deficit_chunk_gated", invalid_format_condition=Condition.FULL)
 
 
 # ---------------------------------------------------------------------------
@@ -442,6 +444,9 @@ class RealStudentResult:
     condition_token_weight_nonzero_counts: dict[str, int] = field(default_factory=dict)
     chunk_condition_weight_sums: dict[str, dict[str, float]] = field(default_factory=dict)
     metrics: dict[str, float] = field(default_factory=dict)
+    capability_weight_sums: dict[str, float] = field(default_factory=dict)
+    consumed_capabilities: set[str] = field(default_factory=set)
+    unused_capabilities: set[str] = field(default_factory=set)
 
     @property
     def unused_conditions(self) -> set[Condition]:
@@ -469,6 +474,10 @@ class RealStudentResult:
             and self.grad_is_finite
             and self.grad_param_norm > 0.0
             and self.expected_conditions_consumed
+            and (
+                self.routing_mode != "student_deficit_chunk_gated"
+                or bool(self.consumed_capabilities)
+            )
         )
 
 
@@ -532,6 +541,30 @@ def _routing_diagnostics(
     }
 
 
+def _capability_diagnostics(record: Mapping[str, Any]) -> dict[str, Any]:
+    scores = record.get("capability_scores", {})
+    if not isinstance(scores, Mapping):
+        return {"capability_weight_sums": {}, "consumed_capabilities": set(), "unused_capabilities": set()}
+    sums: dict[str, float] = {}
+    consumed: set[str] = set()
+    unused: set[str] = set()
+    for capability, block in scores.items():
+        if not isinstance(block, Mapping):
+            continue
+        weights = block.get("final_token_weight", [])
+        total = sum(float(value) for value in weights) if isinstance(weights, Sequence) else 0.0
+        sums[str(capability)] = total
+        if total > 0:
+            consumed.add(str(capability))
+        else:
+            unused.add(str(capability))
+    return {
+        "capability_weight_sums": sums,
+        "consumed_capabilities": consumed,
+        "unused_capabilities": unused,
+    }
+
+
 def _condition_weights_for_record(
     *,
     routing_mode: str,
@@ -541,6 +574,7 @@ def _condition_weights_for_record(
     response_mask: torch.Tensor,
     format_valid: torch.Tensor,
     expected_conditions: Sequence[Condition],
+    capability_scores: Mapping[str, Any] | None = None,
 ) -> tuple[dict[Condition, torch.Tensor], bool]:
     if routing_mode == "uniform_all_conditions":
         return _uniform_condition_weights(
@@ -580,8 +614,10 @@ def _condition_weights_for_record(
             max_conditions_per_token=max(router_config.max_conditions_per_token, 4),
             normalize_weights_per_token=router_config.normalize_weights_per_token,
         )
+    elif routing_mode == "student_deficit_chunk_gated":
+        effective_router = STUDENT_DEFICIT_ROUTER
     return route_condition_weights(
-        signals={},
+        signals={"capability_scores": capability_scores or {}},
         chunk_masks=chunk_masks,
         router_config=effective_router,
         response_mask=response_mask,
@@ -644,6 +680,7 @@ def run_real_student_record(
         response_mask=response_mask,
         format_valid=format_valid,
         expected_conditions=expected_conditions,
+        capability_scores=record.get("capability_scores") if isinstance(record.get("capability_scores"), Mapping) else None,
     )
     loss, metrics = compute_fc_opd_loss(
         logits,
@@ -676,6 +713,7 @@ def run_real_student_record(
         chunk_masks=chunk_masks,
         teacher_scores=teacher_scores,
     )
+    capability_diagnostics = _capability_diagnostics(record)
 
     num_tensors, num_elements, trainable_names = _trainable_summary(provider)
     tied_groups = detect_tied_parameter_groups(provider)
@@ -713,6 +751,9 @@ def run_real_student_record(
         condition_token_weight_nonzero_counts=diagnostics["condition_token_weight_nonzero_counts"],
         chunk_condition_weight_sums=diagnostics["chunk_condition_weight_sums"],
         metrics={key: float(value.item()) for key, value in metrics.items()},
+        capability_weight_sums=capability_diagnostics["capability_weight_sums"],
+        consumed_capabilities=capability_diagnostics["consumed_capabilities"],
+        unused_capabilities=capability_diagnostics["unused_capabilities"],
     )
 
 
@@ -739,9 +780,12 @@ def run_real_student_smoke(
     routing_mode: str = "chunk",
     require_decoded_match: bool = True,
     device: torch.device | str = "cpu",
+    expect_capability_scores: bool = False,
 ) -> RealStudentSmokeReport:
     report = RealStudentSmokeReport()
     for record in records:
+        if expect_capability_scores and not isinstance(record.get("capability_scores"), Mapping):
+            raise ValueError(f"{record.get('sample_uid', 'unknown')}: missing capability_scores")
         report.results.append(
             run_real_student_record(
                 record,
@@ -771,6 +815,7 @@ class RealMinTrainStep:
     grad_is_finite: bool
     param_delta_norm: float
     consumed_conditions: set[Condition]
+    consumed_capabilities: set[str] = field(default_factory=set)
 
 
 @dataclass
@@ -797,6 +842,9 @@ class RealMinTrainReport:
     condition_token_weight_sums: dict[str, float] = field(default_factory=dict)
     condition_token_weight_nonzero_counts: dict[str, int] = field(default_factory=dict)
     chunk_condition_weight_sums: dict[str, dict[str, float]] = field(default_factory=dict)
+    capability_weight_sums: dict[str, float] = field(default_factory=dict)
+    consumed_capabilities: set[str] = field(default_factory=set)
+    unused_capabilities: set[str] = field(default_factory=set)
     steps: list[RealMinTrainStep] = field(default_factory=list)
 
     @property
@@ -845,6 +893,10 @@ class RealMinTrainReport:
             and self.all_grads_finite
             and self.every_step_updates_params
             and self.expected_conditions_consumed
+            and (
+                self.routing_mode != "student_deficit_chunk_gated"
+                or bool(self.consumed_capabilities)
+            )
         )
 
 
@@ -886,6 +938,7 @@ def run_real_student_min_train(
     routing_mode: str = "chunk",
     require_decoded_match: bool = True,
     device: torch.device | str = "cpu",
+    expect_capability_scores: bool = False,
 ) -> RealMinTrainReport:
     """Run a few real optimizer steps and verify trainable parameters change.
 
@@ -899,6 +952,10 @@ def run_real_student_min_train(
         raise ValueError("num_steps must be positive")
     if not records:
         raise ValueError("no offline-score records were provided")
+    if expect_capability_scores:
+        missing = [str(record.get("sample_uid", "unknown")) for record in records if not isinstance(record.get("capability_scores"), Mapping)]
+        if missing:
+            raise ValueError(f"missing capability_scores in records: {missing[:5]}")
     loss_config = loss_config or FCOPDLossConfig()
 
     tokenizer_hash_matches = True
@@ -947,6 +1004,7 @@ def run_real_student_min_train(
         optimizer.zero_grad(set_to_none=True)
         total_loss = torch.zeros((), dtype=torch.float32)
         consumed: set[Condition] = set()
+        consumed_capabilities: set[str] = set()
 
         for prep in prepared:
             output = provider.forward(prep.record)
@@ -979,6 +1037,7 @@ def run_real_student_min_train(
                 response_mask=prep.response_mask,
                 format_valid=prep.format_valid,
                 expected_conditions=expected_conditions,
+                capability_scores=prep.record.get("capability_scores") if isinstance(prep.record.get("capability_scores"), Mapping) else None,
             )
             if step == 0 and routing_mode == "chunk_gated":
                 if fallback_bad_chunk:
@@ -1025,6 +1084,15 @@ def run_real_student_min_train(
                     chunk_report = report.chunk_condition_weight_sums.setdefault(chunk_name, {})
                     for condition, value in condition_values.items():
                         chunk_report[condition] = chunk_report.get(condition, 0.0) + float(value)
+                capability_diagnostics = _capability_diagnostics(prep.record)
+                for capability, value in capability_diagnostics["capability_weight_sums"].items():
+                    report.capability_weight_sums[capability] = (
+                        report.capability_weight_sums.get(capability, 0.0) + float(value)
+                    )
+                report.consumed_capabilities |= capability_diagnostics["consumed_capabilities"]
+                report.unused_capabilities |= capability_diagnostics["unused_capabilities"]
+            capability_diagnostics = _capability_diagnostics(prep.record)
+            consumed_capabilities |= capability_diagnostics["consumed_capabilities"]
 
         loss_is_finite = bool(torch.isfinite(total_loss).all().item())
         total_loss.backward()
@@ -1048,6 +1116,7 @@ def run_real_student_min_train(
                 grad_is_finite=grad_is_finite,
                 param_delta_norm=float(delta.item()),
                 consumed_conditions=consumed,
+                consumed_capabilities=consumed_capabilities,
             )
         )
 
@@ -1092,6 +1161,9 @@ def _result_to_json(result: RealStudentResult) -> dict[str, Any]:
         "condition_token_weight_sums": result.condition_token_weight_sums,
         "condition_token_weight_nonzero_counts": result.condition_token_weight_nonzero_counts,
         "chunk_condition_weight_sums": result.chunk_condition_weight_sums,
+        "capability_weight_sums": result.capability_weight_sums,
+        "consumed_capabilities": sorted(result.consumed_capabilities),
+        "unused_capabilities": sorted(result.unused_capabilities),
         "four_conditions_consumed": result.four_conditions_consumed,
         "expected_conditions_consumed": result.expected_conditions_consumed,
         "passed": result.passed,
@@ -1116,6 +1188,8 @@ def _expected_conditions_for_routing(
     routing_mode: str,
     router_config: RouterConfig,
 ) -> tuple[Condition, ...]:
+    if routing_mode == "student_deficit_chunk_gated":
+        return tuple()
     if routing_mode not in {"chunk_gated", "chunk_gated_primary", "chunk_gated_contrastive"}:
         return score_conditions
     available = set(score_conditions)
@@ -1160,6 +1234,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--dtype", default="bfloat16", choices=tuple(_DTYPES))
     parser.add_argument("--condition-set", choices=("4c", "4c-clean", "6c-solve", "2c"), default="4c")
     parser.add_argument("--routing-mode", choices=ROUTING_MODES, default="chunk")
+    parser.add_argument("--expect-capability-scores", action="store_true")
     parser.add_argument("--freeze-all-but-lm-head", action="store_true")
     parser.add_argument("--max-prompt-length", type=int, default=None)
     parser.add_argument("--max-response-tokens", type=int, default=None)
@@ -1201,6 +1276,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         routing_mode=args.routing_mode,
         require_decoded_match=not args.allow_retokenize_mismatch,
         device="cpu",
+        expect_capability_scores=args.expect_capability_scores,
     )
 
     for result in report.results:
@@ -1241,6 +1317,7 @@ def min_train_main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--dtype", default="bfloat16", choices=tuple(_DTYPES))
     parser.add_argument("--condition-set", choices=("4c", "4c-clean", "6c-solve", "2c"), default="4c")
     parser.add_argument("--routing-mode", choices=ROUTING_MODES, default="chunk")
+    parser.add_argument("--expect-capability-scores", action="store_true")
     parser.add_argument(
         "--freeze-all-but-lm-head",
         action=argparse.BooleanOptionalAction,
@@ -1288,6 +1365,7 @@ def min_train_main(argv: Sequence[str] | None = None) -> int:
         expected_conditions=expected_conditions,
         routing_mode=args.routing_mode,
         require_decoded_match=not args.allow_retokenize_mismatch,
+        expect_capability_scores=args.expect_capability_scores,
     )
 
     for step in report.steps:
@@ -1299,6 +1377,7 @@ def min_train_main(argv: Sequence[str] | None = None) -> int:
                     "grad_norm": step.grad_norm,
                     "param_delta_norm": step.param_delta_norm,
                     "consumed_conditions": sorted(c.value for c in step.consumed_conditions),
+                    "consumed_capabilities": sorted(step.consumed_capabilities),
                 }
             )
         )
@@ -1331,6 +1410,10 @@ def min_train_main(argv: Sequence[str] | None = None) -> int:
         "condition_token_weight_sums": report.condition_token_weight_sums,
         "condition_token_weight_nonzero_counts": report.condition_token_weight_nonzero_counts,
         "chunk_condition_weight_sums": report.chunk_condition_weight_sums,
+        "capability_weight_sums": report.capability_weight_sums,
+        "consumed_capabilities": sorted(report.consumed_capabilities),
+        "unused_capabilities": sorted(report.unused_capabilities),
+        "grouped_loss_values": {},
         "skipped_bad_chunk_rows": report.skipped_bad_chunk_rows,
         "fallback_bad_chunk_rows": report.fallback_bad_chunk_rows,
         "chunk_gated_valid_rows": report.chunk_gated_valid_rows,
