@@ -65,6 +65,34 @@ class SpyEvidenceGenerator:
         return "Visible angle labels and line relations only."
 
 
+class RetryEvidenceGenerator:
+    model_id = "retry"
+
+    def __init__(self):
+        self.task_infer_calls = 0
+        self.logits_processors_seen = []
+
+    @property
+    def tokenizer(self):
+        from dual_track_opd.fc_opd.offline_scoring import ByteTokenizer
+
+        return ByteTokenizer()
+
+    def generate_free_caption(self, *, image_path, prompt, seed):
+        del image_path, prompt, seed
+        return "Visible diagram evidence only."
+
+    def generate_task_evidence(self, *, image_path, question, choices, prompt, seed, logits_processors=None):
+        del image_path, question, choices, seed
+        if "intermediate geometric facts" in prompt:
+            self.task_infer_calls += 1
+            self.logits_processors_seen.append(logits_processors)
+            if self.task_infer_calls == 1:
+                return "B. 60"
+            return "Using perpendicular bisector, X is midpoint of CD, so CX is constrained by CD."
+        return "Visible angle labels and line relations only."
+
+
 def test_evidence_generation_writes_auditable_rows_without_gold_use(tmp_path):
     image = tmp_path / "diagram.png"
     image.write_bytes(b"placeholder")
@@ -150,6 +178,50 @@ def test_prompt_debug_fields_are_hidden_by_default(tmp_path):
     assert row["condition_evidence"]["task_visible"]
     assert row["condition_evidence"]["task_infer"]
     assert row["condition_evidence"]["task_solve"]
+
+
+def test_task_infer_retry_rejects_solve_like_then_accepts_clean(tmp_path):
+    image = tmp_path / "diagram.png"
+    image.write_bytes(b"placeholder")
+    dataset = tmp_path / "geometry.json"
+    dataset.write_text(
+        json.dumps(
+            [
+                {
+                    "id": "g1",
+                    "diagram_path": str(image),
+                    "question": "What is angle ABC?",
+                    "choices": ["30", "60"],
+                    "answer": "B",
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    generator = RetryEvidenceGenerator()
+
+    result = run_evidence_generation(
+        EvidenceGenerationConfig(
+            dataset=dataset,
+            dataset_type="geometry3k",
+            output_jsonl=tmp_path / "retry_evidence.jsonl",
+            summary_json=tmp_path / "retry_summary.json",
+            limit=1,
+            condition_set="6c-solve",
+            max_evidence_attempts=3,
+        ),
+        generator=generator,
+    )
+
+    row = result.rows[0]
+    assert generator.task_infer_calls == 2
+    assert row["task_infer_class"] == "clean_infer"
+    assert row["task_infer_retry_attempts"] == 2
+    assert row["task_infer_rejection_log"][0]["class"] == "solve_like"
+    assert row["task_infer_constrained_decoding_used"] is True
+    assert generator.logits_processors_seen[0]
+    assert result.summary["task_infer_retry_stats"]["total_retries"] == 1
+    assert result.summary["task_infer_retry_stats"]["attempt_distribution"]["2"] == 1
 
 
 def test_geometry3k_official_directory_evidence_generation_does_not_prompt_with_answer(tmp_path):

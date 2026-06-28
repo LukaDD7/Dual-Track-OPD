@@ -120,6 +120,7 @@ class FourConditionOfflineBuilderConfig:
     grouped_loss_schema: str = "none"
     allow_empty_output: bool = False
     debug_first_n: int = 0
+    max_rollout_attempts: int = 3
 
     def __post_init__(self) -> None:
         if self.dataset_type != "geometry3k":
@@ -136,6 +137,8 @@ class FourConditionOfflineBuilderConfig:
             raise ValueError("max_capabilities_per_token must be at least 1")
         if self.debug_first_n < 0:
             raise ValueError("debug_first_n must be non-negative")
+        if self.max_rollout_attempts <= 0:
+            raise ValueError("max_rollout_attempts must be positive")
 
 
 @dataclass
@@ -158,6 +161,9 @@ class OfflineBuilderDiagnostics:
     student_score_exception_count: int = 0
     verifier_exception_count: int = 0
     row_write_count: int = 0
+    rollout_exhausted_count: int = 0
+    rollout_retry_count: int = 0
+    evidence_exhausted_records: int = 0
     skipped_records_by_reason: Counter[str] = field(default_factory=Counter)
     skipped_examples_top20: list[dict[str, str]] = field(default_factory=list)
 
@@ -187,6 +193,9 @@ class OfflineBuilderDiagnostics:
             "student_score_exception_count": self.student_score_exception_count,
             "verifier_exception_count": self.verifier_exception_count,
             "row_write_count": self.row_write_count,
+            "rollout_exhausted_count": self.rollout_exhausted_count,
+            "rollout_retry_count": self.rollout_retry_count,
+            "evidence_exhausted_records": self.evidence_exhausted_records,
             "skipped_records_by_reason": dict(self.skipped_records_by_reason),
             "skipped_examples_top20": list(self.skipped_examples_top20),
         }
@@ -233,6 +242,8 @@ def run_four_condition_offline_builder(
                 continue
             diagnostics.evidence_rows_matched += 1
             _debug(config, record_index, "evidence matched=true")
+            if evidence_row.get("task_infer_exhausted_retries"):
+                diagnostics.evidence_exhausted_records += 1
             errors = validate_evidence_row(evidence_row)
             if config.strict_condition_validation and evidence_row.get("task_infer_class") in {"solve_like", "unusable"}:
                 errors.append(f"task_infer_{evidence_row.get('task_infer_class')}")
@@ -326,35 +337,79 @@ def _build_rows(
     rows: list[dict[str, Any]] = []
     conditions = CONDITION_SETS[config.condition_set]
     for rollout_id in range(config.rollouts_per_prompt):
-        seed = rollout_seed(base_seed=config.seed, source_index=source_index, rollout_id=rollout_id)
         rollout_uid = f"{record['sample_uid']}:rollout-{rollout_id}"
-        diagnostics.rollout_attempt_count += 1
-        try:
-            response_text = rollout_generator.generate(question=question, image_path=image_path, prompt_text=prompt.text, seed=seed)
-        except Exception as exc:  # noqa: BLE001
-            diagnostics.rollout_exception_count += 1
+        response_text = ""
+        token_ids: tuple[int, ...] = ()
+        chunk_masks = None
+        seed = rollout_seed(base_seed=config.seed, source_index=source_index, rollout_id=rollout_id)
+        rollout_fallback = False
+        for attempt in range(config.max_rollout_attempts):
+            attempt_seed = seed + attempt * 100_000
+            diagnostics.rollout_attempt_count += 1
+            if attempt > 0:
+                diagnostics.rollout_retry_count += 1
+            try:
+                candidate_text = rollout_generator.generate(
+                    question=question,
+                    image_path=image_path,
+                    prompt_text=prompt.text,
+                    seed=attempt_seed,
+                )
+            except Exception as exc:  # noqa: BLE001
+                diagnostics.rollout_exception_count += 1
+                diagnostics.add_skip(
+                    sample_uid=rollout_uid,
+                    stage="student_rollout",
+                    reason=f"attempt={attempt + 1}: {_exception_reason(exc)}",
+                )
+                _debug(config, record_index, f"rollout exception rollout_id={rollout_id} attempt={attempt + 1} reason={_exception_reason(exc)}")
+                continue
+            _debug(config, record_index, f"rollout text length={len(candidate_text)} rollout_id={rollout_id} attempt={attempt + 1}")
+            if not candidate_text.strip():
+                diagnostics.rollout_empty_count += 1
+                diagnostics.add_skip(
+                    sample_uid=rollout_uid,
+                    stage="student_rollout",
+                    reason=f"attempt={attempt + 1}: empty rollout text",
+                )
+                continue
+            candidate_token_ids = tuple(int(item) for item in rollout_generator.tokenizer.encode(candidate_text))
+            candidate_chunks = parse_response_chunks(
+                candidate_token_ids,
+                candidate_text,
+                rollout_generator.tokenizer,
+                fallback="all_reasoning",
+            )
+            if not candidate_chunks.format_valid:
+                diagnostics.chunk_parse_failure_count += 1
+                diagnostics.add_skip(
+                    sample_uid=rollout_uid,
+                    stage="chunk_parse",
+                    reason=f"attempt={attempt + 1}: {'; '.join(candidate_chunks.errors[:3])}",
+                )
+                _debug(config, record_index, f"chunk parse valid=false rollout_id={rollout_id} attempt={attempt + 1}")
+                continue
+            response_text = candidate_text
+            token_ids = candidate_token_ids
+            chunk_masks = candidate_chunks
+            seed = attempt_seed
+            diagnostics.rollout_success_count += 1
+            _debug(config, record_index, f"chunk parse valid=true rollout_id={rollout_id} attempt={attempt + 1}")
+            break
+        if chunk_masks is None:
+            diagnostics.rollout_exhausted_count += 1
             diagnostics.add_skip(
                 sample_uid=rollout_uid,
-                stage="student_rollout",
-                reason=_exception_reason(exc),
+                stage="rollout_exhausted",
+                reason=f"exhausted {config.max_rollout_attempts} attempts; writing malformed fallback row",
             )
-            _debug(config, record_index, f"rollout exception rollout_id={rollout_id} reason={_exception_reason(exc)}")
-            continue
-        _debug(config, record_index, f"rollout text length={len(response_text)} rollout_id={rollout_id}")
-        if not response_text.strip():
-            diagnostics.rollout_empty_count += 1
-            diagnostics.add_skip(
-                sample_uid=rollout_uid,
-                stage="student_rollout",
-                reason="empty rollout text",
-            )
-            continue
-        diagnostics.rollout_success_count += 1
-        token_ids = tuple(int(item) for item in rollout_generator.tokenizer.encode(response_text))
-        chunk_masks = parse_response_chunks(token_ids, response_text, rollout_generator.tokenizer, fallback="all_reasoning")
-        if not chunk_masks.format_valid:
-            diagnostics.chunk_parse_failure_count += 1
-        _debug(config, record_index, f"chunk parse valid={chunk_masks.format_valid} rollout_id={rollout_id}")
+            response_text = _fallback_malformed_response(rollout_uid)
+            token_ids = tuple(int(item) for item in rollout_generator.tokenizer.encode(response_text))
+            chunk_masks = parse_response_chunks(token_ids, response_text, rollout_generator.tokenizer, fallback="all_reasoning")
+            if not chunk_masks.format_valid:
+                diagnostics.chunk_parse_failure_count += 1
+            rollout_fallback = True
+            _debug(config, record_index, f"rollout exhausted; fallback row=true rollout_id={rollout_id}")
         try:
             teacher_scores = score_teacher_conditions(
                 token_ids,
@@ -493,7 +548,9 @@ def _build_rows(
             "task_infer_solve_like": bool(evidence_row.get("task_infer_solve_like")),
             "condition_validation_warnings": list(evidence_row.get("condition_validation_warnings", [])),
             "evidence_cache_uid": evidence_row["sample_uid"],
-            "response_source": "student_rollout",
+            "response_source": "fallback_malformed_rollout" if rollout_fallback else "student_rollout",
+            "rollout_fallback_malformed": rollout_fallback,
+            "rollout_attempts": config.max_rollout_attempts if rollout_fallback else max(1, (seed - rollout_seed(base_seed=config.seed, source_index=source_index, rollout_id=rollout_id)) // 100_000 + 1),
             "response_text": response_text,
             "response_token_ids": list(token_ids),
             "response_token_count": len(token_ids),
@@ -610,6 +667,16 @@ def _score_student_conditions(
             top_k=top_k,
         )
     return {}
+
+
+def _fallback_malformed_response(rollout_uid: str) -> str:
+    del rollout_uid
+    return (
+        "<visible_evidence>\n"
+        "Fallback malformed rollout emitted after repeated empty or invalid student rollouts.\n"
+        "</visible_evidence>\n"
+        "No final answer block is available.\n"
+    )
 
 
 def verifier_outcome_class(verifier: Mapping[str, Any] | None) -> str:
@@ -1287,6 +1354,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--grouped-loss-schema", choices=("none", "capability_chunk_v1"), default="none")
     parser.add_argument("--allow-empty-output", action="store_true")
     parser.add_argument("--debug-first-n", type=int, default=0)
+    parser.add_argument("--max-rollout-attempts", type=int, default=3)
     parser.add_argument("--validate-only", action="store_true")
     return parser
 
@@ -1333,6 +1401,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             grouped_loss_schema=args.grouped_loss_schema,
             allow_empty_output=args.allow_empty_output,
             debug_first_n=args.debug_first_n,
+            max_rollout_attempts=args.max_rollout_attempts,
         )
     )
     validation = validate_four_condition_rows(args.output_jsonl, condition_set=args.condition_set)

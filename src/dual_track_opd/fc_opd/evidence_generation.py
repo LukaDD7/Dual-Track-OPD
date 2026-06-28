@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping, Protocol, Sequence
 
+from .constrained_decode import ForbidAnswerTokensLogitsProcessor, build_forbidden_token_ids
 from .dataset_adapters import load_normalized_records
 from .geometry3k_adapter import (
     inspect_geometry3k_dataset,
@@ -106,6 +107,7 @@ class EvidenceGenerator(Protocol):
         choices: Sequence[str],
         prompt: str,
         seed: int,
+        logits_processors: Sequence[object] | None = None,
     ) -> str: ...
 
 
@@ -127,8 +129,9 @@ class TemplateEvidenceGenerator:
         choices: Sequence[str],
         prompt: str,
         seed: int,
+        logits_processors: Sequence[object] | None = None,
     ) -> str:
-        del seed
+        del seed, logits_processors
         basis = question.splitlines()[0][:80]
         if "Solve the problem fully" in prompt or "Solve the problem" in prompt:
             return f"Teacher-inferred solution should be generated from {Path(image_path).name}: {basis}"
@@ -161,12 +164,19 @@ class EvidenceGenerationConfig:
     include_prompts_in_output: bool = False
     task_evidence_mode: str = "visible"
     allow_degraded_source_images: bool = False
+    max_evidence_attempts: int = 3
+    enable_constrained_decoding: bool = True
+    constrained_decode_condition: str = "task_infer"
 
     def __post_init__(self) -> None:
         if self.condition_set not in CONDITION_SETS:
             raise ValueError(f"condition_set must be one of {sorted(CONDITION_SETS)}")
         if self.task_evidence_mode not in {"visible", "infer", "solve"}:
             raise ValueError("task_evidence_mode must be visible, infer, or solve")
+        if self.max_evidence_attempts <= 0:
+            raise ValueError("max_evidence_attempts must be positive")
+        if self.constrained_decode_condition not in {"task_infer"}:
+            raise ValueError("constrained_decode_condition currently supports task_infer")
 
 
 @dataclass
@@ -232,13 +242,21 @@ def build_evidence_row(
     )
     task_infer_evidence = None
     task_solve_evidence = None
+    task_infer_retry_metadata = {
+        "attempts": 0,
+        "constrained_decoding_used": False,
+        "exhausted_retries": False,
+        "rejections": [],
+    }
     if "task_infer" in CONDITION_SETS[config.condition_set] or config.task_evidence_mode in {"infer", "solve"}:
-        task_infer_evidence = generator.generate_task_evidence(
+        task_infer_evidence, task_infer_retry_metadata = _generate_task_infer_with_retry(
+            generator=generator,
             image_path=image_path,
             question=str(record["question"]),
             choices=choices,
             prompt=task_infer_prompt,
-            seed=seed + 29,
+            base_seed=seed + 29,
+            config=config,
         )
     if "task_solve" in CONDITION_SETS[config.condition_set] or config.task_evidence_mode == "solve":
         task_solve_evidence = generator.generate_task_evidence(
@@ -314,6 +332,10 @@ def build_evidence_row(
         "task_infer_class": task_infer_classification["class"],
         "task_infer_solve_like": task_infer_classification["class"] == "solve_like",
         "task_infer_classification_flags": task_infer_classification["flags"],
+        "task_infer_retry_attempts": int(task_infer_retry_metadata.get("attempts", 0)),
+        "task_infer_constrained_decoding_used": bool(task_infer_retry_metadata.get("constrained_decoding_used", False)),
+        "task_infer_exhausted_retries": bool(task_infer_retry_metadata.get("exhausted_retries", False)),
+        "task_infer_rejection_log": list(task_infer_retry_metadata.get("rejections", [])),
         "condition_validation_warnings": condition_validation_warnings,
         "strict_condition_validation": bool(config.strict_condition_validation),
         "free_caption_prompt_hash": prompt_hashes["free_caption_prompt"],
@@ -332,6 +354,9 @@ def build_evidence_row(
             "seed": seed,
             "condition_set": config.condition_set,
             "task_evidence_mode": config.task_evidence_mode,
+            "max_evidence_attempts": config.max_evidence_attempts,
+            "enable_constrained_decoding": config.enable_constrained_decoding,
+            "constrained_decode_condition": config.constrained_decode_condition,
         },
         "condition_set_name": config.condition_set,
         "conditions": list(CONDITION_SETS[config.condition_set]),
@@ -354,6 +379,73 @@ def build_evidence_row(
             }
         )
     return row
+
+
+def _generate_task_infer_with_retry(
+    *,
+    generator: EvidenceGenerator,
+    image_path: str,
+    question: str,
+    choices: Sequence[str],
+    prompt: str,
+    base_seed: int,
+    config: EvidenceGenerationConfig,
+) -> tuple[str, dict[str, Any]]:
+    logits_processors = _task_infer_logits_processors(generator, config)
+    constrained_used = bool(logits_processors)
+    last_text = ""
+    last_classification: dict[str, Any] = {"class": "unusable", "flags": ["not_generated"]}
+    rejections: list[dict[str, Any]] = []
+    for attempt in range(config.max_evidence_attempts):
+        text = generator.generate_task_evidence(
+            image_path=image_path,
+            question=question,
+            choices=choices,
+            prompt=prompt,
+            seed=base_seed + attempt,
+            logits_processors=logits_processors,
+        )
+        last_text = text
+        classification = classify_task_infer_evidence(text, choices)
+        last_classification = classification
+        if classification["class"] == "clean_infer":
+            return text, {
+                "attempts": attempt + 1,
+                "constrained_decoding_used": constrained_used,
+                "exhausted_retries": False,
+                "final_class": classification["class"],
+                "rejections": rejections,
+            }
+        rejections.append(
+            {
+                "attempt": attempt + 1,
+                "class": classification["class"],
+                "flags": list(classification.get("flags", [])),
+            }
+        )
+    return last_text, {
+        "attempts": config.max_evidence_attempts,
+        "constrained_decoding_used": constrained_used,
+        "exhausted_retries": True,
+        "final_class": last_classification["class"],
+        "rejections": rejections,
+    }
+
+
+def _task_infer_logits_processors(
+    generator: EvidenceGenerator,
+    config: EvidenceGenerationConfig,
+) -> list[object] | None:
+    if not config.enable_constrained_decoding or config.constrained_decode_condition != "task_infer":
+        return None
+    tokenizer = getattr(generator, "tokenizer", None)
+    if tokenizer is None:
+        processor = getattr(generator, "processor", None)
+        tokenizer = getattr(processor, "tokenizer", None)
+    if tokenizer is None:
+        return None
+    forbidden = build_forbidden_token_ids(tokenizer)
+    return [ForbidAnswerTokensLogitsProcessor(forbidden)] if forbidden else None
 
 
 def detect_evidence_leakage(
@@ -506,6 +598,10 @@ def summarize_evidence(
         1 for row in rows if is_generated_degraded_image_path(str(row.get("image_path", "")))
     )
     task_infer_class_counts = Counter(str(row.get("task_infer_class", "missing")) for row in rows)
+    attempt_counts = Counter(str(int(row.get("task_infer_retry_attempts", 0))) for row in rows if int(row.get("task_infer_retry_attempts", 0)) > 0)
+    total_attempts = sum(int(row.get("task_infer_retry_attempts", 0)) for row in rows)
+    retry_rows = sum(max(0, int(row.get("task_infer_retry_attempts", 0)) - 1) for row in rows)
+    exhausted_retries = sum(1 for row in rows if row.get("task_infer_exhausted_retries"))
     return {
         "source_dataset": config.source_dataset,
         "dataset_type": config.dataset_type,
@@ -519,6 +615,13 @@ def summarize_evidence(
         "task_infer_solve_like_count": task_infer_class_counts.get("solve_like", 0),
         "task_infer_unusable_count": task_infer_class_counts.get("unusable", 0),
         "task_infer_class_counts": dict(task_infer_class_counts),
+        "constrained_decoding_enabled": bool(config.enable_constrained_decoding),
+        "task_infer_retry_stats": {
+            "total_attempts": total_attempts,
+            "total_retries": retry_rows,
+            "exhausted_retries": exhausted_retries,
+            "attempt_distribution": dict(attempt_counts),
+        },
         "validation_error_count": len(validation_errors),
         "validation_errors_top10": validation_errors[:10],
         "output_jsonl": str(config.output_jsonl),
@@ -546,6 +649,7 @@ class HFQwenEvidenceGenerator:
         self._image_cls = Image
         self._torch = torch
         self.processor = AutoProcessor.from_pretrained(os.path.expandvars(config.generator_model_path or ""))
+        self.tokenizer = self.processor.tokenizer
         self.model = AutoModelForImageTextToText.from_pretrained(
             os.path.expandvars(config.generator_model_path or ""),
             torch_dtype=torch.bfloat16,
@@ -555,7 +659,14 @@ class HFQwenEvidenceGenerator:
         self.config = config
         self.model_id = os.path.expandvars(config.generator_model_path or "hf-generator")
 
-    def _generate(self, image_path: str, text: str, seed: int) -> str:
+    def _generate(
+        self,
+        image_path: str,
+        text: str,
+        seed: int,
+        *,
+        logits_processors: Sequence[object] | None = None,
+    ) -> str:
         torch = self._torch
         random.seed(seed)
         torch.manual_seed(seed)
@@ -563,14 +674,18 @@ class HFQwenEvidenceGenerator:
         messages = [{"role": "user", "content": [{"type": "image", "image": image_path}, {"type": "text", "text": text}]}]
         prompt = self.processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
         inputs = self.processor(text=[prompt], images=[image], return_tensors="pt").to(self.model.device)
-        outputs = self.model.generate(
-            **inputs,
-            do_sample=self.config.temperature > 0,
-            temperature=self.config.temperature,
-            top_p=self.config.top_p,
-            max_new_tokens=self.config.max_new_tokens,
-            pad_token_id=self.processor.tokenizer.eos_token_id,
-        )
+        generation_kwargs: dict[str, Any] = {
+            "do_sample": self.config.temperature > 0,
+            "temperature": self.config.temperature,
+            "top_p": self.config.top_p,
+            "max_new_tokens": self.config.max_new_tokens,
+            "pad_token_id": self.processor.tokenizer.eos_token_id,
+        }
+        if logits_processors:
+            from transformers import LogitsProcessorList
+
+            generation_kwargs["logits_processor"] = LogitsProcessorList(list(logits_processors))
+        outputs = self.model.generate(**inputs, **generation_kwargs)
         generated = outputs[:, inputs["input_ids"].shape[-1] :]
         return self.processor.tokenizer.batch_decode(generated, skip_special_tokens=True)[0]
 
@@ -585,11 +700,12 @@ class HFQwenEvidenceGenerator:
         choices: Sequence[str],
         prompt: str,
         seed: int,
+        logits_processors: Sequence[object] | None = None,
     ) -> str:
         text = f"{prompt}\n\nQuestion:\n{question}"
         if choices:
             text += "\n\nChoices:\n" + "\n".join(choices)
-        return self._generate(image_path, text, seed)
+        return self._generate(image_path, text, seed, logits_processors=logits_processors)
 
 
 def _load_records(config: EvidenceGenerationConfig) -> list[dict[str, Any]]:
@@ -657,6 +773,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--allow-degraded-source-images", action="store_true")
     parser.add_argument("--strict-leakage", action="store_true")
     parser.add_argument("--strict-condition-validation", action="store_true")
+    parser.add_argument("--max-evidence-attempts", type=int, default=3)
+    parser.add_argument("--no-constrained-decoding", action="store_true")
     parser.add_argument(
         "--dry-run-inspect",
         action="store_true",
@@ -711,6 +829,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             allow_degraded_source_images=args.allow_degraded_source_images,
             strict_leakage=args.strict_leakage,
             strict_condition_validation=args.strict_condition_validation,
+            max_evidence_attempts=args.max_evidence_attempts,
+            enable_constrained_decoding=not args.no_constrained_decoding,
         )
     )
     print(json.dumps(result.summary, indent=2))

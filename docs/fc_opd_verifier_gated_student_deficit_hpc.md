@@ -21,6 +21,7 @@ python scripts/hpc/build_fc_opd_4c_evidence_cache.py \
   --include-prompts-in-output \
   --limit 32 \
   --seed 42 \
+  --max-evidence-attempts 3 \
   --temperature 0.2 \
   --top-p 0.9 \
   --max-new-tokens 384 \
@@ -56,6 +57,7 @@ python scripts/hpc/build_fc_opd_geometry3k_4c_offline_scores.py \
   --top-p 0.9 \
   --max-new-tokens 768 \
   --seed 42 \
+  --max-rollout-attempts 3 \
   --device cuda \
   --dtype bfloat16 \
   --degraded-mode lowres_50_bilinear_nearest \

@@ -142,9 +142,10 @@ def test_rollout_exception_is_counted_and_summarized(tmp_path):
             output_jsonl=tmp_path / "scores.jsonl",
             summary_json=summary_json,
             limit=1,
-            rollouts_per_prompt=1,
-            allow_empty_output=True,
-        ),
+                rollouts_per_prompt=1,
+                allow_empty_output=True,
+                max_rollout_attempts=1,
+            ),
         rollout_generator=FailingRolloutGenerator(ByteTokenizer()),
         teacher_client=_fake_teacher_client(),
     )
@@ -175,6 +176,7 @@ def test_all_rows_skipped_raises_runtime_error_after_writing_summary(tmp_path):
                 summary_json=summary_json,
                 limit=1,
                 rollouts_per_prompt=1,
+                max_rollout_attempts=1,
             ),
             rollout_generator=EmptyRolloutGenerator(ByteTokenizer()),
             teacher_client=_fake_teacher_client(),
@@ -183,7 +185,7 @@ def test_all_rows_skipped_raises_runtime_error_after_writing_summary(tmp_path):
     summary = json.loads(summary_json.read_text(encoding="utf-8"))
     assert summary["validation_errors_top10"] == ["no rows produced"]
     assert summary["rollout_empty_count"] == 1
-    assert summary["skipped_examples_top20"][0]["reason"] == "empty rollout text"
+    assert summary["skipped_examples_top20"][0]["reason"] == "attempt=1: empty rollout text"
 
 
 def test_allow_empty_output_permits_empty_summary(tmp_path):
@@ -197,9 +199,10 @@ def test_allow_empty_output_permits_empty_summary(tmp_path):
             output_jsonl=tmp_path / "scores_empty_allowed.jsonl",
             summary_json=tmp_path / "summary_empty_allowed.json",
             limit=1,
-            rollouts_per_prompt=1,
-            allow_empty_output=True,
-        ),
+                rollouts_per_prompt=1,
+                allow_empty_output=True,
+                max_rollout_attempts=1,
+            ),
         rollout_generator=EmptyRolloutGenerator(ByteTokenizer()),
         teacher_client=_fake_teacher_client(),
     )
@@ -208,13 +211,51 @@ def test_allow_empty_output_permits_empty_summary(tmp_path):
     assert result.summary["rollout_empty_count"] == 1
     assert result.summary["row_write_count"] == 0
     assert result.summary["validation_valid"] is False
-    assert result.summary["skipped_examples_top20"] == [
-        {
-            "sample_uid": "geometry3k:g1:rollout-0",
-            "stage": "student_rollout",
-            "reason": "empty rollout text",
-        }
-    ]
+    assert result.summary["skipped_examples_top20"][0] == {
+        "sample_uid": "geometry3k:g1:rollout-0",
+        "stage": "student_rollout",
+        "reason": "attempt=1: empty rollout text",
+    }
+
+
+def test_rollout_exhausted_writes_malformed_fallback_row(tmp_path):
+    dataset = _dataset(tmp_path)
+    evidence_jsonl = _write_evidence_cache(tmp_path, dataset)
+    tokenizer = ByteTokenizer()
+    with ExitStack() as stack:
+        scorer = SyntheticTeacherScorer(
+            vocab_size=320,
+            top_k=8,
+            tokenizer_hash=tokenizer_fingerprint(tokenizer),
+        )
+        server = stack.enter_context(running_teacher_server(scorer))
+        host, port = server.server_address
+        client = TeacherClient(
+            f"http://{host}:{port}",
+            expected_tokenizer_hash=tokenizer_fingerprint(tokenizer),
+        )
+        result = run_four_condition_offline_builder(
+            FourConditionOfflineBuilderConfig(
+                dataset=dataset,
+                evidence_cache=evidence_jsonl,
+                output_jsonl=tmp_path / "scores_fallback.jsonl",
+                summary_json=tmp_path / "summary_fallback.json",
+                limit=1,
+                rollouts_per_prompt=1,
+                max_rollout_attempts=1,
+                verifier_gate="geometry3k_verifier",
+            ),
+            rollout_generator=EmptyRolloutGenerator(tokenizer),
+            teacher_client=client,
+        )
+
+    assert len(result.rows) == 1
+    row = result.rows[0]
+    assert row["response_source"] == "fallback_malformed_rollout"
+    assert row["rollout_fallback_malformed"] is True
+    assert row["verifier"]["malformed"] is True
+    assert result.summary["rollout_exhausted_count"] == 1
+    assert result.summary["row_write_count"] == 1
 
 
 def test_4c_builder_writes_trainable_full_degraded_free_task_rows(tmp_path):
