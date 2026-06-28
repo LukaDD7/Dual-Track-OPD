@@ -134,6 +134,50 @@ It returns:
 - condition weights and grouped loss-ready tensors
 - a finite FC-OPD loss tensor suitable for a training step
 
+`src/dual_track_opd/fc_opd/verl_integration.py` converts these online outputs
+into the tensor-only contract expected by the thin verl patches:
+
+```text
+fc_teacher_topk_indices    [B, C, T, K]
+fc_teacher_topk_log_probs  [B, C, T, K]
+fc_teacher_tail_log_prob   [B, C, T] optional
+fc_condition_weights       [B, C, T]
+fc_condition_ids           [C]
+```
+
+`src/dual_track_opd/fc_opd/verl_sparse_kd.py` owns the sparse top-k KD tensor
+math used by the actor patch. Keeping this math in the project package makes
+the backend patch a transport-and-callsite layer rather than a research logic
+fork.
+
+## Patch Overlay
+
+The first verl integration is stored as patches, not direct edits to
+`third_party/verl`:
+
+- `patches/verl/fc_opd_ray_trainer_post_rollout_hook.patch`
+  adds `algorithm.fc_opd.post_rollout_hook` immediately after current rollout
+  responses are unioned into `batch` and `response_mask` exists.
+- `patches/verl/fc_opd_fsdp_actor_aux_kd.patch`
+  preserves `fc_*` tensor fields through the FSDP actor `select_keys`, computes
+  sparse KD from live response logits in `_forward_micro_batch`, and adds the
+  weighted auxiliary loss to the PPO actor loss.
+
+The project-owned post-rollout hook should:
+
+1. decode current response token ids from `batch.batch["responses"]`;
+2. parse structured FC-OPD chunks on those current responses;
+3. run the verifier and build `verifier_learning_value_gate`;
+4. call teacher forced scoring on the exact current response token ids;
+5. compute student-deficit/routing weights;
+6. attach the `fc_*` tensors listed above to `DataProto.batch`.
+
+The hook must not read offline score JSONL or reuse precomputed teacher scores.
+
+The actor patch deliberately fail-fasts when fused actor kernels hide logits.
+Remove-padding without Ulysses sequence parallel is covered; remove-padding plus
+Ulysses SP needs a separate alignment smoke before enabling.
+
 ## Online Smoke
 
 `scripts/hpc/run_fc_opd_online_train_step_smoke.py` is the first online

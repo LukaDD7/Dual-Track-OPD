@@ -65,6 +65,14 @@ from .teacher_protocol import (
     tokenizer_fingerprint,
 )
 from .teacher_prompts import render_teacher_prompt
+from .verl_integration import (
+    DEFAULT_VERL_CONDITION_ORDER,
+    VERL_CONDITION_IDS,
+    VerlFCOPDTensors,
+    online_batch_output_to_verl_tensors,
+    online_sample_outputs_to_verl_tensors,
+)
+from .verl_sparse_kd import VerlSparseKDOutput, compute_verl_sparse_topk_kd
 
 __all__ = [
     "ByteTokenizer",
@@ -72,6 +80,7 @@ __all__ = [
     "Condition",
     "ConditionInputs",
     "FCOPDLossConfig",
+    "DEFAULT_VERL_CONDITION_ORDER",
     "HFStudentProvider",
     "MinTrainReport",
     "RealMinTrainReport",
@@ -98,11 +107,15 @@ __all__ = [
     "TeacherMetadata",
     "TeacherScoreRequest",
     "TeacherScoreResponse",
+    "VERL_CONDITION_IDS",
+    "VerlFCOPDTensors",
+    "VerlSparseKDOutput",
     "build_condition_inputs",
     "build_condition_inputs_for_record",
     "compute_condition_signals",
     "compute_fc_opd_loss",
     "compute_online_fc_opd_batch",
+    "compute_verl_sparse_topk_kd",
     "condition_inputs_from_record",
     "default_output_dir",
     "detect_tied_parameter_groups",
@@ -115,6 +128,8 @@ __all__ = [
     "make_smoke_dataset",
     "make_student_logits",
     "offline_record_to_tensors",
+    "online_batch_output_to_verl_tensors",
+    "online_sample_outputs_to_verl_tensors",
     "parse_response_chunks",
     "run_offline_loss_backward",
     "run_offline_loss_smoke",

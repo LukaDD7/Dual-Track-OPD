@@ -1,0 +1,177 @@
+--- a/verl/workers/actor/dp_actor.py
++++ b/verl/workers/actor/dp_actor.py
+@@ -39,6 +39,7 @@
+ from verl.utils.ulysses import gather_outputs_and_unpad, ulysses_pad, ulysses_pad_and_slice_inputs
+ from verl.workers.actor import BasePPOActor
+ from verl.workers.config import ActorConfig
++from dual_track_opd.fc_opd.verl_sparse_kd import compute_verl_sparse_topk_kd
+ 
+ __all__ = ["DataParallelPPOActor"]
+ 
+@@ -124,6 +125,9 @@
+         """
+         calculate_sum_pi_squared = self.config.get("calculate_sum_pi_squared", False)
+         sum_pi_squared_checkpointing = self.config.get("sum_pi_squared_checkpointing", False)
++        has_fc_opd = _has_fc_opd_tensors(micro_batch)
++        fc_opd_loss_per_token = None
++        fc_opd_active_weight = None
+         # PrefixGrouper path for shared-prefix optimization
+         if self.use_prefix_grouper:
+             can_use_pg = (
+@@ -251,12 +255,36 @@
+                 )  # prevent model thinks we are generating
+ 
+                 if self.use_fused_kernels:
++                    if has_fc_opd:
++                        raise RuntimeError("FC-OPD auxiliary KD requires logits; disable fused actor kernels first")
+                     log_probs = output.log_probs.squeeze(0)  # (total_nnz,)
+                     entropy_rmpad = output.entropy.squeeze(0)  # (total_nnz,)
+ 
+                 else:
+                     logits_rmpad = output.logits.squeeze(0)  # (total_nnz, vocab_size)
+                     logits_rmpad.div_(temperature)
++                    if has_fc_opd:
++                        if self.use_ulysses_sp:
++                            raise RuntimeError(
++                                "FC-OPD sparse-KD with remove-padding + Ulysses SP is not implemented yet; "
++                                "disable sequence parallel for the first FC-OPD smoke"
++                            )
++                        response_logits = _response_logits_from_rmpad(
++                            logits_rmpad=logits_rmpad,
++                            indices=indices,
++                            batch_size=batch_size,
++                            seqlen=seqlen,
++                            response_length=response_length,
++                            response_mask=micro_batch["response_mask"],
++                        )
++                        fc_opd_output = _compute_fc_opd_sparse_kd(
++                            student_logits=response_logits,
++                            micro_batch=micro_batch,
++                            response_mask=micro_batch["response_mask"],
++                            config=self.config,
++                        )
++                        fc_opd_loss_per_token = fc_opd_output.per_token_loss
++                        fc_opd_active_weight = fc_opd_output.active_weight
+ 
+                     # if use_sp: ((total_nnz / sp) + pad) ; if not use_sp: (batch, seqlen)
+                     inplace_backward = True
+@@ -359,6 +387,8 @@
+                 )  # prevent model thinks we are generating
+ 
+                 if self.use_fused_kernels:
++                    if has_fc_opd:
++                        raise RuntimeError("FC-OPD auxiliary KD requires logits; disable fused actor kernels first")
+                     log_probs = output.log_probs[:, -response_length - 1 : -1]
+                     entropy = output.entropy[:, -response_length - 1 : -1]  # (bsz, response_length)
+ 
+@@ -367,6 +397,15 @@
+ 
+                     logits.div_(temperature)
+                     logits = logits[:, -response_length - 1 : -1, :]  # (bsz, response_length, vocab_size)
++                    if has_fc_opd:
++                        fc_opd_output = _compute_fc_opd_sparse_kd(
++                            student_logits=logits,
++                            micro_batch=micro_batch,
++                            response_mask=micro_batch["response_mask"],
++                            config=self.config,
++                        )
++                        fc_opd_loss_per_token = fc_opd_output.per_token_loss
++                        fc_opd_active_weight = fc_opd_output.active_weight
+                     log_probs = logprobs_from_logits(logits, micro_batch["responses"])
+                     if calculate_entropy:
+                         if not self.config.entropy_checkpointing:
+@@ -382,6 +421,9 @@
+                         )
+ 
+             outputs = {"log_probs": log_probs}
++            if has_fc_opd:
++                outputs["fc_opd_loss_per_token"] = fc_opd_loss_per_token
++                outputs["fc_opd_active_weight"] = fc_opd_active_weight
+             if calculate_entropy:
+                 outputs["entropys"] = entropy
+             if calculate_sum_pi_squared:
+@@ -522,6 +564,17 @@
+             "old_log_probs",
+             "advantages",
+         ]
++        select_keys += [
++            key
++            for key in [
++                "fc_teacher_topk_indices",
++                "fc_teacher_topk_log_probs",
++                "fc_teacher_tail_log_prob",
++                "fc_condition_weights",
++                "fc_condition_ids",
++            ]
++            if key in data.batch.keys()
++        ]
+         if self.use_prefix_grouper and "prompts" in data.batch.keys():
+             select_keys.append("prompts")
+         if self.config.use_kl_loss:
+@@ -656,6 +709,20 @@
+                         metrics["actor/kl_loss"] += kl_loss.detach().item() * loss_scale_factor
+                         micro_batch_metrics["actor/kl_coef"] = self.config.kl_loss_coef
+ 
++                    fc_opd_loss_per_token = outputs.get("fc_opd_loss_per_token")
++                    if fc_opd_loss_per_token is not None:
++                        fc_opd_active_weight = outputs["fc_opd_active_weight"]
++                        fc_opd_loss = fc_opd_loss_per_token.sum() / fc_opd_active_weight.sum().clamp_min(1.0)
++                        fc_opd_coef = _fc_opd_config_float(self.config, "loss_coef", 0.0)
++                        policy_loss = policy_loss + fc_opd_loss * fc_opd_coef
++                        metrics["actor/fc_opd_loss"] = metrics.get("actor/fc_opd_loss", 0.0) + (
++                            fc_opd_loss.detach().item() * loss_scale_factor
++                        )
++                        micro_batch_metrics["actor/fc_opd_coef"] = fc_opd_coef
++                        micro_batch_metrics["actor/fc_opd_active_weight_mean"] = (
++                            fc_opd_active_weight.detach().float().mean().item()
++                        )
++
+                     if self.config.use_dynamic_bsz:
+                         # relative to the dynamic bsz
+                         loss = policy_loss * loss_scale_factor
+@@ -674,3 +741,45 @@
+                 append_to_dict(metrics, mini_batch_metrics)
+         self.actor_optimizer.zero_grad()
+         return metrics
++
++
++def _has_fc_opd_tensors(micro_batch: dict[str, torch.Tensor]) -> bool:
++    required = ("fc_teacher_topk_indices", "fc_teacher_topk_log_probs", "fc_condition_weights")
++    present = [key in micro_batch for key in required]
++    if any(present) and not all(present):
++        missing = [key for key, is_present in zip(required, present) if not is_present]
++        raise RuntimeError(f"incomplete FC-OPD tensor set; missing: {missing}")
++    return all(present)
++
++
++def _compute_fc_opd_sparse_kd(*, student_logits, micro_batch, response_mask, config):
++    fc_config = config.get("fc_opd", {})
++    return compute_verl_sparse_topk_kd(
++        student_logits=student_logits,
++        teacher_topk_indices=micro_batch["fc_teacher_topk_indices"],
++        teacher_topk_log_probs=micro_batch["fc_teacher_topk_log_probs"],
++        teacher_tail_log_prob=micro_batch.get("fc_teacher_tail_log_prob", None),
++        condition_weights=micro_batch["fc_condition_weights"],
++        response_mask=response_mask,
++        renormalize_topk=bool(fc_config.get("renormalize_topk", True)),
++        include_tail=bool(fc_config.get("include_tail", True)),
++        eps=float(fc_config.get("eps", 1e-8)),
++    )
++
++
++def _response_logits_from_rmpad(*, logits_rmpad, indices, batch_size, seqlen, response_length, response_mask):
++    device = logits_rmpad.device
++    response_positions = torch.arange(seqlen - response_length - 1, seqlen - 1, device=device)
++    batch_offsets = torch.arange(batch_size, device=device).unsqueeze(1) * seqlen
++    response_flat_positions = batch_offsets + response_positions.unsqueeze(0)
++    inverse_indices = torch.full((batch_size * seqlen,), -1, dtype=torch.long, device=device)
++    inverse_indices[indices] = torch.arange(indices.numel(), dtype=torch.long, device=device)
++    response_rows = inverse_indices[response_flat_positions]
++    if torch.any((response_rows < 0) & response_mask.bool()):
++        raise RuntimeError("FC-OPD response logits are not aligned with remove-padding indices")
++    return logits_rmpad[response_rows.clamp_min(0)]
++
++
++def _fc_opd_config_float(config, key: str, default: float) -> float:
++    fc_config = config.get("fc_opd", {})
++    return float(fc_config.get(key, default))
