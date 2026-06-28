@@ -1,0 +1,36 @@
+{
+  "loss": 0.22125904262065887,
+  "metrics": {
+    "loss/chunk/answer": 0.002139005111530423,
+    "loss/chunk/diagram_inference": 0.0,
+    "loss/chunk/reasoning": 0.14725124835968018,
+    "loss/chunk/visible_evidence": 0.24642156064510345,
+    "loss/degraded": 0.0,
+    "loss/free": 0.0,
+    "loss/full": 0.0783989429473877,
+    "loss/task_infer": 0.36532682180404663,
+    "loss/task_solve": 0.5105577707290649,
+    "loss/task_visible": 0.3393993675708771,
+    "loss/total": 0.22125904262065887,
+    "online/loss": 0.22125904262065887,
+    "online/num_samples": 1.0,
+    "selection/degraded": 0.0,
+    "selection/free": 0.0,
+    "selection/full": 0.37762150168418884,
+    "selection/task_infer": 0.1251852661371231,
+    "selection/task_solve": 0.07950938493013382,
+    "selection/task_visible": 0.10927607119083405
+  },
+  "rollout_num_tokens": 223,
+  "sample_uid": "geometry3k:test:2401",
+  "selected_parameter_delta_norm": 4.0978193283081055e-08,
+  "teacher_conditions": [
+    "full",
+    "degraded",
+    "free",
+    "task_visible",
+    "task_infer",
+    "task_solve"
+  ],
+  "verifier_outcome": "wrong_but_format_valid"
+}
