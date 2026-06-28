@@ -59,10 +59,18 @@ TASK_INFER_PROMPTS = {
         "or constraints needed for solving. Do not compute the final requested quantity."
     ),
     "geometry": (
-        "You are given a geometry diagram and a question. May infer intermediate geometric facts "
-        "from diagram marks and structure, and may write usable equations. Must not compute the "
-        "final requested quantity, choose an option, or write a complete solution. If a derived "
-        "numeric value is exactly the asked final answer, omit it."
+        "You are given a geometry diagram and a question. "
+        "List ONLY intermediate geometric facts and equations derivable from the diagram. "
+        "Use bullet points: one fact or equation per line, starting with '- '. "
+        "Do NOT calculate numeric values. Do NOT pick A, B, C, or D. "
+        "Do NOT say 'the answer is'. "
+        "If a derived value matches one of the choices, write it as an equation "
+        "WITHOUT selecting the letter.\n"
+        "Example good output:\n"
+        "- Triangle ABC is isosceles with AB = BC\n"
+        "- Angle at A equals angle at C\n"
+        "- Base AC = 10, height from B to AC = h\n"
+        "- By Pythagorean theorem: h^2 + 5^2 = 13^2"
     ),
 }
 TASK_SOLVE_PROMPTS = {
