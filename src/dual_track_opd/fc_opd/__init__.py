@@ -3,6 +3,14 @@
 from .chunk_parser import ChunkMasks, parse_response_chunks
 from .conditions import Condition, ConditionInputs, build_condition_inputs
 from .loss import FCOPDLossConfig, compute_fc_opd_loss, sparse_forward_kl
+from .online_batch import (
+    OnlineFCOPDBatchOutput,
+    OnlineFCOPDConfig,
+    OnlineFCOPDSample,
+    OnlineFCOPDSampleOutput,
+    OnlineStudentScores,
+    compute_online_fc_opd_batch,
+)
 from .offline_loss import (
     MinTrainReport,
     MinTrainStep,
@@ -75,6 +83,11 @@ __all__ = [
     "OfflineScoreRecord",
     "OfflineScoringConfig",
     "OfflineScoringResult",
+    "OnlineFCOPDBatchOutput",
+    "OnlineFCOPDConfig",
+    "OnlineFCOPDSample",
+    "OnlineFCOPDSampleOutput",
+    "OnlineStudentScores",
     "RealStudentConfig",
     "RealStudentResult",
     "RealStudentSmokeReport",
@@ -89,6 +102,7 @@ __all__ = [
     "build_condition_inputs_for_record",
     "compute_condition_signals",
     "compute_fc_opd_loss",
+    "compute_online_fc_opd_batch",
     "condition_inputs_from_record",
     "default_output_dir",
     "detect_tied_parameter_groups",

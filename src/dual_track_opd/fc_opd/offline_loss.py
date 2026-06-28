@@ -1,4 +1,4 @@
-"""Offline FC-OPD loss/backward smoke over recorded teacher scores.
+"""Diagnostic-only offline FC-OPD loss/backward smoke.
 
 This stage closes the loop between the offline-score dataset
 (``build_fc_opd_offline_scores.py``) and the existing FC-OPD loss/router path,
@@ -7,6 +7,10 @@ reads recorded teacher top-k scores, rebuilds the tensors and chunk masks,
 attaches synthetic student logits with ``requires_grad=True``, and runs the real
 ``route_condition_weights`` -> ``compute_fc_opd_loss`` -> ``backward`` path so the
 gradient plumbing can be verified before touching the trainer backend.
+
+It is not a final training path. FC-OPD training must use current on-policy
+student rollouts and immediate teacher/student forced scoring inside the
+training step.
 """
 
 from __future__ import annotations

@@ -19,6 +19,12 @@ The current FC-OPD pipeline is offline-teacher, fixed-response distillation:
 7. FC-OPD loss compares student logits against stored teacher condition scores.
 8. `backward()` and `optimizer.step()` update real student parameters.
 
+This pipeline is now classified as diagnostics/prototype infrastructure only.
+It is not the final FC-OPD training path, because the rollout tokens and teacher
+condition scores are fixed before training and become stale after the student
+policy changes. The training integration must instead follow online on-policy
+distillation as described in `docs/fc_opd_online_verl_integration.md`.
+
 The original dataset signal audit used `fixed_audit_response`, which is only a
 protocol/path/condition audit. It is useful for checking full-vs-blur signal and
 teacher scoring health, but it is not a student-rollout signal audit. Formal

@@ -1,4 +1,10 @@
-"""Clean-data 4C FC-OPD offline score builder."""
+"""Diagnostic-only clean-data 4C FC-OPD offline score builder.
+
+This builder is useful for prompt, verifier, scorer, and row-level diagnostics.
+It must not be treated as the final FC-OPD training data path because its
+rollouts and teacher scores are precomputed and become stale after the student
+policy updates.
+"""
 
 from __future__ import annotations
 

@@ -1,5 +1,12 @@
 # FC-OPD Offline Scoring
 
+> Diagnostic only. Offline score JSONL and offline replay/min-train smokes are
+> prompt/scoring/loss plumbing diagnostics. They must not be used as the final
+> FC-OPD training input because precomputed student rollouts, teacher top-k
+> scores, and router weights become stale as soon as the policy updates. The
+> training path must be online and on-policy; see
+> `docs/fc_opd_online_verl_integration.md`.
+
 This stage turns a prepared Vision-OPD-style dataset plus student responses into
 a self-describing **offline-score dataset**: for every student response it records
 the teacher's top-k distribution under each FC-OPD condition (`full`, `blur`,
@@ -109,6 +116,9 @@ recorded — this stage never mutates source images.
 
 ## Offline loss / backward smoke
 
+This is also diagnostic only. It verifies tensor plumbing and gradients over
+recorded scores; it is not a replay-training recipe.
+
 `dual_track_opd.fc_opd.offline_loss` closes the loop between the offline-score
 dataset and the existing FC-OPD loss/router path **before** any trainer/verl
 change. For each recorded payload it:
@@ -141,6 +151,9 @@ python scripts/hpc/run_fc_opd_offline_loss_smoke.py --scores <offline_scores.jso
 The command prints a JSON report and exits non-zero if any check fails.
 
 ## Minimal optimizer-update smoke
+
+This smoke is diagnostic only. A decreasing synthetic replay loss is not
+evidence that FC-OPD training is correctly on-policy.
 
 `run_offline_min_train_smoke` (also in `dual_track_opd.fc_opd.offline_loss`) takes
 the loss/backward smoke one step further: it attaches one synthetic
