@@ -118,6 +118,8 @@ class FourConditionOfflineBuilderConfig:
     max_capabilities_per_token: int = 2
     routing_mode: str = "chunk_gated_contrastive"
     grouped_loss_schema: str = "none"
+    allow_empty_output: bool = False
+    debug_first_n: int = 0
 
     def __post_init__(self) -> None:
         if self.dataset_type != "geometry3k":
@@ -132,12 +134,62 @@ class FourConditionOfflineBuilderConfig:
             raise ValueError("verifier_gate must be none or geometry3k_verifier")
         if self.max_capabilities_per_token < 1:
             raise ValueError("max_capabilities_per_token must be at least 1")
+        if self.debug_first_n < 0:
+            raise ValueError("debug_first_n must be non-negative")
 
 
 @dataclass
 class FourConditionOfflineBuilderResult:
     rows: list[dict[str, Any]] = field(default_factory=list)
     summary: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class OfflineBuilderDiagnostics:
+    selected_records: int = 0
+    evidence_rows_loaded: int = 0
+    evidence_rows_matched: int = 0
+    rollout_attempt_count: int = 0
+    rollout_success_count: int = 0
+    rollout_empty_count: int = 0
+    rollout_exception_count: int = 0
+    chunk_parse_failure_count: int = 0
+    teacher_score_exception_count: int = 0
+    student_score_exception_count: int = 0
+    verifier_exception_count: int = 0
+    row_write_count: int = 0
+    skipped_records_by_reason: Counter[str] = field(default_factory=Counter)
+    skipped_examples_top20: list[dict[str, str]] = field(default_factory=list)
+
+    def add_skip(self, *, sample_uid: object, stage: str, reason: str) -> None:
+        reason_text = _compact_reason(reason)
+        self.skipped_records_by_reason[f"{stage}:{reason_text}"] += 1
+        if len(self.skipped_examples_top20) < 20:
+            self.skipped_examples_top20.append(
+                {
+                    "sample_uid": str(sample_uid),
+                    "stage": stage,
+                    "reason": reason_text,
+                }
+            )
+
+    def to_summary(self) -> dict[str, Any]:
+        return {
+            "selected_records": self.selected_records,
+            "evidence_rows_loaded": self.evidence_rows_loaded,
+            "evidence_rows_matched": self.evidence_rows_matched,
+            "rollout_attempt_count": self.rollout_attempt_count,
+            "rollout_success_count": self.rollout_success_count,
+            "rollout_empty_count": self.rollout_empty_count,
+            "rollout_exception_count": self.rollout_exception_count,
+            "chunk_parse_failure_count": self.chunk_parse_failure_count,
+            "teacher_score_exception_count": self.teacher_score_exception_count,
+            "student_score_exception_count": self.student_score_exception_count,
+            "verifier_exception_count": self.verifier_exception_count,
+            "row_write_count": self.row_write_count,
+            "skipped_records_by_reason": dict(self.skipped_records_by_reason),
+            "skipped_examples_top20": list(self.skipped_examples_top20),
+        }
 
 
 def run_four_condition_offline_builder(
@@ -152,7 +204,12 @@ def run_four_condition_offline_builder(
             summary=json.loads(config.summary_json.read_text(encoding="utf-8")),
         )
     records = _select(load_geometry3k_records(config.dataset, source_dataset=config.source_dataset), config)
-    evidence = {str(row["sample_uid"]): row for row in _read_jsonl(config.evidence_cache)}
+    evidence_rows = _read_jsonl(config.evidence_cache)
+    evidence = {str(row["sample_uid"]): row for row in evidence_rows}
+    diagnostics = OfflineBuilderDiagnostics(
+        selected_records=len(records),
+        evidence_rows_loaded=len(evidence_rows),
+    )
     rollout_generator = rollout_generator or HFQwenStudentRolloutGenerator(_rollout_config(config))
     tokenizer_hash = tokenizer_fingerprint(rollout_generator.tokenizer)
     teacher_client = teacher_client or TeacherClient(config.teacher_url, expected_tokenizer_hash=tokenizer_hash)
@@ -162,20 +219,61 @@ def run_four_condition_offline_builder(
     mode = "a" if config.resume and config.output_jsonl.is_file() else "w"
     config.output_jsonl.parent.mkdir(parents=True, exist_ok=True)
     with config.output_jsonl.open(mode, encoding="utf-8") as handle:
-        for record in records:
+        for record_index, record in enumerate(records):
+            sample_uid = str(record.get("sample_uid", "unknown"))
+            _debug(config, record_index, f"selected record uid={sample_uid}")
             evidence_row = evidence.get(str(record["sample_uid"]))
             if evidence_row is None:
-                raise ValueError(f"missing evidence cache row for {record['sample_uid']}")
+                diagnostics.add_skip(
+                    sample_uid=sample_uid,
+                    stage="evidence_match",
+                    reason="missing evidence cache row",
+                )
+                _debug(config, record_index, "evidence matched=false")
+                continue
+            diagnostics.evidence_rows_matched += 1
+            _debug(config, record_index, "evidence matched=true")
             errors = validate_evidence_row(evidence_row)
             if config.strict_condition_validation and evidence_row.get("task_infer_class") in {"solve_like", "unusable"}:
                 errors.append(f"task_infer_{evidence_row.get('task_infer_class')}")
             if errors:
-                raise ValueError(f"evidence cache validation failed for {record['sample_uid']}: {errors}")
-            for row in _build_rows(record, evidence_row, config, rollout_generator, teacher_client, tokenizer_hash):
+                diagnostics.add_skip(
+                    sample_uid=sample_uid,
+                    stage="evidence_validation",
+                    reason="; ".join(str(error) for error in errors[:3]),
+                )
+                continue
+            try:
+                built_rows = _build_rows(
+                    record,
+                    evidence_row,
+                    config,
+                    rollout_generator,
+                    teacher_client,
+                    tokenizer_hash,
+                    diagnostics=diagnostics,
+                    record_index=record_index,
+                )
+            except Exception as exc:  # noqa: BLE001
+                diagnostics.add_skip(
+                    sample_uid=sample_uid,
+                    stage="record_setup",
+                    reason=_exception_reason(exc),
+                )
+                _debug(config, record_index, f"record setup exception reason={_exception_reason(exc)}")
+                continue
+            for row in built_rows:
                 if row["rollout_uid"] in existing_uids:
+                    diagnostics.add_skip(
+                        sample_uid=row["rollout_uid"],
+                        stage="resume",
+                        reason="rollout already exists",
+                    )
                     continue
                 handle.write(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n")
                 new_rows.append(row)
+                diagnostics.row_write_count += 1
+                _debug(config, record_index, f"row written rollout_uid={row['rollout_uid']}")
     rows = [*existing, *new_rows]
     _attach_group_stats(rows)
     if rows:
@@ -183,9 +281,14 @@ def run_four_condition_offline_builder(
             "".join(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n" for row in rows),
             encoding="utf-8",
         )
-    summary = summarize_rows(rows, config=config, teacher_client=teacher_client)
+    summary = summarize_rows(rows, config=config, teacher_client=teacher_client, diagnostics=diagnostics)
     config.summary_json.parent.mkdir(parents=True, exist_ok=True)
     config.summary_json.write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    if diagnostics.selected_records > 0 and diagnostics.row_write_count == 0 and not config.allow_empty_output:
+        raise RuntimeError(
+            "offline builder selected records but wrote zero rows; "
+            f"summary written to {config.summary_json}"
+        )
     return FourConditionOfflineBuilderResult(rows=rows, summary=summary)
 
 
@@ -196,6 +299,9 @@ def _build_rows(
     rollout_generator: StudentRolloutGenerator,
     teacher_client: TeacherClient,
     tokenizer_hash: str,
+    *,
+    diagnostics: OfflineBuilderDiagnostics,
+    record_index: int,
 ) -> list[dict[str, Any]]:
     image_path = str(record["image_path"])
     degraded_path = materialize_degraded_image(image_path, config)
@@ -221,19 +327,54 @@ def _build_rows(
     conditions = CONDITION_SETS[config.condition_set]
     for rollout_id in range(config.rollouts_per_prompt):
         seed = rollout_seed(base_seed=config.seed, source_index=source_index, rollout_id=rollout_id)
-        response_text = rollout_generator.generate(question=question, image_path=image_path, prompt_text=prompt.text, seed=seed)
+        rollout_uid = f"{record['sample_uid']}:rollout-{rollout_id}"
+        diagnostics.rollout_attempt_count += 1
+        try:
+            response_text = rollout_generator.generate(question=question, image_path=image_path, prompt_text=prompt.text, seed=seed)
+        except Exception as exc:  # noqa: BLE001
+            diagnostics.rollout_exception_count += 1
+            diagnostics.add_skip(
+                sample_uid=rollout_uid,
+                stage="student_rollout",
+                reason=_exception_reason(exc),
+            )
+            _debug(config, record_index, f"rollout exception rollout_id={rollout_id} reason={_exception_reason(exc)}")
+            continue
+        _debug(config, record_index, f"rollout text length={len(response_text)} rollout_id={rollout_id}")
+        if not response_text.strip():
+            diagnostics.rollout_empty_count += 1
+            diagnostics.add_skip(
+                sample_uid=rollout_uid,
+                stage="student_rollout",
+                reason="empty rollout text",
+            )
+            continue
+        diagnostics.rollout_success_count += 1
         token_ids = tuple(int(item) for item in rollout_generator.tokenizer.encode(response_text))
         chunk_masks = parse_response_chunks(token_ids, response_text, rollout_generator.tokenizer, fallback="all_reasoning")
-        rollout_uid = f"{record['sample_uid']}:rollout-{rollout_id}"
-        teacher_scores = score_teacher_conditions(
-            token_ids,
-            question,
-            condition_inputs,
-            conditions,
-            teacher_client,
-            response_text=response_text,
-            request_prefix=rollout_uid,
-        )
+        if not chunk_masks.format_valid:
+            diagnostics.chunk_parse_failure_count += 1
+        _debug(config, record_index, f"chunk parse valid={chunk_masks.format_valid} rollout_id={rollout_id}")
+        try:
+            teacher_scores = score_teacher_conditions(
+                token_ids,
+                question,
+                condition_inputs,
+                conditions,
+                teacher_client,
+                response_text=response_text,
+                request_prefix=rollout_uid,
+            )
+        except Exception as exc:  # noqa: BLE001
+            diagnostics.teacher_score_exception_count += 1
+            diagnostics.add_skip(
+                sample_uid=rollout_uid,
+                stage="teacher_score",
+                reason=_exception_reason(exc),
+            )
+            _debug(config, record_index, f"teacher score ok=false rollout_id={rollout_id} reason={_exception_reason(exc)}")
+            continue
+        _debug(config, record_index, f"teacher score ok=true rollout_id={rollout_id}")
         sampled_ids = torch.tensor([list(token_ids)], dtype=torch.int64)
         signals = compute_condition_signals(teacher_scores, sampled_token_ids=sampled_ids)
         condition_scores = {
@@ -244,16 +385,27 @@ def _build_rows(
             )
             for condition in conditions
         }
-        student_scores_raw = _score_student_conditions(
-            rollout_generator=rollout_generator,
-            token_ids=token_ids,
-            question=question,
-            condition_inputs=condition_inputs,
-            conditions=conditions,
-            response_text=response_text,
-            top_k=teacher_client.metadata.top_k,
-            enabled=config.enable_student_condition_scoring,
-        )
+        try:
+            student_scores_raw = _score_student_conditions(
+                rollout_generator=rollout_generator,
+                token_ids=token_ids,
+                question=question,
+                condition_inputs=condition_inputs,
+                conditions=conditions,
+                response_text=response_text,
+                top_k=teacher_client.metadata.top_k,
+                enabled=config.enable_student_condition_scoring,
+            )
+        except Exception as exc:  # noqa: BLE001
+            diagnostics.student_score_exception_count += 1
+            diagnostics.add_skip(
+                sample_uid=rollout_uid,
+                stage="student_score",
+                reason=_exception_reason(exc),
+            )
+            _debug(config, record_index, f"student score ok=false rollout_id={rollout_id} reason={_exception_reason(exc)}")
+            continue
+        _debug(config, record_index, f"student score ok=true rollout_id={rollout_id}")
         student_score_source = (
             student_scores_raw
             if student_scores_raw
@@ -275,16 +427,27 @@ def _build_rows(
             for condition in conditions
             if condition in student_score_source
         }
-        verifier = (
-            verify_geometry3k_response(
-                question=question,
-                choices=list(record.get("choices", [])),
-                response_text=response_text,
-                answer_metadata=record.get("answer_metadata") or record.get("answer") or record.get("gold"),
+        try:
+            verifier = (
+                verify_geometry3k_response(
+                    question=question,
+                    choices=list(record.get("choices", [])),
+                    response_text=response_text,
+                    answer_metadata=record.get("answer_metadata") or record.get("answer") or record.get("gold"),
+                )
+                if config.verifier_gate == "geometry3k_verifier"
+                else None
             )
-            if config.verifier_gate == "geometry3k_verifier"
-            else None
-        )
+        except Exception as exc:  # noqa: BLE001
+            diagnostics.verifier_exception_count += 1
+            diagnostics.add_skip(
+                sample_uid=rollout_uid,
+                stage="verifier",
+                reason=_exception_reason(exc),
+            )
+            _debug(config, record_index, f"verifier outcome=exception rollout_id={rollout_id} reason={_exception_reason(exc)}")
+            continue
+        _debug(config, record_index, f"verifier outcome={verifier_outcome_class(verifier)} rollout_id={rollout_id}")
         verifier_learning_value_gate = build_verifier_learning_value_gate(verifier)
         capability_scores = compute_student_deficit_capability_scores(
             teacher_condition_scores=condition_scores,
@@ -675,6 +838,7 @@ def summarize_rows(
     *,
     config: FourConditionOfflineBuilderConfig,
     teacher_client: TeacherClient,
+    diagnostics: OfflineBuilderDiagnostics | None = None,
 ) -> dict[str, Any]:
     lengths = [int(row.get("response_token_count", 0)) for row in rows]
     conditions = [condition.value for condition in CONDITION_SETS[config.condition_set]]
@@ -699,7 +863,7 @@ def summarize_rows(
     gate_weight_by_outcome = _gate_weight_by_outcome(rows)
     validation_errors = _summary_validation_errors(rows, delta_report)
     validation_valid = bool(rows) and not validation_errors
-    return {
+    summary = {
         "source_dataset": config.source_dataset,
         "condition_set_name": config.condition_set,
         "conditions": conditions,
@@ -754,6 +918,9 @@ def summarize_rows(
         "red_box_contaminated": False,
         "not_main_experiment": False,
     }
+    if diagnostics is not None:
+        summary.update(diagnostics.to_summary())
+    return summary
 
 
 DELTA_SIGNAL_NAMES = ("visual_detail_delta", "task_selection_delta", "diagram_infer_delta", "solve_delta")
@@ -965,6 +1132,22 @@ def _mean_map(values: Mapping[str, Sequence[float]]) -> dict[str, float | None]:
     return {key: None if not vals else float(mean(vals)) for key, vals in values.items()}
 
 
+def _exception_reason(exc: Exception) -> str:
+    return _compact_reason(f"{type(exc).__name__}: {exc}")
+
+
+def _compact_reason(reason: str, *, limit: int = 240) -> str:
+    compact = " ".join(str(reason).split())
+    if len(compact) <= limit:
+        return compact
+    return compact[: limit - 3] + "..."
+
+
+def _debug(config: FourConditionOfflineBuilderConfig, record_index: int, message: str) -> None:
+    if config.debug_first_n > 0 and record_index < config.debug_first_n:
+        print(f"[fc-opd-builder-debug] record_index={record_index} {message}", flush=True)
+
+
 def _summary_validation_errors(rows: Sequence[Mapping[str, Any]], delta_report: Mapping[str, Any]) -> list[str]:
     errors: list[str] = []
     if not rows:
@@ -1102,6 +1285,8 @@ def build_parser() -> argparse.ArgumentParser:
         default="chunk_gated_contrastive",
     )
     parser.add_argument("--grouped-loss-schema", choices=("none", "capability_chunk_v1"), default="none")
+    parser.add_argument("--allow-empty-output", action="store_true")
+    parser.add_argument("--debug-first-n", type=int, default=0)
     parser.add_argument("--validate-only", action="store_true")
     return parser
 
@@ -1146,6 +1331,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             max_capabilities_per_token=args.max_capabilities_per_token,
             routing_mode=args.routing_mode,
             grouped_loss_schema=args.grouped_loss_schema,
+            allow_empty_output=args.allow_empty_output,
+            debug_first_n=args.debug_first_n,
         )
     )
     validation = validate_four_condition_rows(args.output_jsonl, condition_set=args.condition_set)

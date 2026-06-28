@@ -25,6 +25,7 @@ from dual_track_opd.fc_opd.teacher_client import TeacherClient
 from dual_track_opd.fc_opd.teacher_protocol import tokenizer_fingerprint
 from dual_track_opd.fc_opd.teacher_scorer import SyntheticTeacherScorer
 from dual_track_opd.fc_opd.teacher_service import running_teacher_server
+import pytest
 
 
 def _dataset(tmp_path):
@@ -69,6 +70,44 @@ def _official_geometry_sample(tmp_path):
     return root, sample_dir
 
 
+class FailingRolloutGenerator:
+    def __init__(self, tokenizer):
+        self.tokenizer = tokenizer
+
+    def generate(self, *, question, image_path, prompt_text, seed):
+        del question, image_path, prompt_text, seed
+        raise RuntimeError("mock rollout failed")
+
+
+class EmptyRolloutGenerator:
+    def __init__(self, tokenizer):
+        self.tokenizer = tokenizer
+
+    def generate(self, *, question, image_path, prompt_text, seed):
+        del question, image_path, prompt_text, seed
+        return ""
+
+
+def _write_evidence_cache(tmp_path, dataset, *, condition_set="4c-clean"):
+    evidence_jsonl = tmp_path / "evidence.jsonl"
+    run_evidence_generation(
+        EvidenceGenerationConfig(
+            dataset=dataset,
+            dataset_type="geometry3k",
+            output_jsonl=evidence_jsonl,
+            summary_json=tmp_path / "evidence_summary.json",
+            limit=1,
+            condition_set=condition_set,
+        ),
+        generator=TemplateEvidenceGenerator(),
+    )
+    return evidence_jsonl
+
+
+def _fake_teacher_client():
+    return SimpleNamespace(metadata=SimpleNamespace(model_id="fake-teacher", top_k=8))
+
+
 def test_default_degradation_cache_does_not_pollute_geometry3k_sample_dir(tmp_path, monkeypatch):
     root, sample_dir = _official_geometry_sample(tmp_path)
     output_root = tmp_path / "outputs"
@@ -89,6 +128,93 @@ def test_default_degradation_cache_does_not_pollute_geometry3k_sample_dir(tmp_pa
     assert first_degraded == second_degraded
     assert str(first_degraded).startswith(str(output_root / "fc_opd" / "degraded_images"))
     assert not (sample_dir / "img_diagram.lowres_10pct_nearest.png").exists()
+
+
+def test_rollout_exception_is_counted_and_summarized(tmp_path):
+    dataset = _dataset(tmp_path)
+    evidence_jsonl = _write_evidence_cache(tmp_path, dataset)
+    summary_json = tmp_path / "summary.json"
+
+    result = run_four_condition_offline_builder(
+        FourConditionOfflineBuilderConfig(
+            dataset=dataset,
+            evidence_cache=evidence_jsonl,
+            output_jsonl=tmp_path / "scores.jsonl",
+            summary_json=summary_json,
+            limit=1,
+            rollouts_per_prompt=1,
+            allow_empty_output=True,
+        ),
+        rollout_generator=FailingRolloutGenerator(ByteTokenizer()),
+        teacher_client=_fake_teacher_client(),
+    )
+
+    assert result.rows == []
+    assert result.summary["selected_records"] == 1
+    assert result.summary["evidence_rows_loaded"] == 1
+    assert result.summary["evidence_rows_matched"] == 1
+    assert result.summary["rollout_attempt_count"] == 1
+    assert result.summary["rollout_exception_count"] == 1
+    assert result.summary["row_write_count"] == 0
+    assert result.summary["skipped_examples_top20"][0]["stage"] == "student_rollout"
+    assert "RuntimeError: mock rollout failed" in result.summary["skipped_examples_top20"][0]["reason"]
+    assert summary_json.is_file()
+
+
+def test_all_rows_skipped_raises_runtime_error_after_writing_summary(tmp_path):
+    dataset = _dataset(tmp_path)
+    evidence_jsonl = _write_evidence_cache(tmp_path, dataset)
+    summary_json = tmp_path / "summary_empty_error.json"
+
+    with pytest.raises(RuntimeError, match="wrote zero rows"):
+        run_four_condition_offline_builder(
+            FourConditionOfflineBuilderConfig(
+                dataset=dataset,
+                evidence_cache=evidence_jsonl,
+                output_jsonl=tmp_path / "scores_empty_error.jsonl",
+                summary_json=summary_json,
+                limit=1,
+                rollouts_per_prompt=1,
+            ),
+            rollout_generator=EmptyRolloutGenerator(ByteTokenizer()),
+            teacher_client=_fake_teacher_client(),
+        )
+
+    summary = json.loads(summary_json.read_text(encoding="utf-8"))
+    assert summary["validation_errors_top10"] == ["no rows produced"]
+    assert summary["rollout_empty_count"] == 1
+    assert summary["skipped_examples_top20"][0]["reason"] == "empty rollout text"
+
+
+def test_allow_empty_output_permits_empty_summary(tmp_path):
+    dataset = _dataset(tmp_path)
+    evidence_jsonl = _write_evidence_cache(tmp_path, dataset)
+
+    result = run_four_condition_offline_builder(
+        FourConditionOfflineBuilderConfig(
+            dataset=dataset,
+            evidence_cache=evidence_jsonl,
+            output_jsonl=tmp_path / "scores_empty_allowed.jsonl",
+            summary_json=tmp_path / "summary_empty_allowed.json",
+            limit=1,
+            rollouts_per_prompt=1,
+            allow_empty_output=True,
+        ),
+        rollout_generator=EmptyRolloutGenerator(ByteTokenizer()),
+        teacher_client=_fake_teacher_client(),
+    )
+
+    assert result.rows == []
+    assert result.summary["rollout_empty_count"] == 1
+    assert result.summary["row_write_count"] == 0
+    assert result.summary["validation_valid"] is False
+    assert result.summary["skipped_examples_top20"] == [
+        {
+            "sample_uid": "geometry3k:g1:rollout-0",
+            "stage": "student_rollout",
+            "reason": "empty rollout text",
+        }
+    ]
 
 
 def test_4c_builder_writes_trainable_full_degraded_free_task_rows(tmp_path):
