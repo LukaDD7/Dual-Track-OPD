@@ -46,7 +46,7 @@ python scripts/hpc/build_fc_opd_geometry3k_4c_offline_scores.py \
   --condition-set 6c-solve \
   --enable-student-condition-scoring \
   --student-deficit-gate \
-  --outcome-gate geometry3k_verifier \
+  --verifier-gate geometry3k_verifier \
   --routing-mode student_deficit_chunk_gated \
   --grouped-loss-schema capability_chunk_v1 \
   --limit 32 \
@@ -68,7 +68,8 @@ Expected summary fields:
 - `student_condition_score_success_rate` near `1.0` for all 6C conditions
 - finite `capability_deficit_means`
 - nonzero `capability_final_weight_sums`
-- populated `outcome_counts`
+- populated `verifier_outcome_counts`
+- nonzero `wrong_valid_rollout_opd_weight_sum` when wrong format-valid rollouts exist
 - `grouped_loss_ready: true`
 - `degraded_source_image_count: 0`
 

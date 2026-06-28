@@ -1,5 +1,5 @@
 from dual_track_opd.fc_opd.four_condition_offline_builder import (
-    build_outcome_gate,
+    build_verifier_learning_value_gate,
     compute_student_deficit_capability_scores,
 )
 
@@ -36,7 +36,7 @@ def test_student_deficit_formula_and_chunk_gate():
         teacher_condition_scores=teacher,
         student_condition_scores=student,
         chunk_spans=chunks,
-        outcome_gate=build_outcome_gate(None),
+        verifier_learning_value_gate=build_verifier_learning_value_gate(None),
         max_capabilities_per_token=4,
     )
 
@@ -45,3 +45,23 @@ def test_student_deficit_formula_and_chunk_gate():
     assert visual["student_deficit"][1] == 0
     assert visual["teacher_attribution"][2] == 0
     assert visual["final_token_weight"][3] == 0
+
+
+def test_verifier_learning_value_gate_prioritizes_wrong_valid_rollouts():
+    correct_gate = build_verifier_learning_value_gate(
+        {"correct": True, "format_valid": True, "malformed": False, "reward": 1.0}
+    )
+    wrong_gate = build_verifier_learning_value_gate(
+        {"correct": False, "format_valid": True, "malformed": False, "reward": 0.25}
+    )
+    malformed_gate = build_verifier_learning_value_gate(
+        {"correct": None, "format_valid": False, "malformed": True, "reward": 0.0}
+    )
+
+    assert wrong_gate["chunk_gates"]["visible_evidence"] > correct_gate["chunk_gates"]["visible_evidence"]
+    assert wrong_gate["chunk_gates"]["diagram_inference"] > correct_gate["chunk_gates"]["diagram_inference"]
+    assert correct_gate["chunk_gates"]["answer"] == 0.0
+    assert wrong_gate["chunk_gates"]["visible_evidence"] == 1.0
+    assert wrong_gate["chunk_gates"]["diagram_inference"] == 1.0
+    assert malformed_gate["chunk_gates"]["reasoning"] == 0.0
+    assert malformed_gate["chunk_gates"]["answer"] == 0.0

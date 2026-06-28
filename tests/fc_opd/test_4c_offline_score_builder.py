@@ -196,7 +196,7 @@ def test_6c_builder_writes_expanded_condition_schema(tmp_path):
                 rollout_response_format="fc_opd_structured_v2",
                 enable_student_condition_scoring=True,
                 student_deficit_gate=True,
-                outcome_gate="geometry3k_verifier",
+                verifier_gate="geometry3k_verifier",
                 routing_mode="student_deficit_chunk_gated",
                 grouped_loss_schema="capability_chunk_v1",
             ),
@@ -215,7 +215,8 @@ def test_6c_builder_writes_expanded_condition_schema(tmp_path):
     assert result.summary["validation_valid"] is True
     assert result.summary["validation_error_count"] == 0
     assert result.summary["student_condition_score_success_rate"]["task_solve"] == 1.0
-    assert result.summary["outcome_counts"]["wrong_format_valid"] == 1
+    assert result.summary["verifier_outcome_counts"]["wrong_but_format_valid"] == 1
+    assert result.summary["wrong_valid_rollout_opd_weight_sum"] > result.summary["correct_rollout_opd_weight_sum"]
     assert result.summary["grouped_loss_ready"] is True
     assert len(result.rows) == 1
     row = result.rows[0]
@@ -223,6 +224,9 @@ def test_6c_builder_writes_expanded_condition_schema(tmp_path):
     assert set(row["condition_scores"]) == set(expected)
     assert set(row["student_condition_scores"]) == set(expected)
     assert row["verifier"]["format_valid"] is True
+    assert row["verifier_learning_value_gate"]["outcome_class"] == "wrong_but_format_valid"
+    assert row["verifier_learning_value_gate"]["chunk_gates"]["visible_evidence"] == 1.0
+    assert row["verifier_learning_value_gate"]["chunk_gates"]["diagram_inference"] == 1.0
     assert row["grouped_loss_plan"]["solve"] == ["solving"]
     assert row["routing_mode"] == "student_deficit_chunk_gated"
     assert row["chunk_spans"]["token_counts"]["diagram_inference"] > 0

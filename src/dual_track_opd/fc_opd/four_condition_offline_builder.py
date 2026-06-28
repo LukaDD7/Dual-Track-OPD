@@ -55,6 +55,32 @@ FOUR_CLEAN_CONDITIONS: tuple[Condition, ...] = (
     Condition.TASK,
 )
 DEFAULT_STUDENT_MODEL = "hf:$DTOPD_MODEL_ROOT/Qwen3-VL-4B-Instruct"
+VERIFIER_LEARNING_VALUE_CHUNK_GATES: dict[str, dict[str, float]] = {
+    "correct": {
+        "visible_evidence": 0.25,
+        "diagram_inference": 0.25,
+        "reasoning": 0.10,
+        "answer": 0.00,
+    },
+    "wrong_but_format_valid": {
+        "visible_evidence": 1.00,
+        "diagram_inference": 1.00,
+        "reasoning": 0.75,
+        "answer": 0.50,
+    },
+    "malformed": {
+        "visible_evidence": 0.25,
+        "diagram_inference": 0.10,
+        "reasoning": 0.00,
+        "answer": 0.00,
+    },
+    "unknown": {
+        "visible_evidence": 1.00,
+        "diagram_inference": 1.00,
+        "reasoning": 1.00,
+        "answer": 1.00,
+    },
+}
 
 
 @dataclass(frozen=True)
@@ -86,7 +112,7 @@ class FourConditionOfflineBuilderConfig:
     condition_set: str = "4c-legacy"
     enable_student_condition_scoring: bool = False
     student_deficit_gate: bool = False
-    outcome_gate: str = "none"
+    verifier_gate: str = "none"
     strict_condition_validation: bool = False
     capability_margin: float = 0.0
     max_capabilities_per_token: int = 2
@@ -102,8 +128,8 @@ class FourConditionOfflineBuilderConfig:
             raise ValueError(f"degraded_mode must be one of {DEGRADED_MODES}")
         if self.condition_set not in CONDITION_SETS:
             raise ValueError(f"condition_set must be one of {sorted(CONDITION_SETS)}")
-        if self.outcome_gate not in {"none", "geometry3k_verifier"}:
-            raise ValueError("outcome_gate must be none or geometry3k_verifier")
+        if self.verifier_gate not in {"none", "geometry3k_verifier"}:
+            raise ValueError("verifier_gate must be none or geometry3k_verifier")
         if self.max_capabilities_per_token < 1:
             raise ValueError("max_capabilities_per_token must be at least 1")
 
@@ -256,15 +282,15 @@ def _build_rows(
                 response_text=response_text,
                 answer_metadata=record.get("answer_metadata") or record.get("answer") or record.get("gold"),
             )
-            if config.outcome_gate == "geometry3k_verifier"
+            if config.verifier_gate == "geometry3k_verifier"
             else None
         )
-        outcome_gate = build_outcome_gate(verifier)
+        verifier_learning_value_gate = build_verifier_learning_value_gate(verifier)
         capability_scores = compute_student_deficit_capability_scores(
             teacher_condition_scores=condition_scores,
             student_condition_scores=student_condition_scores,
             chunk_spans=_serialize_chunks(chunk_masks),
-            outcome_gate=outcome_gate,
+            verifier_learning_value_gate=verifier_learning_value_gate,
             margin=config.capability_margin,
             max_capabilities_per_token=config.max_capabilities_per_token,
             task_infer_solve_like=bool(evidence_row.get("task_infer_solve_like")),
@@ -345,7 +371,7 @@ def _build_rows(
             },
             "capability_scores": capability_scores,
             "verifier": verifier,
-            "outcome_gate": outcome_gate,
+            "verifier_learning_value_gate": verifier_learning_value_gate,
             "grouped_loss_plan": grouped_loss_plan(config.grouped_loss_schema),
             "routing_mode": config.routing_mode,
             "grouped_loss_schema": config.grouped_loss_schema,
@@ -423,25 +449,26 @@ def _score_student_conditions(
     return {}
 
 
-def build_outcome_gate(verifier: Mapping[str, Any] | None) -> dict[str, Any]:
+def verifier_outcome_class(verifier: Mapping[str, Any] | None) -> str:
     if verifier is None:
-        gates = {chunk: 1.0 for chunk in ("visible_evidence", "diagram_inference", "reasoning", "answer")}
-        return {"correct": None, "format_valid": True, "reward": 1.0, "chunk_gates": gates}
-    correct = verifier.get("correct")
-    format_valid = bool(verifier.get("format_valid", False))
-    malformed = bool(verifier.get("malformed", False))
-    if malformed:
-        gates = {chunk: 0.0 for chunk in ("visible_evidence", "diagram_inference", "reasoning", "answer")}
-    elif correct is True:
-        gates = {chunk: 1.0 for chunk in ("visible_evidence", "diagram_inference", "reasoning", "answer")}
-    elif format_valid:
-        gates = {"visible_evidence": 0.5, "diagram_inference": 0.5, "reasoning": 0.25, "answer": 0.0}
-    else:
-        gates = {chunk: 0.0 for chunk in ("visible_evidence", "diagram_inference", "reasoning", "answer")}
+        return "unknown"
+    if bool(verifier.get("malformed", False)):
+        return "malformed"
+    if verifier.get("correct") is True:
+        return "correct"
+    if bool(verifier.get("format_valid", False)):
+        return "wrong_but_format_valid"
+    return "malformed"
+
+
+def build_verifier_learning_value_gate(verifier: Mapping[str, Any] | None) -> dict[str, Any]:
+    outcome_class = verifier_outcome_class(verifier)
+    gates = dict(VERIFIER_LEARNING_VALUE_CHUNK_GATES[outcome_class])
     return {
-        "correct": correct,
-        "format_valid": format_valid,
-        "reward": float(verifier.get("reward", 0.0)),
+        "outcome_class": outcome_class,
+        "correct": None if verifier is None else verifier.get("correct"),
+        "format_valid": True if verifier is None else bool(verifier.get("format_valid", False)),
+        "reward": 1.0 if verifier is None else float(verifier.get("reward", 0.0)),
         "chunk_gates": gates,
     }
 
@@ -461,7 +488,7 @@ def compute_student_deficit_capability_scores(
     teacher_condition_scores: Mapping[str, Mapping[str, Any]],
     student_condition_scores: Mapping[str, Mapping[str, Any]],
     chunk_spans: Mapping[str, Any],
-    outcome_gate: Mapping[str, Any],
+    verifier_learning_value_gate: Mapping[str, Any],
     margin: float = 0.0,
     max_capabilities_per_token: int = 2,
     task_infer_solve_like: bool = False,
@@ -510,15 +537,19 @@ def compute_student_deficit_capability_scores(
             float(CHUNK_CAPABILITY_COMPATIBILITY.get(label, {}).get(capability, 0.0))
             for label in chunk_labels
         ]
-        chunk_gates = outcome_gate.get("chunk_gates", {}) if isinstance(outcome_gate, Mapping) else {}
-        outcome_weights = [float(chunk_gates.get(label, 1.0)) for label in chunk_labels]
+        chunk_gates = (
+            verifier_learning_value_gate.get("chunk_gates", {})
+            if isinstance(verifier_learning_value_gate, Mapping)
+            else {}
+        )
+        verifier_learning_value_weights = [float(chunk_gates.get(label, 1.0)) for label in chunk_labels]
         final = [
             attr * deficit * compat * gate
             for attr, deficit, compat, gate in zip(
                 teacher_attribution,
                 student_deficit,
                 chunk_compatibility,
-                outcome_weights,
+                verifier_learning_value_weights,
                 strict=True,
             )
         ]
@@ -531,7 +562,7 @@ def compute_student_deficit_capability_scores(
             "teacher_attribution": teacher_attribution,
             "student_deficit": student_deficit,
             "chunk_compatibility": chunk_compatibility,
-            "outcome_gate": outcome_weights,
+            "verifier_learning_value_gate": verifier_learning_value_weights,
             "final_token_weight": final,
             "valid": True,
         }
@@ -561,7 +592,7 @@ def _invalid_capability(length: int, positive: str, negative: str, reason: str) 
         "teacher_attribution": [0.0] * length,
         "student_deficit": [0.0] * length,
         "chunk_compatibility": [0.0] * length,
-        "outcome_gate": [0.0] * length,
+        "verifier_learning_value_gate": [0.0] * length,
         "final_token_weight": [0.0] * length,
         "valid": False,
         "invalid_reason": reason,
@@ -664,7 +695,8 @@ def summarize_rows(
                 chunk_counts[str(key)] += int(value)
     delta_report = _summarize_delta_fields(rows)
     capability_report = _summarize_capability_fields(rows)
-    outcome_counts = _outcome_counts(rows)
+    verifier_outcome_counts = _verifier_outcome_counts(rows)
+    gate_weight_by_outcome = _gate_weight_by_outcome(rows)
     validation_errors = _summary_validation_errors(rows, delta_report)
     validation_valid = bool(rows) and not validation_errors
     return {
@@ -687,7 +719,13 @@ def summarize_rows(
         "capability_final_weight_sums": capability_report["final_weight_sums"],
         "capability_nonzero_token_counts": capability_report["nonzero_token_counts"],
         "capability_by_chunk_weight_sums": capability_report["by_chunk_weight_sums"],
-        "outcome_counts": outcome_counts,
+        "verifier_outcome_counts": verifier_outcome_counts,
+        "gate_weight_by_outcome": gate_weight_by_outcome,
+        "capability_weight_by_outcome": capability_report["by_outcome_weight_sums"],
+        "capability_weight_by_chunk_and_outcome": capability_report["by_chunk_and_outcome_weight_sums"],
+        "correct_rollout_opd_weight_sum": capability_report["rollout_weight_sums"]["correct"],
+        "wrong_valid_rollout_opd_weight_sum": capability_report["rollout_weight_sums"]["wrong_but_format_valid"],
+        "malformed_rollout_opd_weight_sum": capability_report["rollout_weight_sums"]["malformed"],
         "verifier_accuracy_over_rollouts": _verifier_accuracy(rows),
         "task_infer_class_counts": dict(Counter(str(row.get("task_infer_class", "missing")) for row in rows)),
         "rows_with_invalid_capability": capability_report["rows_with_invalid_capability"],
@@ -814,6 +852,14 @@ def _summarize_capability_fields(rows: Sequence[Mapping[str, Any]]) -> dict[str,
     final_sums: dict[str, float] = {name: 0.0 for name in CAPABILITY_CONTRASTS}
     nonzero_counts: dict[str, int] = {name: 0 for name in CAPABILITY_CONTRASTS}
     by_chunk: dict[str, dict[str, float]] = {name: {} for name in CAPABILITY_CONTRASTS}
+    by_outcome: dict[str, dict[str, float]] = {name: {} for name in CAPABILITY_CONTRASTS}
+    by_chunk_and_outcome: dict[str, dict[str, dict[str, float]]] = {name: {} for name in CAPABILITY_CONTRASTS}
+    rollout_weight_sums: dict[str, float] = {
+        "correct": 0.0,
+        "wrong_but_format_valid": 0.0,
+        "malformed": 0.0,
+        "unknown": 0.0,
+    }
     rows_with_invalid: list[str] = []
 
     for row in rows:
@@ -821,7 +867,9 @@ def _summarize_capability_fields(rows: Sequence[Mapping[str, Any]]) -> dict[str,
         if not isinstance(capability_scores, Mapping):
             continue
         labels = _chunk_labels(row.get("chunk_spans", {}) if isinstance(row.get("chunk_spans"), Mapping) else {}, int(row.get("response_token_count", 0)))
+        outcome_class = _row_verifier_outcome_class(row)
         row_invalid = False
+        row_weight_sum = 0.0
         for capability in CAPABILITY_CONTRASTS:
             block = capability_scores.get(capability)
             if not isinstance(block, Mapping):
@@ -833,12 +881,17 @@ def _summarize_capability_fields(rows: Sequence[Mapping[str, Any]]) -> dict[str,
             deficit_values[capability].extend(_finite_values(block.get("student_deficit", [])))
             weights = _finite_values(block.get("final_token_weight", []))
             final_sums[capability] += float(sum(weights))
+            row_weight_sum += float(sum(weights))
             nonzero_counts[capability] += sum(1 for value in weights if value > 0)
+            by_outcome[capability][outcome_class] = by_outcome[capability].get(outcome_class, 0.0) + float(sum(weights))
             chunk_report = by_chunk[capability]
+            outcome_chunk_report = by_chunk_and_outcome[capability].setdefault(outcome_class, {})
             for label, value in zip(labels, weights, strict=False):
                 chunk_report[label] = chunk_report.get(label, 0.0) + float(value)
+                outcome_chunk_report[label] = outcome_chunk_report.get(label, 0.0) + float(value)
         if row_invalid:
             rows_with_invalid.append(str(row.get("sample_uid", "unknown")))
+        rollout_weight_sums[outcome_class] = rollout_weight_sums.get(outcome_class, 0.0) + row_weight_sum
 
     return {
         "teacher_delta_means": _mean_map(teacher_values),
@@ -847,25 +900,46 @@ def _summarize_capability_fields(rows: Sequence[Mapping[str, Any]]) -> dict[str,
         "final_weight_sums": final_sums,
         "nonzero_token_counts": nonzero_counts,
         "by_chunk_weight_sums": by_chunk,
+        "by_outcome_weight_sums": by_outcome,
+        "by_chunk_and_outcome_weight_sums": by_chunk_and_outcome,
+        "rollout_weight_sums": rollout_weight_sums,
         "rows_with_invalid_capability": rows_with_invalid,
     }
 
 
-def _outcome_counts(rows: Sequence[Mapping[str, Any]]) -> dict[str, int]:
-    counts = {"correct": 0, "wrong_format_valid": 0, "malformed": 0, "unknown": 0}
+def _verifier_outcome_counts(rows: Sequence[Mapping[str, Any]]) -> dict[str, int]:
+    counts = {"correct": 0, "wrong_but_format_valid": 0, "malformed": 0, "unknown": 0}
     for row in rows:
-        verifier = row.get("verifier")
-        if not isinstance(verifier, Mapping):
-            counts["unknown"] += 1
-        elif verifier.get("malformed"):
-            counts["malformed"] += 1
-        elif verifier.get("correct") is True:
-            counts["correct"] += 1
-        elif verifier.get("format_valid"):
-            counts["wrong_format_valid"] += 1
-        else:
-            counts["unknown"] += 1
+        counts[_row_verifier_outcome_class(row)] += 1
     return counts
+
+
+def _row_verifier_outcome_class(row: Mapping[str, Any]) -> str:
+    gate = row.get("verifier_learning_value_gate")
+    if isinstance(gate, Mapping) and str(gate.get("outcome_class", "")) in VERIFIER_LEARNING_VALUE_CHUNK_GATES:
+        return str(gate["outcome_class"])
+    verifier = row.get("verifier")
+    return verifier_outcome_class(verifier if isinstance(verifier, Mapping) else None)
+
+
+def _gate_weight_by_outcome(rows: Sequence[Mapping[str, Any]]) -> dict[str, dict[str, float]]:
+    output: dict[str, dict[str, float]] = {
+        outcome: {chunk: 0.0 for chunk in ("visible_evidence", "diagram_inference", "reasoning", "answer")}
+        for outcome in VERIFIER_LEARNING_VALUE_CHUNK_GATES
+    }
+    for row in rows:
+        outcome_class = _row_verifier_outcome_class(row)
+        length = int(row.get("response_token_count", 0))
+        labels = _chunk_labels(
+            row.get("chunk_spans", {}) if isinstance(row.get("chunk_spans"), Mapping) else {},
+            length,
+        )
+        gate = row.get("verifier_learning_value_gate")
+        chunk_gates = gate.get("chunk_gates", {}) if isinstance(gate, Mapping) else {}
+        for label in labels:
+            if label in output[outcome_class]:
+                output[outcome_class][label] += float(chunk_gates.get(label, 1.0))
+    return output
 
 
 def _verifier_accuracy(rows: Sequence[Mapping[str, Any]]) -> float | None:
@@ -1006,7 +1080,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--condition-set", choices=tuple(CONDITION_SETS), default="4c-clean")
     parser.add_argument("--enable-student-condition-scoring", action="store_true")
     parser.add_argument("--student-deficit-gate", action="store_true")
-    parser.add_argument("--outcome-gate", choices=("none", "geometry3k_verifier"), default="none")
+    parser.add_argument("--verifier-gate", choices=("none", "geometry3k_verifier"), default="none")
+    parser.add_argument(
+        "--outcome-gate",
+        choices=("none", "geometry3k_verifier"),
+        dest="verifier_gate",
+        default=argparse.SUPPRESS,
+        help=argparse.SUPPRESS,
+    )
     parser.add_argument("--strict-condition-validation", action="store_true")
     parser.add_argument("--capability-margin", type=float, default=0.0)
     parser.add_argument("--max-capabilities-per-token", type=int, default=2)
@@ -1059,7 +1140,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             condition_set=args.condition_set,
             enable_student_condition_scoring=args.enable_student_condition_scoring,
             student_deficit_gate=args.student_deficit_gate,
-            outcome_gate=args.outcome_gate,
+            verifier_gate=args.verifier_gate,
             strict_condition_validation=args.strict_condition_validation,
             capability_margin=args.capability_margin,
             max_capabilities_per_token=args.max_capabilities_per_token,
