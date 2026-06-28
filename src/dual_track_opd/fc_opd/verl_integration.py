@@ -53,16 +53,25 @@ def online_batch_output_to_verl_tensors(
     output: OnlineFCOPDBatchOutput,
     *,
     condition_order: Sequence[Condition | str] = DEFAULT_VERL_CONDITION_ORDER,
+    target_seq_len: int | None = None,
+    response_mask: torch.Tensor | None = None,
 ) -> VerlFCOPDTensors:
     """Stack online FC-OPD sample outputs into verl actor tensor fields."""
 
-    return online_sample_outputs_to_verl_tensors(output.samples, condition_order=condition_order)
+    return online_sample_outputs_to_verl_tensors(
+        output.samples,
+        condition_order=condition_order,
+        target_seq_len=target_seq_len,
+        response_mask=response_mask,
+    )
 
 
 def online_sample_outputs_to_verl_tensors(
     samples: Sequence[OnlineFCOPDSampleOutput],
     *,
     condition_order: Sequence[Condition | str] = DEFAULT_VERL_CONDITION_ORDER,
+    target_seq_len: int | None = None,
+    response_mask: torch.Tensor | None = None,
 ) -> VerlFCOPDTensors:
     if not samples:
         raise ValueError("at least one online FC-OPD sample output is required")
@@ -70,9 +79,16 @@ def online_sample_outputs_to_verl_tensors(
     if not normalized_order:
         raise ValueError("condition_order must be non-empty")
 
-    seq_len = samples[0].response_token_ids.shape[-1]
+    first_seq_len = samples[0].response_token_ids.shape[-1]
+    seq_len = int(target_seq_len or first_seq_len)
+    if seq_len < first_seq_len:
+        raise ValueError("target_seq_len must be at least the longest sample response length")
     top_k = _top_k_for_sample(samples[0], normalized_order[0])
     device = samples[0].response_token_ids.device
+    if response_mask is not None:
+        if response_mask.shape != (len(samples), seq_len):
+            raise ValueError(f"response_mask must have shape {(len(samples), seq_len)}")
+        response_mask = response_mask.to(device=device, dtype=torch.float32)
 
     topk_ids = []
     topk_log_probs = []
@@ -80,7 +96,9 @@ def online_sample_outputs_to_verl_tensors(
     tail_blocks = []
     has_any_tail = False
     for sample in samples:
-        _validate_sample_shape(sample, seq_len=seq_len)
+        sample_seq_len = sample.response_token_ids.shape[-1]
+        if sample_seq_len > seq_len:
+            raise ValueError(f"{sample.sample_uid}: sample response length exceeds target_seq_len")
         sample_ids = []
         sample_log_probs = []
         sample_weights = []
@@ -92,24 +110,25 @@ def online_sample_outputs_to_verl_tensors(
                 raise ValueError(f"{sample.sample_uid}: missing condition weights for {condition.value}")
             teacher = sample.teacher_scores[condition]
             teacher.validate()
-            if teacher.token_ids.shape != (1, seq_len, top_k):
+            if teacher.token_ids.shape != (1, sample_seq_len, top_k):
                 raise ValueError(
                     f"{sample.sample_uid}: {condition.value} teacher top-k shape "
-                    f"{tuple(teacher.token_ids.shape)} != {(1, seq_len, top_k)}"
+                    f"{tuple(teacher.token_ids.shape)} != {(1, sample_seq_len, top_k)}"
                 )
             weight = sample.condition_weights[condition]
-            if weight.shape != (1, seq_len):
+            if weight.shape != (1, sample_seq_len):
                 raise ValueError(
-                    f"{sample.sample_uid}: {condition.value} weight shape {tuple(weight.shape)} != {(1, seq_len)}"
+                    f"{sample.sample_uid}: {condition.value} weight shape {tuple(weight.shape)} != {(1, sample_seq_len)}"
                 )
-            sample_ids.append(teacher.token_ids.squeeze(0).to(device=device, dtype=torch.long))
-            sample_log_probs.append(teacher.log_probs.squeeze(0).to(device=device, dtype=torch.float32))
-            sample_weights.append(weight.squeeze(0).to(device=device, dtype=torch.float32))
+            sample_ids.append(_pad_topk_ids(teacher.token_ids.squeeze(0), seq_len).to(device=device, dtype=torch.long))
+            sample_log_probs.append(_pad_topk_log_probs(teacher.log_probs.squeeze(0), seq_len).to(device=device, dtype=torch.float32))
+            sample_weight = _pad_vector(weight.squeeze(0), seq_len).to(device=device, dtype=torch.float32)
+            sample_weights.append(sample_weight)
             if teacher.tail_log_prob is None:
-                sample_tails.append(torch.full((seq_len,), float("-inf"), dtype=torch.float32, device=device))
+                sample_tails.append(torch.full((seq_len,), -30.0, dtype=torch.float32, device=device))
             else:
                 has_any_tail = True
-                sample_tails.append(teacher.tail_log_prob.squeeze(0).to(device=device, dtype=torch.float32))
+                sample_tails.append(_pad_vector(teacher.tail_log_prob.squeeze(0), seq_len, pad_value=0.0).to(device=device, dtype=torch.float32))
         topk_ids.append(torch.stack(sample_ids, dim=0))
         topk_log_probs.append(torch.stack(sample_log_probs, dim=0))
         condition_weights.append(torch.stack(sample_weights, dim=0))
@@ -124,10 +143,14 @@ def online_sample_outputs_to_verl_tensors(
         missing = [condition.value for condition in normalized_order if condition not in VERL_CONDITION_IDS]
         raise ValueError(f"condition_order includes unsupported conditions: {', '.join(missing)}")
 
+    stacked_weights = torch.stack(condition_weights, dim=0)
+    if response_mask is not None:
+        stacked_weights = stacked_weights * response_mask.unsqueeze(1)
+
     return VerlFCOPDTensors(
         teacher_topk_indices=torch.stack(topk_ids, dim=0),
         teacher_topk_log_probs=torch.stack(topk_log_probs, dim=0),
-        condition_weights=torch.stack(condition_weights, dim=0),
+        condition_weights=stacked_weights,
         condition_ids=condition_ids,
         teacher_tail_log_prob=torch.stack(tail_blocks, dim=0) if has_any_tail else None,
     )
@@ -139,6 +162,22 @@ def _top_k_for_sample(sample: OnlineFCOPDSampleOutput, condition: Condition) -> 
     return int(sample.teacher_scores[condition].token_ids.shape[-1])
 
 
-def _validate_sample_shape(sample: OnlineFCOPDSampleOutput, *, seq_len: int) -> None:
-    if sample.response_token_ids.shape != (1, seq_len):
-        raise ValueError(f"{sample.sample_uid}: response_token_ids must have shape [1, {seq_len}]")
+def _pad_topk_ids(values: torch.Tensor, seq_len: int) -> torch.Tensor:
+    if values.shape[0] == seq_len:
+        return values
+    pad = torch.zeros((seq_len - values.shape[0], values.shape[1]), dtype=values.dtype, device=values.device)
+    return torch.cat([values, pad], dim=0)
+
+
+def _pad_topk_log_probs(values: torch.Tensor, seq_len: int) -> torch.Tensor:
+    if values.shape[0] == seq_len:
+        return values
+    pad = torch.zeros((seq_len - values.shape[0], values.shape[1]), dtype=values.dtype, device=values.device)
+    return torch.cat([values, pad], dim=0)
+
+
+def _pad_vector(values: torch.Tensor, seq_len: int, *, pad_value: float = 0.0) -> torch.Tensor:
+    if values.shape[0] == seq_len:
+        return values
+    pad = torch.full((seq_len - values.shape[0],), pad_value, dtype=values.dtype, device=values.device)
+    return torch.cat([values, pad], dim=0)

@@ -72,6 +72,7 @@ from .verl_integration import (
     online_batch_output_to_verl_tensors,
     online_sample_outputs_to_verl_tensors,
 )
+from .verl_post_rollout_hook import fc_opd_post_rollout_hook
 from .verl_sparse_kd import VerlSparseKDOutput, compute_verl_sparse_topk_kd
 
 __all__ = [
@@ -119,6 +120,7 @@ __all__ = [
     "condition_inputs_from_record",
     "default_output_dir",
     "detect_tied_parameter_groups",
+    "fc_opd_post_rollout_hook",
     "iter_offline_scores",
     "jensen_shannon_topk",
     "lm_head_embed_tied",

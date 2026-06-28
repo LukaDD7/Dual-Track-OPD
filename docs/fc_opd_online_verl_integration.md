@@ -174,6 +174,17 @@ The project-owned post-rollout hook should:
 
 The hook must not read offline score JSONL or reuse precomputed teacher scores.
 
+The first implementation is:
+
+```text
+dual_track_opd.fc_opd.verl_post_rollout_hook.fc_opd_post_rollout_hook
+```
+
+It scores only tokens selected by `response_mask`, pads the resulting `fc_*`
+tensors back to actor `response_len`, and requires an explicit
+`student_scorer`/`student_scorer_fqn` so full training can route student forced
+scoring to the intended GPU worker or model adapter.
+
 The actor patch deliberately fail-fasts when fused actor kernels hide logits.
 Remove-padding without Ulysses sequence parallel is covered; remove-padding plus
 Ulysses SP needs a separate alignment smoke before enabling.

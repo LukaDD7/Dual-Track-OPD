@@ -1,10 +1,12 @@
 # FC-OPD verl Integration: Patch Rationale & Missing Hook
 
 Written 2026-06-28. Context: codex delivered the patch overlay (`993cf28`),
-tests pass (195 passed, 2 skipped), patches apply cleanly. The architecture is
-sound but **the trainer-side hook implementation is still missing** — the
-patches define the interface contract but the function that the trainer calls
-is not yet written.
+tests pass (195 passed, 2 skipped), patches apply cleanly. CPU follow-up
+identified that the trainer-side hook implementation was missing. The first
+hook implementation now lives in
+`src/dual_track_opd/fc_opd/verl_post_rollout_hook.py`; it wires current rollout
+tokens to online FC-OPD scoring and attaches `fc_*` tensors. A real GPU student
+forced-scorer FQN/worker still needs to be supplied for full verl training.
 
 ## 1. Why Patches Instead of Directly Modifying `third_party/verl`
 
@@ -184,7 +186,7 @@ All inherited from `RayPPOTrainer` and `BasePPOActor`:
 │  chunk_parser.py        ← Response structure parsing    │
 │  verifier.py            ← Answer verification           │
 │                                                         │
-│  ~~MISSING~~ post_rollout_hook.py  ← Trainer hook impl  │
+│  verl_post_rollout_hook.py ← Trainer hook impl          │
 │                                                         │
 ├─────────────────────────────────────────────────────────┤
 │  REUSED FROM verl (third_party/verl/)                  │
@@ -208,7 +210,7 @@ All inherited from `RayPPOTrainer` and `BasePPOActor`:
 └─────────────────────────────────────────────────────────┘
 ```
 
-## 3. What's Missing: The `post_rollout_hook` Implementation
+## 3. Post-Rollout Hook Implementation
 
 ### 3.1 The Interface Contract
 
@@ -328,13 +330,13 @@ Options:
 - Run the student forward pass inside the actor patch instead (but then teacher
   scores aren't available yet)
 
-### 3.4 Proposed File
+### 3.4 Hook File
 
 ```
 src/dual_track_opd/fc_opd/verl_post_rollout_hook.py
 ```
 
-This file should export a single function:
+This file exports:
 
 ```python
 def fc_opd_post_rollout_hook(
@@ -362,11 +364,13 @@ algorithm:
 
 ### Priority order:
 
-1. **[P0]** Write `src/dual_track_opd/fc_opd/verl_post_rollout_hook.py`
-   - Implement `fc_opd_post_rollout_hook()` with Steps 1-8 from §3.2
-   - Handle single-sample batch first (B=1), then generalize
-   - Reuse the smoke script's `_HFStudentScorer` pattern for student forced scoring
-   - Reuse `TeacherClient` for teacher calls
+1. **[P0 done]** Write `src/dual_track_opd/fc_opd/verl_post_rollout_hook.py`
+   - `fc_opd_post_rollout_hook()` implements Steps 1-8 from §3.2
+   - Handles padded verl response tensors by scoring valid `response_mask`
+     tokens and padding `fc_*` tensors back to actor `response_len`
+   - Reuses `TeacherClient` for teacher calls when `teacher_url` is configured
+   - Requires an explicit `student_scorer`/`student_scorer_fqn` so the hook does
+     not silently load a model or consume stale offline scores
 
 2. **[P0]** Write a smoke test that exercises the hook end-to-end
    - Load a model, generate one rollout, run the hook, verify `fc_*` tensors
@@ -392,11 +396,11 @@ Before merging, verify:
 
 - [ ] `git apply --check --directory=third_party/verl` both patches clean
 - [ ] `pytest tests/fc_opd/ -q` passes (currently 195 passed, 2 skipped)
-- [ ] Hook function loads via `load_class_from_fqn` without import errors
-- [ ] Hook returns `(batch, metrics)` tuple with `fc_*` keys in `batch.batch`
-- [ ] `fc_teacher_topk_indices` has shape `[B, C, T, K]`
-- [ ] `fc_condition_weights` has shape `[B, C, T]`, all values non-negative
-- [ ] `fc_condition_ids` matches `DEFAULT_VERL_CONDITION_ORDER`
+- [x] Hook function loads via `load_class_from_fqn` without import errors
+- [x] Hook returns `(batch, metrics)` tuple with `fc_*` keys in `batch.batch`
+- [x] `fc_teacher_topk_indices` has shape `[B, C, T, K]`
+- [x] `fc_condition_weights` has shape `[B, C, T]`, all values non-negative
+- [x] `fc_condition_ids` matches `DEFAULT_VERL_CONDITION_ORDER`
 - [ ] Smoke step: one optimizer step with `fc_opd_coef > 0` changes actor params
 - [ ] `actor/fc_opd_loss` > 0 (not collapsed to zero)
-- [ ] No offline JSONL is read by the hook
+- [x] No offline JSONL is read by the hook
