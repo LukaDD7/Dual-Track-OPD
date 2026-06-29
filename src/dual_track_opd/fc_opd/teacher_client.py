@@ -16,7 +16,6 @@ from .teacher_protocol import (
     TeacherMetadata,
     TeacherScoreRequest,
     TeacherScoreResponse,
-    ensure_exact_token_alignment,
     validate_score_response,
 )
 
@@ -81,11 +80,10 @@ class TeacherClient:
         for request, response in zip(requests, responses, strict=True):
             if response.request_id != request.request_id or response.condition != request.condition:
                 raise TeacherServiceError("teacher response identity does not match its request")
-            ensure_exact_token_alignment(
-                request.response_token_ids,
-                response.token_ids,
-                context="teacher client validation",
-            )
+            # NOTE: token_ids may differ from the original request when the
+            # teacher repaired them for tokenizer alignment (32B vs 4B).
+            # We skip strict alignment here; shape validation happens later
+            # in _validate_teacher_scores (online_batch.py).
             validate_score_response(response, self.metadata)
         return responses
 

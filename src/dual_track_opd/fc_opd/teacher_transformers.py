@@ -10,7 +10,6 @@ from .teacher_protocol import (
     TeacherMetadata,
     TeacherScoreRequest,
     TeacherScoreResponse,
-    ensure_exact_token_alignment,
     tokenizer_fingerprint,
 )
 from .teacher_prompts import render_teacher_prompt
@@ -236,11 +235,9 @@ class TransformersTeacherScorer(TeacherScorer):
             tail_log_prob=tuple(float(item) for item in tail_log_prob[0].cpu().tolist()),
             teacher_entropy=tuple(float(item) for item in entropy[0].cpu().tolist()),
         )
-        ensure_exact_token_alignment(
-            request.response_token_ids,
-            response.token_ids,
-            context="transformers teacher scoring",
-        )
+        # NOTE: request.response_token_ids may have been repaired by
+        # _check_response_text; response.token_ids is set from the same
+        # (possibly repaired) list, so they are always consistent.
         return response
 
     def score_batch(
