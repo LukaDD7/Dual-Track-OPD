@@ -57,7 +57,8 @@ from .offline_scoring import (
 )
 from .router import RouterConfig, route_condition_weights
 from .signal_decomposer import TeacherTopK, compute_condition_signals, jensen_shannon_topk
-from .teacher_client import TeacherClient, score_teacher_conditions
+from .student_scorer import StudentScorer
+from .teacher_client import TeacherClient, score_teacher_conditions, score_teacher_conditions_multi_sample
 from .teacher_protocol import (
     TeacherMetadata,
     TeacherScoreRequest,
@@ -102,6 +103,7 @@ __all__ = [
     "RealStudentResult",
     "RealStudentSmokeReport",
     "RouterConfig",
+    "StudentScorer",
     "StudentForwardOutput",
     "TeacherTopK",
     "TeacherClient",
@@ -144,6 +146,7 @@ __all__ = [
     "run_real_student_smoke",
     "score_record",
     "score_teacher_conditions",
+    "score_teacher_conditions_multi_sample",
     "sparse_forward_kl",
     "teacher_scores_to_device",
     "tokenizer_fingerprint",

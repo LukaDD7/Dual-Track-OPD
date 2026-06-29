@@ -1,0 +1,76 @@
+# verl FC-OPD one-step smoke config.
+# Usage:
+#   python -m verl.trainer.main_ppo --config-path=../../configs/experiment --config-name=verl_fc_opd_smoke
+#
+# Prerequisites:
+#   1. Teacher service running on GPU 3:18080
+#   2. Patches applied to third_party/verl
+#   3. Parquet dataset at the path in data.train_files
+
+algorithm:
+  adv_estimator: grpo
+  use_kl_in_reward: false
+  # FC-OPD hook — the trainer patch reads this
+  fc_opd:
+    post_rollout_hook: dual_track_opd.fc_opd.verl_post_rollout_hook.fc_opd_post_rollout_hook
+    student_scorer_fqn: dual_track_opd.fc_opd.student_scorer.StudentScorer
+    student_scorer_kwargs:
+      model_path: ${actor_rollout_ref.model.path}
+      device: cuda
+      dtype: bfloat16
+      top_k: 32
+    teacher_url: http://127.0.0.1:18080
+    conditions: [full, degraded, free, task_visible, task_infer, task_solve]
+    loss_coef: 0.1
+    renormalize_topk: true
+    include_tail: true
+
+data:
+  train_files: /inspire/hdd/global_user/mengweicheng-240108120092/lzy/fc-opd-storage/outputs/fc_opd/verl_smoke/train.parquet
+  val_files: /inspire/hdd/global_user/mengweicheng-240108120092/lzy/fc-opd-storage/outputs/fc_opd/verl_smoke/train.parquet
+  train_batch_size: 2
+  max_prompt_length: 1024
+  max_response_length: 512
+  filter_overlong_prompts: false
+  truncation: error
+  image_key: images
+
+actor_rollout_ref:
+  hybrid_engine: true
+  model:
+    path: /inspire/hdd/global_user/mengweicheng-240108120092/lzy/models/Qwen3-VL-4B-Instruct
+    use_remove_padding: false
+    use_fused_kernels: false  # REQUIRED: FC-OPD needs live logits
+    enable_gradient_checkpointing: true
+  actor:
+    optim:
+      lr: 1e-6
+    ppo_mini_batch_size: 2
+    ppo_micro_batch_size_per_gpu: 1
+    use_kl_loss: false
+    fsdp_config:
+      param_offload: false
+      optimizer_offload: false
+  rollout:
+    name: vllm
+    tensor_model_parallel_size: 1
+    gpu_memory_utilization: 0.4
+    n: 1
+    free_cache_engine: true
+    enforce_eager: true
+    enable_chunked_prefill: false
+  ref:
+    fsdp_config:
+      param_offload: true
+
+trainer:
+  critic_warmup: 0
+  logger: '["console"]'
+  project_name: verl_fc_opd_smoke
+  experiment_name: fc_opd_one_step
+  n_gpus_per_node: 1
+  nnodes: 1
+  save_freq: -1
+  test_freq: -1
+  total_epochs: 1
+  val_before_train: false

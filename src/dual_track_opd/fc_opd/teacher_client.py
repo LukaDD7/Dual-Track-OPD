@@ -117,14 +117,76 @@ def score_teacher_conditions(
     responses = teacher_client.score(requests)
     output: dict[Condition, TeacherTopK] = {}
     for response in responses:
-        output[response.condition] = TeacherTopK(
-            token_ids=torch.tensor([response.topk_token_ids], dtype=torch.int64),
-            log_probs=torch.tensor([response.topk_log_probs], dtype=torch.float32),
-            tail_log_prob=(
-                None
-                if response.tail_log_prob is None
-                else torch.tensor([response.tail_log_prob], dtype=torch.float32)
-            ),
-            entropy=torch.tensor([response.teacher_entropy], dtype=torch.float32),
-        )
+        output[response.condition] = _topk_from_response(response)
     return output
+
+
+def score_teacher_conditions_multi_sample(
+    samples: Sequence[tuple[Sequence[int], str, ConditionInputs]],
+    conditions: Iterable[Condition | str],
+    teacher_client: TeacherClient,
+    *,
+    response_texts: Sequence[str | None] | None = None,
+    request_prefix: str = "score",
+) -> list[dict[Condition, TeacherTopK]]:
+    """Score multiple student responses under multiple teacher conditions.
+
+    All B×C requests are sent in a single HTTP POST.  Returns one dict
+    per input sample, each mapping condition → TeacherTopK.
+    """
+    conditions = [Condition(c) for c in conditions]
+    if not conditions:
+        raise ValueError("at least one condition is required")
+    texts = response_texts or [None] * len(samples)
+    if len(texts) != len(samples):
+        raise ValueError("response_texts must match samples length")
+
+    requests: list[TeacherScoreRequest] = []
+    for idx, (token_ids, question, condition_inputs) in enumerate(samples):
+        for condition in conditions:
+            requests.append(
+                TeacherScoreRequest(
+                    request_id=f"{request_prefix}:{idx}:{condition.value}",
+                    condition=condition,
+                    question=question,
+                    condition_inputs=condition_inputs,
+                    response_token_ids=tuple(int(t) for t in token_ids),
+                    tokenizer_hash=teacher_client.metadata.tokenizer_hash,
+                    response_text=texts[idx],
+                )
+            )
+
+    responses = teacher_client.score(requests)
+    # Group responses back by sample index and condition.
+    by_sample: list[dict[str, TeacherTopK]] = [
+        {} for _ in samples
+    ]
+    for response in responses:
+        # request_id is "prefix:idx:condition_value"
+        parts = response.request_id.rsplit(":", 1)
+        sample_idx_str = parts[0].rsplit(":", 1)[-1]
+        try:
+            sample_idx = int(sample_idx_str)
+        except ValueError:
+            raise TeacherServiceError(
+                f"cannot parse sample index from response request_id: {response.request_id}"
+            )
+        by_sample[sample_idx][response.condition.value] = _topk_from_response(response)
+
+    return [
+        {Condition(k): v for k, v in sample_dict.items()}
+        for sample_dict in by_sample
+    ]
+
+
+def _topk_from_response(response: TeacherScoreResponse) -> TeacherTopK:
+    return TeacherTopK(
+        token_ids=torch.tensor([response.topk_token_ids], dtype=torch.int64),
+        log_probs=torch.tensor([response.topk_log_probs], dtype=torch.float32),
+        tail_log_prob=(
+            None
+            if response.tail_log_prob is None
+            else torch.tensor([response.tail_log_prob], dtype=torch.float32)
+        ),
+        entropy=torch.tensor([response.teacher_entropy], dtype=torch.float32),
+    )

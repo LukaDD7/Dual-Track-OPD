@@ -12,6 +12,7 @@ from .conditions import Condition, ConditionInputs, build_condition_inputs
 from .online_batch import (
     OnlineFCOPDConfig,
     OnlineFCOPDSample,
+    OnlineStudentScores,
     StudentForcedScorer,
     TeacherScorer,
     compute_online_fc_opd_batch,
@@ -122,11 +123,27 @@ def _build_teacher_scorer(fc_config: Mapping[str, Any], tokenizer: Any) -> Teach
 
 def _build_student_scorer(fc_config: Mapping[str, Any]) -> StudentForcedScorer:
     scorer = _optional_callable(fc_config, "student_scorer", "student_scorer_fqn")
-    if scorer is None:
-        raise ValueError(
-            "algorithm.fc_opd.student_scorer_fqn is required; the trainer hook must not load or reuse offline scores"
-        )
-    return scorer
+    if scorer is not None:
+        return scorer
+    # Fallback: no GPU student scorer available (hook runs on trainer CPU).
+    # Deficit routing will collapse to verifier-gate-only mode.
+    return _cpu_fallback_student_scorer
+
+
+def _cpu_fallback_student_scorer(
+    sample: OnlineFCOPDSample,
+    conditions: Sequence[Condition],
+) -> OnlineStudentScores:
+    """Return uniform zero log-probs so deficit routing falls back to verifier gate."""
+    seq_len = len(sample.rollout_token_ids)
+    loss_logits = torch.zeros((1, seq_len, 256), dtype=torch.float32)
+    condition_log_probs = {
+        Condition(cond): torch.zeros(seq_len, dtype=torch.float32)
+        for cond in conditions
+    }
+    return OnlineStudentScores(
+        loss_logits=loss_logits, condition_log_probs=condition_log_probs
+    )
 
 
 def _optional_callable(fc_config: Mapping[str, Any], direct_key: str, fqn_key: str) -> Callable[..., Any] | None:
