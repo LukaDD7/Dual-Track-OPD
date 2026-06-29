@@ -1,37 +1,76 @@
 #!/usr/bin/env bash
-# FC-OPD overnight multi-step training (reverse KL, 200 steps).
+# FC-OPD overnight multi-step training (reverse KL, up to 200 steps).
 #
-# Uses the same smoke infra but runs many steps to validate stability:
-#   - Reverse KL (mode-seeking) as default
-#   - Checkpoint every 50 steps
-#   - Log to file for post-hoc analysis
+# Scaled-up config referencing Vision-OPD (VA-OPD) paper settings:
+#   - Rollout n=8 (VA-OPD: 8, OPD-SFT: 16).  Was 1.
+#   - LR 2e-6 (VA-OPD: 2e-6 for 4B).
+#   - GPU memory 0.5 for vLLM (VA-OPD: 0.7; we're conservative with FSDP).
+#   - Reverse KL (mode-seeking) as default.
+#   - Checkpoint every 25 steps.
+#   - Log to file + console.
 #
 # Usage:
-#   bash scripts/hpc/run_verl_fc_opd_overnight.sh [--gpus N] [--steps S]
+#   bash scripts/hpc/run_verl_fc_opd_overnight.sh [--gpus N] [--steps S] [--background] [--data /path/to/train.parquet]
 #
-# Default: 4 GPUs, 200 steps (~2 hours for 2-sample batch)
+#   --gpus N        GPUs to use (default: 4).  GPU 0=teacher, 1..N-2=verl, N-1=scorer.
+#   --steps S       PPO steps (default: 200).
+#   --background    Detach from terminal via nohup — safe to close code-server.
+#   --data PATH     Override parquet path (default: verl_smoke/train.parquet).
+#
+# Background mode:
+#   When --background is passed, the script re-launches itself under nohup and
+#   exits immediately.  The training runs in the background and survives
+#   terminal / code-server disconnects.  Check progress with:
+#     tail -f artifacts/fc_opd/train_fc_opd_overnight_*.log
 
 set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 export PYTHONPATH="${REPO_ROOT}:${PYTHONPATH:-}"
 
-GPU_COUNT=${GPU_COUNT:-4}
-NUM_STEPS=${NUM_STEPS:-200}
+GPU_COUNT=4
+NUM_STEPS=200
 TOP_K=32
 TEACHER_PORT=18080
+RUN_BACKGROUND=false
+PARQUET_OVERRIDE=""
 
 # ── parse args ──────────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --gpus)  GPU_COUNT="$2"; shift 2 ;;
-        --steps) NUM_STEPS="$2"; shift 2 ;;
+        --gpus)       GPU_COUNT="$2"; shift 2 ;;
+        --steps)      NUM_STEPS="$2"; shift 2 ;;
+        --data)       PARQUET_OVERRIDE="$2"; shift 2 ;;
+        --background) RUN_BACKGROUND=true; shift ;;
         *) echo "Unknown arg: $1"; exit 1 ;;
     esac
 done
 
+# ── background re-launch ────────────────────────────────────────────────────
+if ${RUN_BACKGROUND}; then
+    # Re-invoke this script without --background, under nohup.
+    # Build args without --background
+    RELAUNCH_ARGS=()
+    for arg in "$@"; do
+        [[ "$arg" != "--background" ]] || continue
+        RELAUNCH_ARGS+=("$arg")
+    done
+    if [[ -n "${PARQUET_OVERRIDE}" ]]; then
+        RELAUNCH_ARGS+=(--data "${PARQUET_OVERRIDE}")
+    fi
+    NOHUP_LOG="${REPO_ROOT}/artifacts/fc_opd/nohup_$(date +%Y%m%d_%H%M%S).log"
+    mkdir -p "$(dirname "${NOHUP_LOG}")"
+    echo "Launching background training (PID will be printed, then exits)."
+    echo "Monitor:  tail -f ${NOHUP_LOG}"
+    nohup bash "$0" --gpus "${GPU_COUNT}" --steps "${NUM_STEPS}" "${RELAUNCH_ARGS[@]}" \
+        > "${NOHUP_LOG}" 2>&1 &
+    disown
+    echo "Background PID: $!"
+    exit 0
+fi
+
 MODEL_PATH="/inspire/hdd/global_user/mengweicheng-240108120092/lzy/models/Qwen3-VL-4B-Instruct"
 TEACHER_MODEL="/inspire/hdd/global_user/mengweicheng-240108120092/lzy/models/Qwen3-VL-32B-Instruct"
-PARQUET="/inspire/hdd/global_user/mengweicheng-240108120092/lzy/fc-opd-storage/outputs/fc_opd/verl_smoke/train.parquet"
+PARQUET="${PARQUET_OVERRIDE:-/inspire/hdd/global_user/mengweicheng-240108120092/lzy/fc-opd-storage/outputs/fc_opd/verl_smoke/train.parquet}"
 CONDA_ENV="/inspire/hdd/global_user/mengweicheng-240108120092/lzy/fc-opd-storage/envs/fc-opd-verl071-cu128"
 REPO_ROOT_ABS="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 RUN_ID="fc_opd_overnight_$(date +%Y%m%d_%H%M%S)"
@@ -42,22 +81,43 @@ REWARD_FN="file://${REPO_ROOT_ABS}/src/dual_track_opd/fc_opd/smoke_reward.py"
 mkdir -p "$(dirname "${TEACHER_LOG}")"
 
 # ── GPU math ────────────────────────────────────────────────────────────────
+# GPU 0: Teacher (32B, 66 GB)
+# GPU 1..N-2: verl PPO training (WorkerDict + vLLM)
+# GPU N-1: StudentScorer Ray actor (4B, ~8 GB)
+if (( GPU_COUNT < 4 )); then
+    echo "ERROR: need at least 4 GPUs (1=teacher, 2=verl train, 1=StudentScorer)"
+    exit 1
+fi
 VERL_GPUS=$(( GPU_COUNT - 1 ))
 TRAIN_GPUS=$(( VERL_GPUS - 1 ))
 TEACHER_GPU=0
 VERL_GPU_LIST=$(seq -s, 1 $(( GPU_COUNT - 1 )))
 SAVE_FREQ=25
+
+# Batch size: with the smoke dataset (2 prompts) we keep train_batch_size=2.
+# At rollout n=8 that's 16 samples/step — decent for a smoke run.
+# For full Geometry3K (2K prompts), scale to train_batch_size=32 (VA-OPD setting).
+TRAIN_BATCH_SIZE=2
+ROLLOUT_N=8
+PPO_MINI_BATCH_SIZE=$(( TRAIN_BATCH_SIZE * ROLLOUT_N ))   # 16
+MICRO_BATCH_PER_GPU=1
+
 CHECKPOINT_DIR="${REPO_ROOT_ABS}/checkpoints/verl_fc_opd_overnight/${RUN_ID}"
 
 echo "══════════════════════════════════════════════════════════════"
 echo "  FC-OPD Overnight Training"
-echo "  Run ID:    ${RUN_ID}"
-echo "  Steps:     ${NUM_STEPS}"
-echo "  Save freq: ${SAVE_FREQ}"
-echo "  Loss mode: reverse (mode-seeking KL)"
-echo "  GPU:       teacher=0, train=1..$((TRAIN_GPUS)), scorer=$((GPU_COUNT-1))"
-echo "  Train log: ${TRAIN_LOG}"
-echo "  Checkpoint: ${CHECKPOINT_DIR}"
+echo "  Run ID:       ${RUN_ID}"
+echo "  Steps:        ${NUM_STEPS}"
+echo "  Save freq:    ${SAVE_FREQ}"
+echo "  Loss mode:    reverse (mode-seeking KL)"
+echo "  Top-K:        ${TOP_K}"
+echo "  Rollout n:    ${ROLLOUT_N}"
+echo "  Train batch:  ${TRAIN_BATCH_SIZE}"
+echo "  LR:           2e-6"
+echo "  GPU layout:   teacher=0, train=1..$((TRAIN_GPUS)), scorer=$((GPU_COUNT-1))"
+echo "  Train log:    ${TRAIN_LOG}"
+echo "  Checkpoint:   ${CHECKPOINT_DIR}"
+echo "  Data:         ${PARQUET}"
 echo "══════════════════════════════════════════════════════════════"
 echo ""
 
@@ -101,14 +161,14 @@ CUDA_VISIBLE_DEVICES=${VERL_GPU_LIST} ray start --head --num-gpus=${VERL_GPUS} -
 sleep 3
 
 # ── 3) PPO ──────────────────────────────────────────────────────────────────
-echo "=== Training (${NUM_STEPS} steps, reverse KL) ==="
+echo "=== Training (${NUM_STEPS} steps, reverse KL, rollout n=${ROLLOUT_N}) ==="
 set +e
 ${CONDA_ENV}/bin/python -m verl.trainer.main_ppo \
     --config-path="${VERL_CONFIG_DIR}" \
     --config-name=ppo_trainer \
     "data.train_files=${PARQUET}" \
     "data.val_files=${PARQUET}" \
-    "data.train_batch_size=${TRAIN_GPUS}" \
+    "data.train_batch_size=${TRAIN_BATCH_SIZE}" \
     "data.max_prompt_length=1024" \
     "data.max_response_length=512" \
     "data.filter_overlong_prompts=false" \
@@ -121,21 +181,21 @@ ${CONDA_ENV}/bin/python -m verl.trainer.main_ppo \
     "actor_rollout_ref.model.use_fused_kernels=false" \
     "actor_rollout_ref.model.enable_gradient_checkpointing=true" \
     "++actor_rollout_ref.model.override_config.attn_implementation=sdpa" \
-    "actor_rollout_ref.actor.optim.lr=1e-6" \
-    "actor_rollout_ref.actor.ppo_mini_batch_size=${TRAIN_GPUS}" \
-    "actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1" \
+    "actor_rollout_ref.actor.optim.lr=2e-6" \
+    "actor_rollout_ref.actor.ppo_mini_batch_size=${PPO_MINI_BATCH_SIZE}" \
+    "actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=${MICRO_BATCH_PER_GPU}" \
     "actor_rollout_ref.actor.use_kl_loss=false" \
     "actor_rollout_ref.actor.fsdp_config.param_offload=false" \
     "actor_rollout_ref.actor.fsdp_config.optimizer_offload=false" \
     "actor_rollout_ref.rollout.name=vllm" \
     "actor_rollout_ref.rollout.tensor_model_parallel_size=1" \
-    "actor_rollout_ref.rollout.gpu_memory_utilization=0.3" \
+    "actor_rollout_ref.rollout.gpu_memory_utilization=0.5" \
     "actor_rollout_ref.rollout.max_model_len=2048" \
-    "actor_rollout_ref.rollout.n=1" \
+    "actor_rollout_ref.rollout.n=${ROLLOUT_N}" \
     "actor_rollout_ref.rollout.free_cache_engine=true" \
     "actor_rollout_ref.rollout.enforce_eager=true" \
-    "actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=2" \
-    "actor_rollout_ref.rollout.agent.num_workers=2" \
+    "actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=4" \
+    "actor_rollout_ref.rollout.agent.num_workers=4" \
     "actor_rollout_ref.ref.fsdp_config.param_offload=true" \
     "reward_model.enable=false" \
     "reward_model.num_workers=null" \

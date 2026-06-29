@@ -1,18 +1,22 @@
 #!/usr/bin/env bash
-# FC-OPD verl smoke — teacher + PPO, one-shot, parameterized GPU count.
+# FC-OPD verl smoke — teacher + PPO, parameterized GPU count.
 #
 # Usage:
-#   bash scripts/hpc/run_verl_fc_opd_smoke.sh [--gpus N] [--top-k K] [--steps S] [--loss-mode forward|reverse]
+#   bash scripts/hpc/run_verl_fc_opd_smoke.sh [--gpus N] [--top-k K] [--steps S] [--loss-mode forward|reverse] [--background] [--dry-run]
 #
 #   --gpus N       GPUs to use (default: 8). GPU 0 → teacher; GPU 1..N-1 → verl.
 #   --top-k K      Teacher/student top-K (default: 32).
 #   --steps S      PPO steps to run (default: 1).
 #   --loss-mode    forward (default) or reverse KL.
+#   --background   Detach via nohup — safe to close terminal/code-server.
 #   --dry-run      Print the command without running.
 #
+#   Current defaults align with Vision-OPD (VA-OPD) paper: rollout n=8, LR=2e-6.
+#
 # Examples:
+#   bash scripts/hpc/run_verl_fc_opd_smoke.sh --gpus 4 --steps 2
+#   bash scripts/hpc/run_verl_fc_opd_smoke.sh --gpus 4 --steps 200 --background
 #   bash scripts/hpc/run_verl_fc_opd_smoke.sh --gpus 8 --top-k 100 --loss-mode reverse
-#   bash scripts/hpc/run_verl_fc_opd_smoke.sh --gpus 4 --steps 2 --dry-run
 
 set -euo pipefail
 
@@ -26,7 +30,12 @@ TOP_K=32
 NUM_STEPS=1
 LOSS_MODE="reverse"
 DRY_RUN=false
+RUN_BACKGROUND=false
 TEACHER_PORT=18080
+ROLLOUT_N=8
+PPO_MINI_BATCH_SIZE=16
+LR=2e-6
+GPU_MEM_UTIL=0.5
 
 # ── paths (NFS, visible to all nodes) ───────────────────────────────────────
 MODEL_PATH="/inspire/hdd/global_user/mengweicheng-240108120092/lzy/models/Qwen3-VL-4B-Instruct"
@@ -47,9 +56,26 @@ while [[ $# -gt 0 ]]; do
         --steps)      NUM_STEPS="$2";  shift 2 ;;
         --loss-mode)  LOSS_MODE="$2";  shift 2 ;;
         --dry-run)    DRY_RUN=true;    shift ;;
+        --background) RUN_BACKGROUND=true; shift ;;
         *) echo "Unknown arg: $1"; exit 1 ;;
     esac
 done
+
+# ── background re-launch ────────────────────────────────────────────────────
+if ${RUN_BACKGROUND}; then
+    RELAUNCH_ARGS=()
+    for arg in "$@"; do
+        [[ "$arg" != "--background" ]] || continue
+        RELAUNCH_ARGS+=("$arg")
+    done
+    NOHUP_LOG="${REPO_ROOT_ABS}/artifacts/fc_opd/nohup_smoke_$(date +%Y%m%d_%H%M%S).log"
+    mkdir -p "$(dirname "${NOHUP_LOG}")"
+    echo "Launching background smoke test.  Monitor:  tail -f ${NOHUP_LOG}"
+    nohup bash "$0" "${RELAUNCH_ARGS[@]}" > "${NOHUP_LOG}" 2>&1 &
+    disown
+    echo "Background PID: $!"
+    exit 0
+fi
 
 if (( GPU_COUNT < 4 )); then
     echo "ERROR: need at least 4 GPUs (1=teacher, 2=verl train, 1=StudentScorer)"
@@ -64,21 +90,18 @@ TEACHER_GPU=0
 VERL_GPU_LIST=$(seq -s, 1 $(( GPU_COUNT - 1 )))
 
 echo "══════════════════════════════════════════════════════════════"
-echo "  GPU layout: teacher=GPU0, verl_train=GPU1..$((TRAIN_GPUS)), scorer=GPU$((GPU_COUNT - 1))"
-echo "══════════════════════════════════════════════════════════════"
-
-echo "══════════════════════════════════════════════════════════════"
 echo "  FC-OPD Smoke — $(date)"
 echo "══════════════════════════════════════════════════════════════"
-echo "  GPU count:      ${GPU_COUNT}"
-echo "  Teacher GPU:    ${TEACHER_GPU}"
-echo "  verl GPUs:      ${VERL_GPU_LIST} (${VERL_GPUS} GPUs)"
+echo "  GPU count:      ${GPU_COUNT} (teacher=0, train=1..$((TRAIN_GPUS)), scorer=$((GPU_COUNT-1)))"
 echo "  Top-K:          ${TOP_K}"
 echo "  Steps:          ${NUM_STEPS}"
 echo "  Loss mode:      ${LOSS_MODE}"
-echo "  Teacher log:    ${TEACHER_LOG}"
+echo "  Rollout n:      ${ROLLOUT_N}"
+echo "  LR:             ${LR}"
+echo "  GPU mem util:   ${GPU_MEM_UTIL}"
 echo "  Model:          ${MODEL_PATH}"
 echo "  Parquet:        ${PARQUET}"
+echo "  Teacher log:    ${TEACHER_LOG}"
 echo ""
 
 # ── verify prerequisites ────────────────────────────────────────────────────
@@ -199,21 +222,21 @@ ${CONDA_ENV}/bin/python -m verl.trainer.main_ppo \
     "actor_rollout_ref.model.use_fused_kernels=false" \
     "actor_rollout_ref.model.enable_gradient_checkpointing=true" \
     "++actor_rollout_ref.model.override_config.attn_implementation=sdpa" \
-    "actor_rollout_ref.actor.optim.lr=1e-6" \
-    "actor_rollout_ref.actor.ppo_mini_batch_size=${TRAIN_GPUS}" \
+    "actor_rollout_ref.actor.optim.lr=${LR}" \
+    "actor_rollout_ref.actor.ppo_mini_batch_size=${PPO_MINI_BATCH_SIZE}" \
     "actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1" \
     "actor_rollout_ref.actor.use_kl_loss=false" \
     "actor_rollout_ref.actor.fsdp_config.param_offload=false" \
     "actor_rollout_ref.actor.fsdp_config.optimizer_offload=false" \
     "actor_rollout_ref.rollout.name=vllm" \
     "actor_rollout_ref.rollout.tensor_model_parallel_size=1" \
-    "actor_rollout_ref.rollout.gpu_memory_utilization=0.3" \
+    "actor_rollout_ref.rollout.gpu_memory_utilization=${GPU_MEM_UTIL}" \
     "actor_rollout_ref.rollout.max_model_len=2048" \
-    "actor_rollout_ref.rollout.n=1" \
+    "actor_rollout_ref.rollout.n=${ROLLOUT_N}" \
     "actor_rollout_ref.rollout.free_cache_engine=true" \
     "actor_rollout_ref.rollout.enforce_eager=true" \
-    "actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=2" \
-    "actor_rollout_ref.rollout.agent.num_workers=2" \
+    "actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=4" \
+    "actor_rollout_ref.rollout.agent.num_workers=4" \
     "actor_rollout_ref.ref.fsdp_config.param_offload=true" \
     "reward_model.enable=false" \
     "reward_model.num_workers=null" \
