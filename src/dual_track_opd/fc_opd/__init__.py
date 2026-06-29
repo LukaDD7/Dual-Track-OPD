@@ -58,6 +58,7 @@ from .offline_scoring import (
 from .router import RouterConfig, route_condition_weights
 from .signal_decomposer import TeacherTopK, compute_condition_signals, jensen_shannon_topk
 from .student_scorer import StudentScorer
+from .ray_student_scorer import RayStudentScorerProxy, build_ray_student_scorer_proxy
 from .teacher_client import TeacherClient, score_teacher_conditions, score_teacher_conditions_multi_sample
 from .teacher_protocol import (
     TeacherMetadata,
@@ -99,6 +100,7 @@ __all__ = [
     "OnlineFCOPDSample",
     "OnlineFCOPDSampleOutput",
     "OnlineStudentScores",
+    "RayStudentScorerProxy",
     "RealStudentConfig",
     "RealStudentResult",
     "RealStudentSmokeReport",
@@ -115,6 +117,7 @@ __all__ = [
     "VerlSparseKDOutput",
     "build_condition_inputs",
     "build_condition_inputs_for_record",
+    "build_ray_student_scorer_proxy",
     "compute_condition_signals",
     "compute_fc_opd_loss",
     "compute_online_fc_opd_batch",

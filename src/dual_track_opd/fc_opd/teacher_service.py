@@ -23,7 +23,9 @@ def _handler_for(scorer: TeacherScorer) -> type[BaseHTTPRequestHandler]:
         server: TeacherHTTPServer
 
         def log_message(self, format: str, *args: object) -> None:
-            del format, args
+            import sys
+
+            print(format % args, file=sys.stderr, flush=True)
 
         def _write_json(self, status: HTTPStatus, payload: object) -> None:
             encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()
@@ -76,6 +78,11 @@ def _handler_for(scorer: TeacherScorer) -> type[BaseHTTPRequestHandler]:
                     {"responses": [response.to_dict() for response in responses]},
                 )
             except Exception as exc:
+                import traceback as _tb
+                import sys
+
+                print(f"[teacher] ERROR: {exc}", file=sys.stderr, flush=True)
+                _tb.print_exc(file=sys.stderr)
                 self._write_json(
                     HTTPStatus.BAD_REQUEST,
                     {"error": type(exc).__name__, "message": str(exc)},

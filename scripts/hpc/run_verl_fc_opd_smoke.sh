@@ -3,12 +3,12 @@
 #
 # Prerequisites (all on NFS, visible to GPU node):
 #   1. Patches applied to third_party/verl (already done via NFS)
-#   2. Teacher running on GPU 3: curl -s http://127.0.0.1:18080/health
+#   2. Teacher running on GPU 0: curl -s http://127.0.0.1:18080/health
 #   3. Parquet at fc-opd-storage/outputs/fc_opd/verl_smoke/train.parquet
 #   4. Student model at models/Qwen3-VL-4B-Instruct
 #
-# Usage (from repo root, on GPU node with 1 free GPU):
-#   CUDA_VISIBLE_DEVICES=1 bash scripts/hpc/run_verl_fc_opd_smoke.sh
+# Usage (from repo root, on GPU node with 2 free GPUs):
+#   CUDA_VISIBLE_DEVICES=1,2 bash scripts/hpc/run_verl_fc_opd_smoke.sh
 #
 # Post-run:  ray stop -f
 
@@ -40,7 +40,7 @@ echo "Patches: OK"
 # Start Ray if not running
 if ! ray status &>/dev/null 2>&1; then
     echo "Starting Ray..."
-    ray start --head --num-gpus=1 --disable-usage-stats
+    ray start --head --num-gpus=2 --disable-usage-stats
 fi
 echo "Ray: OK"
 echo ""
@@ -81,6 +81,8 @@ python -m verl.trainer.main_ppo \
     data.filter_overlong_prompts=false \
     data.truncation=error \
     data.image_key=images \
+    "reward.custom_reward_function.path=file://${REPO_ROOT}/src/dual_track_opd/fc_opd/smoke_reward.py" \
+    "reward.custom_reward_function.name=compute_score" \
     "actor_rollout_ref.model.path=${MODEL_PATH}" \
     actor_rollout_ref.model.use_remove_padding=false \
     actor_rollout_ref.model.use_fused_kernels=false \
@@ -95,6 +97,8 @@ python -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.name=vllm \
     actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.3 \
+    actor_rollout_ref.rollout.max_model_len=2048 \
+    actor_rollout_ref.rollout.agent.num_workers=2 \
     actor_rollout_ref.rollout.n=1 \
     actor_rollout_ref.rollout.free_cache_engine=true \
     actor_rollout_ref.rollout.enforce_eager=true \

@@ -71,7 +71,18 @@ def fc_opd_post_rollout_hook(
         response_mask=response_mask,
     )
     for key, value in verl_tensors.as_batch_dict().items():
-        batch.batch[key] = value.to(responses.device)
+        if key == "fc_condition_ids":
+            # condition_ids is per-condition ([C]), not per-sample.
+            # Store as a numpy array in non_tensor_batch (verl expects np.ndarray).
+            import numpy as np
+            batch.non_tensor_batch[key] = np.array(value.cpu().tolist(), dtype=np.int64)
+        else:
+            batch.batch[key] = value.to(responses.device)
+    # Pass loss coefficient as a per-sample tensor [B] (must match batch_size).
+    loss_coef = float(_config_get(fc_config, "loss_coef", 0.0))
+    batch.batch["fc_opd_coef"] = torch.full(
+        (int(responses.shape[0]),), loss_coef, device=responses.device
+    )
 
     metrics = {
         "fc_opd/hook_loss": float(output.loss.detach().cpu().item()),
@@ -121,9 +132,24 @@ def _build_teacher_scorer(fc_config: Mapping[str, Any], tokenizer: Any) -> Teach
 
 
 def _build_student_scorer(fc_config: Mapping[str, Any]) -> StudentForcedScorer:
-    scorer = _optional_callable(fc_config, "student_scorer", "student_scorer_fqn")
-    if scorer is not None:
-        return scorer
+    # Direct instantiation path — only works when the calling process has CUDA
+    # (e.g. tests, local smoke, actor-worker context).
+    if torch.cuda.is_available():
+        scorer = _optional_callable(fc_config, "student_scorer", "student_scorer_fqn")
+        if scorer is not None:
+            return scorer
+
+    # Ray proxy path — used when the hook runs in a CPU-only process
+    # (verl TaskRunner).  Spawns a detached Ray GPU actor that loads
+    # StudentScorer on a GPU and proxies every call synchronously.
+    fqn = _config_get(fc_config, "student_scorer_fqn", None)
+    if fqn:
+        kwargs = _config_get(fc_config, "student_scorer_kwargs", {}) or {}
+        from .ray_student_scorer import build_ray_student_scorer_proxy
+        return build_ray_student_scorer_proxy(
+            student_scorer_fqn=str(fqn),
+            student_scorer_kwargs=dict(kwargs),
+        )
     raise ValueError(
         "algorithm.fc_opd.student_scorer_fqn is required for verl FC-OPD smoke; "
         "CPU fallback does not validate real student logits or Qwen vocabulary alignment"
@@ -158,15 +184,32 @@ def _sample_from_batch_row(
 ) -> OnlineFCOPDSample:
     if not response_token_ids:
         raise ValueError(f"row {row_index}: response_mask selected no rollout tokens")
-    question = _row_text(batch, row_index, ("question", "questions", "problem", "prompt_text"))
+    # verl drops most non-standard columns; look in extra_info first
+    question = None
+    extra = _row_value(batch, row_index, ("extra_info",))
+    if isinstance(extra, Mapping):
+        question = str(extra.get("question", "")) or None
+    if question is None:
+        question = _row_text(batch, row_index, ("question", "questions", "problem", "prompt_text"))
     if question is None and "prompts" in batch.batch:
+        # Fallback: decode prompt tokens (use skip_special_tokens to avoid
+        # leaking vision/padding tokens into the teacher prompt).
         question = _decode_tokens(tokenizer, batch.batch["prompts"][row_index].detach().cpu().tolist())
     if question is None:
         raise ValueError("FC-OPD hook requires a question field or prompt tokens")
 
     condition_inputs = _condition_inputs_from_row(batch, row_index)
-    rollout_text = _decode_tokens(tokenizer, response_token_ids)
+    rollout_text = _decode_tokens(tokenizer, response_token_ids, skip_special_tokens=False)
     sample_uid = _row_text(batch, row_index, ("sample_uid", "uid", "id")) or f"verl:{global_steps}:{row_index}"
+    # verl drops non-standard columns; read verl-hidden fields from extra_info
+    extra = _row_value(batch, row_index, ("extra_info",)) or {}
+    choices = tuple(str(item) for item in (
+        extra.get("choices") or _row_value(batch, row_index, ("choices", "options")) or ()
+    ))
+    answer_metadata = (
+        extra.get("answer") or extra.get("answer_metadata")
+        or _row_value(batch, row_index, ("answer_metadata", "answer", "gold_answer"))
+    )
     return OnlineFCOPDSample(
         sample_uid=sample_uid,
         question=question,
@@ -175,14 +218,25 @@ def _sample_from_batch_row(
         rollout_text=rollout_text,
         prompt=_row_value(batch, row_index, ("prompt", "raw_prompt", "messages")),
         images=_row_value(batch, row_index, ("images", "image_path", "multi_modal_inputs")),
-        choices=tuple(str(item) for item in (_row_value(batch, row_index, ("choices", "options")) or ())),
-        answer_metadata=_row_value(batch, row_index, ("answer_metadata", "answer", "gold_answer")),
+        choices=choices,
+        answer_metadata=answer_metadata,
         metadata={"global_steps": global_steps},
     )
 
 
 def _condition_inputs_from_row(batch: Any, row_index: int) -> ConditionInputs:
     raw = _row_value(batch, row_index, ("fc_opd_condition_inputs", "condition_inputs"))
+    # verl AgentLoop drops non-standard non-tensor columns; fall back to extra_info
+    if raw is None:
+        extra = _row_value(batch, row_index, ("extra_info",))
+        if isinstance(extra, Mapping):
+            raw = extra.get("condition_inputs") or extra.get("fc_opd_condition_inputs")
+            # Parquet struct round-trips as list-of-tuples via pyarrow
+            if isinstance(raw, Sequence) and not isinstance(raw, (str, bytes)):
+                try:
+                    raw = dict(raw)
+                except (TypeError, ValueError):
+                    pass
     if isinstance(raw, ConditionInputs):
         return raw
     if isinstance(raw, Mapping):
@@ -237,9 +291,9 @@ def _select_row(value: Any, row_index: int) -> Any:
         return value
 
 
-def _decode_tokens(tokenizer: Any, token_ids: Sequence[int]) -> str:
+def _decode_tokens(tokenizer: Any, token_ids: Sequence[int], *, skip_special_tokens: bool = True) -> str:
     try:
-        return str(tokenizer.decode(list(token_ids), skip_special_tokens=True))
+        return str(tokenizer.decode(list(token_ids), skip_special_tokens=skip_special_tokens))
     except TypeError:
         return str(tokenizer.decode(list(token_ids)))
 
