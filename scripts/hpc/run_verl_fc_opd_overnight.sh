@@ -99,7 +99,7 @@ SAVE_FREQ=25
 # For full Geometry3K (2K prompts), scale to train_batch_size=32 (VA-OPD setting).
 TRAIN_BATCH_SIZE=2
 ROLLOUT_N=8
-PPO_MINI_BATCH_SIZE=$(( TRAIN_BATCH_SIZE * ROLLOUT_N ))   # 16
+PPO_MINI_BATCH_SIZE=${TRAIN_BATCH_SIZE}   # verl requires mini <= train_batch_size (both in prompts)
 MICRO_BATCH_PER_GPU=1
 
 CHECKPOINT_DIR="${REPO_ROOT_ABS}/checkpoints/verl_fc_opd_overnight/${RUN_ID}"

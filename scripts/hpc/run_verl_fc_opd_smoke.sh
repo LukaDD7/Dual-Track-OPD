@@ -33,7 +33,7 @@ DRY_RUN=false
 RUN_BACKGROUND=false
 TEACHER_PORT=18080
 ROLLOUT_N=8
-PPO_MINI_BATCH_SIZE=16
+PPO_MINI_BATCH_SIZE=2  # must be <= train_batch_size; matches TRAIN_GPUS for smoke
 LR=2e-6
 GPU_MEM_UTIL=0.5
 
