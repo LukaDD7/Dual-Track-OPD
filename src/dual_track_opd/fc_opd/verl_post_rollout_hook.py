@@ -74,19 +74,23 @@ def fc_opd_post_rollout_hook(
         target_seq_len=int(responses.shape[1]),
         response_mask=response_mask,
     )
+    B = int(responses.shape[0])
     for key, value in verl_tensors.as_batch_dict().items():
         if key == "fc_condition_ids":
-            # condition_ids is per-condition ([C]), not per-sample.
-            # Store as a numpy array in non_tensor_batch (verl expects np.ndarray).
+            # condition_ids is per-condition ([C]); broadcast to [B, C] so
+            # verl's batch.reorder works (all non_tensor entries need leading B).
             import numpy as np
-            batch.non_tensor_batch[key] = np.array(value.cpu().tolist(), dtype=np.int64)
+            arr = np.array(value.cpu().tolist(), dtype=np.int64)  # [C]
+            batch.non_tensor_batch[key] = np.tile(arr, (B, 1))    # [B, C]
         else:
             batch.batch[key] = value.to(responses.device)
     # Pass loss coefficient as a per-sample tensor [B] (must match batch_size).
     loss_coef = float(_config_get(fc_config, "loss_coef", 0.0))
-    batch.batch["fc_opd_coef"] = torch.full(
-        (int(responses.shape[0]),), loss_coef, device=responses.device
-    )
+    batch.batch["fc_opd_coef"] = torch.full((B,), loss_coef, device=responses.device)
+    # Pass loss_mode — store as a list of strings [B] to survive batch.reorder.
+    loss_mode = str(_config_get(fc_config, "loss_mode", "forward"))
+    import numpy as np
+    batch.non_tensor_batch["fc_opd_loss_mode"] = np.array([loss_mode] * B, dtype=object)
 
     metrics = {
         "fc_opd/hook_loss": float(output.loss.detach().cpu().item()),
@@ -153,27 +157,42 @@ def _build_teacher_scorer(
 
 
 def _build_student_scorer(fc_config: Mapping[str, Any]) -> StudentForcedScorer:
-    # Direct instantiation path — only works when the calling process has CUDA
-    # (e.g. tests, local smoke, actor-worker context).
-    if torch.cuda.is_available():
-        scorer = _optional_callable(fc_config, "student_scorer", "student_scorer_fqn")
-        if scorer is not None:
-            return scorer
+    # 1) Directly-injected callable (tests, custom injectors) — no instantiation.
+    direct = _config_get(fc_config, "student_scorer", None)
+    if direct is not None:
+        if not callable(direct):
+            raise TypeError("algorithm.fc_opd.student_scorer must be callable")
+        return direct
 
-    # Ray proxy path — used when the hook runs in a CPU-only process
-    # (verl TaskRunner).  Spawns a detached Ray GPU actor that loads
-    # StudentScorer on a GPU and proxies every call synchronously.
+    # 2) Must instantiate via FQN.
     fqn = _config_get(fc_config, "student_scorer_fqn", None)
-    if fqn:
-        kwargs = _config_get(fc_config, "student_scorer_kwargs", {}) or {}
-        from .ray_student_scorer import build_ray_student_scorer_proxy
-        return build_ray_student_scorer_proxy(
-            student_scorer_fqn=str(fqn),
-            student_scorer_kwargs=dict(kwargs),
+    if not fqn:
+        raise ValueError(
+            "algorithm.fc_opd.student_scorer_fqn is required for verl FC-OPD smoke; "
+            "a directly-injected student_scorer callable works for tests"
         )
-    raise ValueError(
-        "algorithm.fc_opd.student_scorer_fqn is required for verl FC-OPD smoke; "
-        "CPU fallback does not validate real student logits or Qwen vocabulary alignment"
+    kwargs = _config_get(fc_config, "student_scorer_kwargs", {}) or {}
+
+    # 3) Try direct CUDA instantiation.  Catches "No CUDA GPUs are available"
+    #    from CPU-only Ray actors (verl TaskRunner) and falls through to Ray proxy.
+    if torch.cuda.is_available():
+        try:
+            loaded = _load_fqn(str(fqn))
+            if isinstance(kwargs, Mapping) and kwargs:
+                loaded = loaded(**dict(kwargs))
+            if not callable(loaded):
+                raise TypeError(f"{fqn} did not resolve to a callable")
+            return loaded
+        except RuntimeError as exc:
+            msg = str(exc).lower()
+            if "cuda" not in msg and "gpu" not in msg:
+                raise
+
+    # 4) Ray proxy — spawns a detached Ray GPU actor with StudentScorer.
+    from .ray_student_scorer import build_ray_student_scorer_proxy
+    return build_ray_student_scorer_proxy(
+        student_scorer_fqn=str(fqn),
+        student_scorer_kwargs=dict(kwargs),
     )
 
 

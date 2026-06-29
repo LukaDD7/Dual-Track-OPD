@@ -110,7 +110,9 @@ def test_post_rollout_hook_attaches_verl_tensors_and_masks_padding():
     assert batch.batch["fc_teacher_topk_indices"].shape == (1, 6, len(valid_ids) + len(pad), 2)
     assert batch.batch["fc_teacher_topk_log_probs"].shape == (1, 6, len(valid_ids) + len(pad), 2)
     assert batch.batch["fc_condition_weights"].shape == (1, 6, len(valid_ids) + len(pad))
-    assert batch.batch["fc_condition_ids"].tolist() == [0, 1, 2, 3, 4, 5]
+    # fc_condition_ids has shape [C] (per-condition), stored in non_tensor_batch
+    # because TensorDict requires all tensors in batch to share [B] leading dim.
+    assert list(batch.non_tensor_batch["fc_condition_ids"]) == [0, 1, 2, 3, 4, 5]
     assert batch.batch["fc_condition_weights"][:, :, -len(pad) :].sum().item() == 0.0
     assert metrics["fc_opd/hook_num_samples"] == 1.0
     assert metrics["fc_opd/hook_active_weight"] > 0.0

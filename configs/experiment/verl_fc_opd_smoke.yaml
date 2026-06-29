@@ -1,11 +1,6 @@
-# verl FC-OPD one-step smoke config.
-# Usage:
-#   python -m verl.trainer.main_ppo --config-path=../../configs/experiment --config-name=verl_fc_opd_smoke
-#
-# Prerequisites:
-#   1. Teacher service running on localhost:18080
-#   2. Patches applied to third_party/verl
-#   3. Parquet dataset at the path in data.train_files
+# verl FC-OPD one-step smoke config (reference only).
+# The actual run script uses verl's ppo_trainer config + CLI overrides.
+# This file documents the full config for reference.
 
 algorithm:
   adv_estimator: grpo
@@ -21,6 +16,7 @@ algorithm:
     teacher_url: http://127.0.0.1:18080
     conditions: [full, degraded, free, task_visible, task_infer, task_solve]
     loss_coef: 0.1
+    loss_mode: forward  # forward | reverse — reverse KL is mode-seeking, better for 32B→4B
     renormalize_topk: true
     include_tail: true
 
@@ -41,6 +37,17 @@ reward:
   custom_reward_function:
     path: file:///inspire/hdd/global_user/mengweicheng-240108120092/lzy/projects/Dual-Track-OPD/src/dual_track_opd/fc_opd/smoke_reward.py
     name: compute_score
+
+# Required by verl's migrate_legacy_reward_impl; reward_model is a top-level key.
+reward_model:
+  enable: false
+  num_workers: null
+  reward_manager: null
+  reward_loop_source: null
+  reward_loop_module_path: null
+  reward_loop_class_name: null
+  model:
+    path: null
 
 actor_rollout_ref:
   model:

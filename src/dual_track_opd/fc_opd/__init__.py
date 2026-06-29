@@ -76,7 +76,7 @@ from .verl_integration import (
     online_sample_outputs_to_verl_tensors,
 )
 from .verl_post_rollout_hook import fc_opd_post_rollout_hook
-from .verl_sparse_kd import VerlSparseKDOutput, compute_verl_sparse_topk_kd
+from .verl_sparse_kd import VerlSparseKDOutput, compute_verl_sparse_reverse_kl, compute_verl_sparse_topk_kd
 
 __all__ = [
     "ByteTokenizer",
@@ -122,6 +122,7 @@ __all__ = [
     "compute_condition_signals",
     "compute_fc_opd_loss",
     "compute_online_fc_opd_batch",
+    "compute_verl_sparse_reverse_kl",
     "compute_verl_sparse_topk_kd",
     "condition_inputs_from_record",
     "default_output_dir",

@@ -223,6 +223,8 @@ def _apply_image_transform(
     condition_inputs: "ConditionInputs",
 ) -> None:
     """Apply condition-specific image degradation transforms in-place."""
+    from PIL import Image
+
     from .conditions import Condition as C
 
     if condition in (C.DEGRADED, C.BLUR):

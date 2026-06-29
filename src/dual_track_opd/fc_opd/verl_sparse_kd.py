@@ -109,6 +109,93 @@ def compute_verl_sparse_topk_kd(
     return VerlSparseKDOutput(per_token_loss=per_token_loss, active_weight=active_weight)
 
 
+def compute_verl_sparse_reverse_kl(
+    student_logits: torch.Tensor,
+    teacher_topk_indices: torch.Tensor,
+    teacher_topk_log_probs: torch.Tensor,
+    condition_weights: torch.Tensor,
+    response_mask: torch.Tensor,
+    *,
+    teacher_tail_log_prob: torch.Tensor | None = None,
+    renormalize_topk: bool = True,
+    include_tail: bool = True,
+    eps: float = 1e-8,
+) -> VerlSparseKDOutput:
+    """Compute weighted sparse **reverse** KL for verl response logits.
+
+    Reverse KL = KL(P_student || P_teacher) is **mode-seeking**: the student is
+    penalised where **it** places probability mass, ignoring teacher modes that
+    the student does not cover.  This is preferred for 32B→4B distillation
+    because the smaller model cannot cover all teacher modes and attempting to
+    do so (forward KL / mode-covering) introduces noise.
+
+    The student distribution is normalised over the teacher's top-K support
+    plus a tail bucket so that the KL is well-defined.
+    """
+    _validate_shapes(
+        student_logits=student_logits,
+        teacher_topk_indices=teacher_topk_indices,
+        teacher_topk_log_probs=teacher_topk_log_probs,
+        condition_weights=condition_weights,
+        response_mask=response_mask,
+        teacher_tail_log_prob=teacher_tail_log_prob,
+    )
+    if not torch.isfinite(student_logits).all():
+        raise ValueError("student_logits contains NaN or Inf")
+    if not torch.isfinite(teacher_topk_log_probs).all():
+        raise ValueError("teacher_topk_log_probs contains NaN or Inf")
+    if teacher_tail_log_prob is not None and not torch.isfinite(teacher_tail_log_prob).all():
+        raise ValueError("teacher_tail_log_prob contains NaN or Inf")
+    if torch.any(condition_weights < 0):
+        raise ValueError("condition_weights must be non-negative")
+
+    teacher_topk_indices = teacher_topk_indices.long()
+    condition_weights = condition_weights.detach().float()
+    response_mask_f = response_mask.detach().float()
+
+    # ── Student distribution over teacher top-K + tail ──────────────────
+    student_probs = torch.softmax(student_logits.float(), dim=-1)  # [B, T, V]
+    expanded_student = student_probs.unsqueeze(1).expand(
+        -1, teacher_topk_indices.shape[1], -1, -1
+    )
+    student_topk_probs = torch.gather(expanded_student, dim=-1, index=teacher_topk_indices)  # [B,C,T,K]
+    student_topk_sum = student_topk_probs.sum(dim=-1)  # [B,C,T]
+    student_tail = (1.0 - student_topk_sum).clamp_min(eps)  # [B,C,T]
+    student_total = student_topk_sum + student_tail  # [B,C,T]
+    student_topk_norm = student_topk_probs / student_total.unsqueeze(-1).clamp_min(eps)
+    student_tail_norm = student_tail / student_total.clamp_min(eps)
+
+    # ── Teacher distribution (same normalisation as forward KL) ─────────
+    topk_mass = teacher_topk_log_probs.float().exp()
+    tail_mass = None
+    if include_tail and teacher_tail_log_prob is not None:
+        tail_mass = teacher_tail_log_prob.float().exp()
+    total_mass = topk_mass.sum(dim=-1)
+    if tail_mass is not None:
+        total_mass = total_mass + tail_mass
+    if torch.any(total_mass <= 0) or not torch.isfinite(total_mass).all():
+        raise ValueError("teacher probability mass must be finite and positive")
+    teacher_topk_norm = topk_mass / total_mass.unsqueeze(-1).clamp_min(eps)
+    teacher_log_norm = teacher_topk_norm.clamp_min(eps).log()
+    if tail_mass is not None:
+        teacher_tail_norm = tail_mass / total_mass.clamp_min(eps)
+        teacher_tail_log = teacher_tail_norm.clamp_min(eps).log()
+
+    # ── Reverse KL: sum(P_s * (log P_s - log P_t)) ─────────────────────
+    per_condition = torch.sum(
+        student_topk_norm * (student_topk_norm.clamp_min(eps).log() - teacher_log_norm),
+        dim=-1,
+    )
+    if tail_mass is not None:
+        per_condition = per_condition + student_tail_norm * (
+            student_tail_norm.clamp_min(eps).log() - teacher_tail_log
+        )
+
+    active_weight = condition_weights.sum(dim=1) * response_mask_f
+    per_token_loss = torch.sum(per_condition * condition_weights, dim=1) * response_mask_f
+    return VerlSparseKDOutput(per_token_loss=per_token_loss, active_weight=active_weight)
+
+
 def _validate_shapes(
     *,
     student_logits: torch.Tensor,
