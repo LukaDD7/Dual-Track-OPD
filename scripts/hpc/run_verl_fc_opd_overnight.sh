@@ -184,6 +184,8 @@ ${CONDA_ENV}/bin/python -m verl.trainer.main_ppo \
     "actor_rollout_ref.actor.optim.lr=2e-6" \
     "actor_rollout_ref.actor.ppo_mini_batch_size=${PPO_MINI_BATCH_SIZE}" \
     "actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=${MICRO_BATCH_PER_GPU}" \
+    "actor_rollout_ref.actor.use_dynamic_bsz=true" \
+    "actor_rollout_ref.actor.ppo_max_token_len_per_gpu=16384" \
     "actor_rollout_ref.actor.use_kl_loss=false" \
     "actor_rollout_ref.actor.fsdp_config.param_offload=false" \
     "actor_rollout_ref.actor.fsdp_config.optimizer_offload=false" \

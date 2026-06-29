@@ -1,0 +1,7 @@
+benchmark	acc	n_correct	n_total
+vstar	84.29	NA	191
+zoombench	49.11	415	845
+hrbench-4k	85.88	687	800
+hrbench-8k	80.75	646	800
+mme-realworld	64.04	15119	23609
+mme-realworld-cn	64.04	3789	5917

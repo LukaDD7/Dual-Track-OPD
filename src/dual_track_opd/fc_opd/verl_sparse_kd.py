@@ -182,14 +182,16 @@ def compute_verl_sparse_reverse_kl(
         teacher_tail_log = teacher_tail_norm.clamp_min(eps).log()
 
     # ── Reverse KL: sum(P_s * (log P_s - log P_t)) ─────────────────────
-    per_condition = torch.sum(
-        student_topk_norm * (student_topk_norm.clamp_min(eps).log() - teacher_log_norm),
-        dim=-1,
-    )
+    # Clamp the per-token log-ratio to prevent single-token explosions
+    # when student places high mass on tokens the teacher assigns near-zero
+    # probability.  With diverse rollouts (n=8), this happens ~every few
+    # steps.  A clamp of ±5 nats bounds the per-token contribution to ≤5.
+    _log_ratio = student_topk_norm.clamp_min(eps).log() - teacher_log_norm
+    _log_ratio = _log_ratio.clamp(-5.0, 5.0)
+    per_condition = torch.sum(student_topk_norm * _log_ratio, dim=-1)
     if tail_mass is not None:
-        per_condition = per_condition + student_tail_norm * (
-            student_tail_norm.clamp_min(eps).log() - teacher_tail_log
-        )
+        _tail_ratio = (student_tail_norm.clamp_min(eps).log() - teacher_tail_log).clamp(-5.0, 5.0)
+        per_condition = per_condition + student_tail_norm * _tail_ratio
 
     active_weight = condition_weights.sum(dim=1) * response_mask_f
     per_token_loss = torch.sum(per_condition * condition_weights, dim=1) * response_mask_f
