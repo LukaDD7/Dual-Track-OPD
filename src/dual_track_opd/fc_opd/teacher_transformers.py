@@ -214,7 +214,10 @@ class TransformersTeacherScorer(TeacherScorer):
             model_inputs["position_ids"] = position_ids
 
         outputs = self.model(**model_inputs, use_cache=False)
-        response_logits = outputs.logits[:, prompt_length - 1 : prompt_length - 1 + response_ids.shape[1]]
+        # Qwen3-VL merges image tokens, so input/output position counts differ.
+        # Response logits are always the *last* N positions of the output.
+        _n_resp = response_ids.shape[1]
+        response_logits = outputs.logits[:, -_n_resp:]
         log_probs = torch.log_softmax(response_logits.float(), dim=-1)
         values, indices = torch.topk(log_probs, k=self.top_k, dim=-1)
         topk_mass = values.exp().sum(dim=-1)
