@@ -13,6 +13,7 @@ algorithm:
   # FC-OPD hook — the trainer patch reads this
   fc_opd:
     post_rollout_hook: dual_track_opd.fc_opd.verl_post_rollout_hook.fc_opd_post_rollout_hook
+    # Required for GPU-first feasibility validation; the hook fails fast if omitted.
     student_scorer_fqn: dual_track_opd.fc_opd.student_scorer.StudentScorer
     student_scorer_kwargs:
       model_path: ${actor_rollout_ref.model.path}

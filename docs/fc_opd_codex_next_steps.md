@@ -4,6 +4,11 @@ Written 2026-06-28.  Summarises what is done, what is still missing, and
 concrete implementation tasks for the next Codex round.  This document is
 the single source of truth for remaining FC-OPD integration work.
 
+**2026-06-29 correction:** Use
+`docs/fc_opd_gpu_first_validation.md` as the GPU-first validation checklist.
+CPU fallback is no longer an acceptable proof of FC-OPD feasibility.  The verl
+smoke must instantiate a real GPU student scorer or fail fast.
+
 ## 1. Current State (What Changed Since Codex's Last Push)
 
 ### 1.1  Branch `codex/failure-calibrated-opd` at `b2bad5b`
@@ -31,20 +36,17 @@ the single source of truth for remaining FC-OPD integration work.
     forced-scorer implementing `StudentForcedScorer` protocol.  Loadable via
     FQN: `dual_track_opd.fc_opd.student_scorer.StudentScorer`.  Accepts
     `model_path`, `device`, `dtype`, `top_k` as constructor kwargs (passed
-    via `student_scorer_kwargs` in verl config).  **Note:** The verl hook
-    runs on the trainer CPU process, so this class is only usable in
-    standalone smokes.  For verl, the hook falls back to a CPU scorer
-    (uniform scores → verifier-gate-only routing).
+    via `student_scorer_kwargs` in verl config).  This is the required path for
+    the next GPU feasibility smoke.
 
 2.  **`score_teacher_conditions_multi_sample()`** in `teacher_client.py` —
     Sends B×C teacher requests in a single HTTP POST instead of B sequential
     calls.
 
-3.  **CPU fallback student scorer in `verl_post_rollout_hook.py`** — When
-    `student_scorer_fqn` is not configured, the hook uses a CPU fallback
-    that returns uniform zero log-probs.  This means deficit routing
-    collapses to verifier-gate-only mode, which is sufficient for smoke
-    testing the actor patch.
+3.  **GPU-first `verl_post_rollout_hook.py`** — When `student_scorer_fqn` is not
+    configured, the hook now fails fast.  CPU fallback does not validate real
+    Qwen vocabulary alignment, student logits, GPU memory, or actor loss wiring,
+    so it must not be used as the main smoke path.
 
 4.  **`configs/experiment/verl_fc_opd_smoke.yaml`** — Reference verl Hydra
     config for FC-OPD training.
@@ -111,6 +113,7 @@ CUDA_VISIBLE_DEVICES=1 bash scripts/hpc/run_verl_fc_opd_smoke.sh
 ```
 
 **Acceptance criteria:**
+- `student_scorer_fqn` is configured and the real GPU scorer is instantiated
 - `actor/fc_opd_loss > 0` (not collapsed to zero)
 - `actor/fc_opd_coef` present in metrics
 - Model parameters change after one step

@@ -54,13 +54,20 @@ echo "CC=${CC}"
 
 # Run one PPO step with FC-OPD.
 # We use verl's standard ppo_trainer config and override everything via CLI.
-# Student scorer intentionally omitted → CPU fallback → verifier-gate-only routing.
+# This smoke is GPU-first: it must instantiate the real student forced scorer.
+# CPU fallback is intentionally not used because it cannot validate Qwen vocab
+# alignment, real student logits, GPU memory pressure, or the FC-OPD training path.
 echo "=== Launching verl FC-OPD smoke ==="
 
 python -m verl.trainer.main_ppo \
     algorithm.adv_estimator=grpo \
     algorithm.use_kl_in_reward=false \
     "+algorithm.fc_opd.post_rollout_hook=dual_track_opd.fc_opd.verl_post_rollout_hook.fc_opd_post_rollout_hook" \
+    "+algorithm.fc_opd.student_scorer_fqn=dual_track_opd.fc_opd.student_scorer.StudentScorer" \
+    "+algorithm.fc_opd.student_scorer_kwargs.model_path=${MODEL_PATH}" \
+    "+algorithm.fc_opd.student_scorer_kwargs.device=cuda" \
+    "+algorithm.fc_opd.student_scorer_kwargs.dtype=bfloat16" \
+    "+algorithm.fc_opd.student_scorer_kwargs.top_k=32" \
     "+algorithm.fc_opd.teacher_url=http://127.0.0.1:18080" \
     "+algorithm.fc_opd.conditions=[full,degraded,free,task_visible,task_infer,task_solve]" \
     "+algorithm.fc_opd.loss_coef=0.1" \

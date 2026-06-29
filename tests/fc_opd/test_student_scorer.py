@@ -90,7 +90,6 @@ class TestStudentScorerMultiCondition:
 
     def test_empty_conditions_raises(self):
         """StudentScorer should reject an empty condition list."""
-        # We test this by checking the protocol — the scorer itself validates.
-        # Since we can't easily instantiate without a real model, verify
-        # the logic: calling with no conditions is invalid.
-        assert True  # placeholder — real test needs model on GPU
+        scorer = object.__new__(StudentScorer)
+        with pytest.raises(ValueError, match="at least one condition"):
+            scorer(_sample(), [])

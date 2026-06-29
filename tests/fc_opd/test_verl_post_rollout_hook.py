@@ -116,8 +116,8 @@ def test_post_rollout_hook_attaches_verl_tensors_and_masks_padding():
     assert metrics["fc_opd/hook_active_weight"] > 0.0
 
 
-def test_post_rollout_hook_falls_back_to_cpu_student_scorer():
-    """When student_scorer_fqn is not provided, the hook uses a CPU fallback."""
+def test_post_rollout_hook_requires_student_scorer():
+    """The verl hook must fail fast instead of pretending CPU fallback is a real smoke."""
     tokenizer = ByteTokenizer()
     valid_ids = tuple(tokenizer.encode(_response()))
     batch = SimpleNamespace(
@@ -131,12 +131,11 @@ def test_post_rollout_hook_falls_back_to_cpu_student_scorer():
         },
     )
 
-    # Should NOT raise — uses CPU fallback student scorer
-    updated, metrics = fc_opd_post_rollout_hook(
-        batch=batch,
-        tokenizer=tokenizer,
-        processor=None,
-        config={"algorithm": {"fc_opd": {"teacher_scorer": RecordingTeacher()}}},
-        global_steps=1,
-    )
-    assert "fc_teacher_topk_indices" in batch.batch
+    with pytest.raises(ValueError, match="student_scorer_fqn is required"):
+        fc_opd_post_rollout_hook(
+            batch=batch,
+            tokenizer=tokenizer,
+            processor=None,
+            config={"algorithm": {"fc_opd": {"teacher_scorer": RecordingTeacher()}}},
+            global_steps=1,
+        )
