@@ -268,15 +268,77 @@ def _validate_teacher_scores(
     teacher_scores: Mapping[Condition, TeacherTopK],
     response_token_ids: torch.Tensor,
 ) -> None:
+    """Validate and align teacher score shapes to rollout length.
+
+    Qwen3-VL 32B and 4B tokenizers differ slightly; the teacher may produce
+    slightly more or fewer tokens than the student rollout.  Instead of
+    crashing we trim (teacher longer) or pad (teacher shorter) and emit a
+    warning so we can track how often this occurs.
+    """
+    import logging as _logging
+
+    _logger = _logging.getLogger(__name__)
     if not teacher_scores:
         raise ValueError(f"{sample.sample_uid}: teacher_scorer returned no conditions")
-    for condition, score in teacher_scores.items():
+    for condition, score in list(teacher_scores.items()):
         score.validate()
-        if score.token_ids.shape[:2] != response_token_ids.shape:
-            raise ValueError(
-                f"{sample.sample_uid}: {condition.value} teacher score shape "
-                f"{tuple(score.token_ids.shape[:2])} does not match rollout {tuple(response_token_ids.shape)}"
+        score_len = score.token_ids.shape[1]
+        rollout_len = response_token_ids.shape[1]
+        if score_len == rollout_len:
+            continue
+        # Align to the rollout length.
+        if score_len > rollout_len:
+            _logger.warning(
+                "%s/%s: trimming teacher scores (%d → %d tokens).  "
+                "This is expected to be rare (<1%% of steps).",
+                sample.sample_uid, condition.value, score_len, rollout_len,
             )
+            teacher_scores[condition] = _slice_teacher_topk(score, rollout_len)
+        else:
+            _logger.warning(
+                "%s/%s: padding teacher scores (%d → %d tokens).  "
+                "Positions beyond teacher length get zero quality weight.",
+                sample.sample_uid, condition.value, score_len, rollout_len,
+            )
+            teacher_scores[condition] = _pad_teacher_topk(score, rollout_len)
+
+
+def _slice_teacher_topk(score: TeacherTopK, target_len: int) -> TeacherTopK:
+    """Trim teacher scores to exactly *target_len* response positions."""
+    return TeacherTopK(
+        token_ids=score.token_ids[:, :target_len, :],
+        log_probs=score.log_probs[:, :target_len, :],
+        tail_log_prob=score.tail_log_prob[:, :target_len] if score.tail_log_prob is not None else None,
+        entropy=score.entropy[:, :target_len] if score.entropy is not None else None,
+    )
+
+
+def _pad_teacher_topk(score: TeacherTopK, target_len: int) -> TeacherTopK:
+    """Pad teacher scores to *target_len* with neutral (zero-quality) values."""
+    import torch
+
+    cur_len = score.token_ids.shape[1]
+    pad_len = target_len - cur_len
+    device = score.token_ids.device
+    _k = score.token_ids.shape[-1]
+    # top-K token IDs: zero-filled (will not receive quality weight)
+    pad_ids = torch.zeros(1, pad_len, _k, dtype=score.token_ids.dtype, device=device)
+    # top-K log_probs: large negative → quality ≈ 0
+    pad_log = torch.full((1, pad_len, _k), -1e10, dtype=score.log_probs.dtype, device=device)
+    pad_tail = (
+        torch.zeros(1, pad_len, dtype=score.tail_log_prob.dtype, device=device)
+        if score.tail_log_prob is not None else None
+    )
+    pad_ent = (
+        torch.zeros(1, pad_len, dtype=score.entropy.dtype, device=device)
+        if score.entropy is not None else None
+    )
+    return TeacherTopK(
+        token_ids=torch.cat([score.token_ids, pad_ids], dim=1),
+        log_probs=torch.cat([score.log_probs, pad_log], dim=1),
+        tail_log_prob=torch.cat([score.tail_log_prob, pad_tail], dim=1) if pad_tail is not None else None,
+        entropy=torch.cat([score.entropy, pad_ent], dim=1) if pad_ent is not None else None,
+    )
 
 
 def _normalize_loss_logits(sample: OnlineFCOPDSample, logits: torch.Tensor, seq_len: int) -> torch.Tensor:

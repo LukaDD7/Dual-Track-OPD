@@ -31,6 +31,7 @@ NUM_STEPS=1
 LOSS_MODE="reverse"
 DRY_RUN=false
 RUN_BACKGROUND=false
+KEEP_TEACHER=false
 TEACHER_PORT=18080
 ROLLOUT_N=8
 PPO_MINI_BATCH_SIZE=2  # must be <= train_batch_size; matches TRAIN_GPUS for smoke
@@ -57,6 +58,7 @@ while [[ $# -gt 0 ]]; do
         --loss-mode)  LOSS_MODE="$2";  shift 2 ;;
         --dry-run)    DRY_RUN=true;    shift ;;
         --background) RUN_BACKGROUND=true; shift ;;
+        --keep-teacher) KEEP_TEACHER=true; shift ;;
         *) echo "Unknown arg: $1"; exit 1 ;;
     esac
 done
@@ -125,12 +127,16 @@ echo "[OK] CC=${CC} ($(command -v "${CC}"))"
 echo ""
 echo "=== Stopping previous instances ==="
 ray stop -f 2>/dev/null || true
-# Kill any existing teacher on our port
-EXISTING_TEACHER=$(lsof -ti:${TEACHER_PORT} 2>/dev/null || true)
-if [ -n "${EXISTING_TEACHER}" ]; then
-    echo "Killing existing teacher on port ${TEACHER_PORT} (PID ${EXISTING_TEACHER})"
-    kill -9 ${EXISTING_TEACHER} 2>/dev/null || true
-    sleep 2
+# If --keep-teacher, leave the teacher running for iterative debugging.
+if ${KEEP_TEACHER}; then
+    echo "[keep-teacher] Skipping teacher restart — reusing port ${TEACHER_PORT}"
+else
+    EXISTING_TEACHER=$(lsof -ti:${TEACHER_PORT} 2>/dev/null || true)
+    if [ -n "${EXISTING_TEACHER}" ]; then
+        echo "Killing existing teacher on port ${TEACHER_PORT} (PID ${EXISTING_TEACHER})"
+        kill -9 ${EXISTING_TEACHER} 2>/dev/null || true
+        sleep 2
+    fi
 fi
 # Clean stale vLLM shared memory
 rm -rf /dev/shm/*vllm* /dev/shm/*psm_* 2>/dev/null || true
@@ -149,44 +155,50 @@ if ${DRY_RUN}; then
 fi
 
 # ── 1) Start teacher ────────────────────────────────────────────────────────
-echo ""
-echo "=== Starting teacher (GPU ${TEACHER_GPU}) ==="
-CUDA_VISIBLE_DEVICES=${TEACHER_GPU} \
-    ${CONDA_ENV}/bin/python -m dual_track_opd.fc_opd.teacher_service \
-    --backend transformers \
-    --model "${TEACHER_MODEL}" \
-    --port "${TEACHER_PORT}" \
-    --top-k "${TOP_K}" \
-    --dtype bfloat16 \
-    --device "cuda:0" \
-    > "${TEACHER_LOG}" 2>&1 &
+TEACHER_PID=""
+if curl -s "http://127.0.0.1:${TEACHER_PORT}/health" >/dev/null 2>&1; then
+    echo ""
+    echo "=== Teacher already running on port ${TEACHER_PORT} — reusing ==="
+else
+    echo ""
+    echo "=== Starting teacher (GPU ${TEACHER_GPU}) ==="
+    CUDA_VISIBLE_DEVICES=${TEACHER_GPU} \
+        ${CONDA_ENV}/bin/python -m dual_track_opd.fc_opd.teacher_service \
+        --backend transformers \
+        --model "${TEACHER_MODEL}" \
+        --port "${TEACHER_PORT}" \
+        --top-k "${TOP_K}" \
+        --dtype bfloat16 \
+        --device "cuda:0" \
+        > "${TEACHER_LOG}" 2>&1 &
 
-TEACHER_PID=$!
-echo "  Teacher PID: ${TEACHER_PID}"
+    TEACHER_PID=$!
+    echo "  Teacher PID: ${TEACHER_PID}"
 
-# Wait for teacher health check (up to 300s for 32B model load: shards 15s + GPU 60s + processor init)
-echo -n "  Waiting for teacher ."
-HEALTHY=false
-for i in $(seq 1 300); do
-    if curl -s "http://127.0.0.1:${TEACHER_PORT}/health" >/dev/null 2>&1; then
-        HEALTHY=true
-        echo " OK ($(curl -s http://127.0.0.1:${TEACHER_PORT}/health))"
-        break
-    fi
-    if ! kill -0 ${TEACHER_PID} 2>/dev/null; then
+    # Wait for teacher health check (up to 300s for 32B model load: shards 15s + GPU 60s + processor init)
+    echo -n "  Waiting for teacher ."
+    HEALTHY=false
+    for i in $(seq 1 300); do
+        if curl -s "http://127.0.0.1:${TEACHER_PORT}/health" >/dev/null 2>&1; then
+            HEALTHY=true
+            echo " OK ($(curl -s http://127.0.0.1:${TEACHER_PORT}/health))"
+            break
+        fi
+        if ! kill -0 ${TEACHER_PID} 2>/dev/null; then
+            echo ""
+            echo "FATAL: teacher process died. Last 20 lines of ${TEACHER_LOG}:"
+            tail -20 "${TEACHER_LOG}"
+            exit 1
+        fi
+        echo -n "."
+        sleep 1
+    done
+    if ! ${HEALTHY}; then
         echo ""
-        echo "FATAL: teacher process died. Last 20 lines of ${TEACHER_LOG}:"
-        tail -20 "${TEACHER_LOG}"
+        echo "FATAL: teacher did not become healthy within 300s"
+        tail -50 "${TEACHER_LOG}"
         exit 1
     fi
-    echo -n "."
-    sleep 1
-done
-if ! ${HEALTHY}; then
-    echo ""
-    echo "FATAL: teacher did not become healthy within 300s"
-    tail -50 "${TEACHER_LOG}"
-    exit 1
 fi
 
 # ── 2) Start Ray ────────────────────────────────────────────────────────────
@@ -277,7 +289,11 @@ VERL_EXIT=$?
 echo ""
 echo "=== Cleanup ==="
 ray stop -f 2>/dev/null || true
-kill ${TEACHER_PID} 2>/dev/null || true
+if ${KEEP_TEACHER}; then
+    echo "[keep-teacher] Teacher left running on port ${TEACHER_PORT}"
+else
+    kill ${TEACHER_PID} 2>/dev/null || true
+fi
 sleep 2
 
 echo ""
