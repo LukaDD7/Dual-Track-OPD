@@ -16,7 +16,7 @@ algorithm:
     teacher_url: http://127.0.0.1:18080
     conditions: [full, degraded, free, task_visible, task_infer, task_solve]
     loss_coef: 0.1
-    loss_mode: forward  # forward | reverse — reverse KL is mode-seeking, better for 32B→4B
+    loss_mode: reverse  # forward | reverse — reverse KL is mode-seeking, preferred for 32B→4B
     renormalize_topk: true
     include_tail: true
 
