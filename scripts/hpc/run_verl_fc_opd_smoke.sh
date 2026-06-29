@@ -164,10 +164,10 @@ CUDA_VISIBLE_DEVICES=${TEACHER_GPU} \
 TEACHER_PID=$!
 echo "  Teacher PID: ${TEACHER_PID}"
 
-# Wait for teacher health check (up to 180s for 32B model load)
+# Wait for teacher health check (up to 300s for 32B model load: shards 15s + GPU 60s + processor init)
 echo -n "  Waiting for teacher ."
 HEALTHY=false
-for i in $(seq 1 180); do
+for i in $(seq 1 300); do
     if curl -s "http://127.0.0.1:${TEACHER_PORT}/health" >/dev/null 2>&1; then
         HEALTHY=true
         echo " OK ($(curl -s http://127.0.0.1:${TEACHER_PORT}/health))"
@@ -184,7 +184,7 @@ for i in $(seq 1 180); do
 done
 if ! ${HEALTHY}; then
     echo ""
-    echo "FATAL: teacher did not become healthy within 180s"
+    echo "FATAL: teacher did not become healthy within 300s"
     tail -50 "${TEACHER_LOG}"
     exit 1
 fi

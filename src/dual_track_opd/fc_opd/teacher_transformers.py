@@ -42,10 +42,14 @@ class TransformersTeacherScorer(TeacherScorer):
         if not hasattr(torch, dtype):
             raise ValueError(f"unsupported torch dtype: {dtype}")
         torch_dtype = getattr(torch, dtype)
+        import os as _os
+
+        _model_is_local = _os.path.isdir(model_id) or _os.path.isfile(model_id)
         self.processor = AutoProcessor.from_pretrained(
             model_id,
             revision=revision,
             trust_remote_code=True,
+            local_files_only=_model_is_local,
         )
         self.tokenizer = self.processor.tokenizer
         self.model = AutoModelForImageTextToText.from_pretrained(
@@ -53,6 +57,7 @@ class TransformersTeacherScorer(TeacherScorer):
             revision=revision,
             torch_dtype=torch_dtype,
             trust_remote_code=True,
+            local_files_only=_model_is_local,
         ).to(device)
         self.model.eval()
         self.device = torch.device(device)

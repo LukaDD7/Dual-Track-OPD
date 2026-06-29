@@ -137,7 +137,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=18080)
     parser.add_argument("--backend", choices=("synthetic", "transformers"), default="synthetic")
-    parser.add_argument("--model", default="Qwen/Qwen3-VL-32B-Instruct")
+    parser.add_argument("--model", required=True, help="Local path to teacher model (e.g. /path/to/Qwen3-VL-32B-Instruct)")
     parser.add_argument("--revision", default="main")
     parser.add_argument("--top-k", type=int, default=32)
     parser.add_argument("--vocab-size", type=int, default=128)

@@ -149,7 +149,7 @@ CUDA_VISIBLE_DEVICES=${TEACHER_GPU} \
     > "${TEACHER_LOG}" 2>&1 &
 TEACHER_PID=$!
 echo -n "  Waiting ."
-for i in $(seq 1 180); do
+for i in $(seq 1 300); do
     if curl -s "http://127.0.0.1:${TEACHER_PORT}/health" >/dev/null 2>&1; then echo " OK"; break; fi
     if ! kill -0 ${TEACHER_PID} 2>/dev/null; then echo " DIED"; tail -20 "${TEACHER_LOG}"; exit 1; fi
     echo -n "."; sleep 1
