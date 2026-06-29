@@ -105,6 +105,8 @@ class TransformersTeacherScorer(TeacherScorer):
             from PIL import Image
 
             images = [Image.open(path).convert("RGB") for path in rendered.image_paths]
+            # Apply condition-specific image transforms (e.g. degrade)
+            _apply_image_transform(request.condition, images, request.condition_inputs)
         try:
             encoded = self.processor(
                 text=[prompt_text],
@@ -213,3 +215,27 @@ class TransformersTeacherScorer(TeacherScorer):
         # Correctness-first implementation. Length/condition batching is added
         # after the single-request GPU probe establishes exact alignment.
         return [self._score_one(request) for request in requests]
+
+
+def _apply_image_transform(
+    condition: "Condition",
+    images: list["Image.Image"],
+    condition_inputs: "ConditionInputs",
+) -> None:
+    """Apply condition-specific image degradation transforms in-place."""
+    from .conditions import Condition as C
+
+    if condition in (C.DEGRADED, C.BLUR):
+        transform = getattr(condition_inputs.degraded_image, "transform", None)
+        if transform and transform.get("type") == "lowres_nearest":
+            scale = float(transform.get("scale", 0.1))
+            for i, img in enumerate(images):
+                w, h = img.size
+                new_size = (max(1, int(w * scale)), max(1, int(h * scale)))
+                images[i] = img.resize(new_size, Image.NEAREST).resize((w, h), Image.NEAREST)
+        elif transform and transform.get("type") == "gaussian_blur":
+            from PIL import ImageFilter
+
+            sigma = float(transform.get("sigma", 2.0))
+            for i, img in enumerate(images):
+                images[i] = img.filter(ImageFilter.GaussianBlur(radius=sigma))

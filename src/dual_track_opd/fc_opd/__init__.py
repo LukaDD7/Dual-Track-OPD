@@ -67,6 +67,7 @@ from .teacher_protocol import (
     tokenizer_fingerprint,
 )
 from .teacher_prompts import render_teacher_prompt
+from .verl_dataset import FCOPDDataset
 from .verl_integration import (
     DEFAULT_VERL_CONDITION_ORDER,
     VERL_CONDITION_IDS,

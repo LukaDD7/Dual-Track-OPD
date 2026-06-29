@@ -16,7 +16,11 @@ from .online_batch import (
     TeacherScorer,
     compute_online_fc_opd_batch,
 )
-from .teacher_client import TeacherClient, score_teacher_conditions
+from .teacher_client import (
+    TeacherClient,
+    score_teacher_conditions,
+    score_teacher_conditions_multi_sample,
+)
 from .teacher_protocol import tokenizer_fingerprint
 from .verl_integration import DEFAULT_VERL_CONDITION_ORDER, online_batch_output_to_verl_tensors
 
@@ -43,7 +47,6 @@ def fc_opd_post_rollout_hook(
     if responses.ndim != 2 or response_mask.shape != responses.shape:
         raise ValueError("responses and response_mask must have shape [B, T]")
 
-    teacher_scorer = _build_teacher_scorer(fc_config, tokenizer)
     student_scorer = _build_student_scorer(fc_config)
     verifier = _optional_callable(fc_config, "verifier", "verifier_fqn")
     samples = [
@@ -56,6 +59,7 @@ def fc_opd_post_rollout_hook(
         )
         for index in range(int(responses.shape[0]))
     ]
+    teacher_scorer = _build_teacher_scorer(fc_config, tokenizer, samples, conditions)
     output = compute_online_fc_opd_batch(
         samples,
         tokenizer=tokenizer,
@@ -104,7 +108,12 @@ def _conditions_from_config(fc_config: Mapping[str, Any]) -> tuple[Condition, ..
     return tuple(Condition(condition) for condition in raw)
 
 
-def _build_teacher_scorer(fc_config: Mapping[str, Any], tokenizer: Any) -> TeacherScorer:
+def _build_teacher_scorer(
+    fc_config: Mapping[str, Any],
+    tokenizer: Any,
+    samples: list[OnlineFCOPDSample],
+    conditions: tuple[Condition, ...],
+) -> TeacherScorer:
     injected = _optional_callable(fc_config, "teacher_scorer", "teacher_scorer_fqn")
     if injected is not None:
         return injected
@@ -117,16 +126,28 @@ def _build_teacher_scorer(fc_config: Mapping[str, Any], tokenizer: Any) -> Teach
     timeout = float(_config_get(fc_config, "teacher_timeout_seconds", 120.0))
     client = TeacherClient(str(teacher_url), expected_tokenizer_hash=str(expected_hash), timeout_seconds=timeout)
 
-    def _score(sample: OnlineFCOPDSample, conditions: Sequence[Condition]):
-        return score_teacher_conditions(
-            response_token_ids=sample.rollout_token_ids,
-            question=sample.question,
-            condition_inputs=sample.condition_inputs,
-            conditions=conditions,
-            teacher_client=client,
-            response_text=sample.rollout_text,
-            request_prefix=f"{sample.sample_uid}:verl:{sample.metadata.get('global_steps', 0)}",
-        )
+    # Batch all B×C teacher requests into a single HTTP POST.
+    sample_tuples = [
+        (sample.rollout_token_ids, sample.question, sample.condition_inputs)
+        for sample in samples
+    ]
+    pre_scored = score_teacher_conditions_multi_sample(
+        sample_tuples,
+        conditions,
+        client,
+        response_texts=[sample.rollout_text for sample in samples],
+        request_prefix="verl_batch",
+    )
+    # Build a lookup: sample index → condition → TeacherTopK
+    lookup: list[dict[Condition, TeacherTopK]] = pre_scored
+
+    def _score(sample: OnlineFCOPDSample, conds: Sequence[Condition]):
+        # Find the pre-scored entry for this sample
+        for idx, s in enumerate(samples):
+            if s.sample_uid == sample.sample_uid:
+                # Return only the requested conditions
+                return {Condition(c): lookup[idx][Condition(c)] for c in conds}
+        raise ValueError(f"sample {sample.sample_uid} not found in pre-scored batch")
 
     return _score
 
