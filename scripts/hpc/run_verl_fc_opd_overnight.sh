@@ -46,7 +46,7 @@ VERL_GPUS=$(( GPU_COUNT - 1 ))
 TRAIN_GPUS=$(( VERL_GPUS - 1 ))
 TEACHER_GPU=0
 VERL_GPU_LIST=$(seq -s, 1 $(( GPU_COUNT - 1 )))
-SAVE_FREQ=50
+SAVE_FREQ=25
 CHECKPOINT_DIR="${REPO_ROOT_ABS}/checkpoints/verl_fc_opd_overnight/${RUN_ID}"
 
 echo "══════════════════════════════════════════════════════════════"
