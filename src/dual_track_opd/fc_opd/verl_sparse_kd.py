@@ -97,12 +97,14 @@ def compute_verl_sparse_topk_kd(
             tail_mass = tail_mass / total_mass.clamp_min(eps)
 
     teacher_log_mass = topk_mass.clamp_min(eps).log()
-    per_condition = torch.sum(topk_mass * (teacher_log_mass - student_selected), dim=-1)
+    # Clamp student log-probs to avoid -inf when mass is near zero.
+    _student_sel = student_selected.clamp_min(-15.0)
+    per_condition = torch.sum(topk_mass * (teacher_log_mass - _student_sel), dim=-1)
 
     if tail_mass is not None:
-        selected_student_mass = student_selected.exp().sum(dim=-1)
+        selected_student_mass = _student_sel.exp().sum(dim=-1)
         student_tail_mass = (1.0 - selected_student_mass).clamp_min(eps)
-        per_condition = per_condition + tail_mass * (tail_mass.clamp_min(eps).log() - student_tail_mass.log())
+        per_condition = per_condition + tail_mass * (tail_mass.clamp_min(eps).log() - student_tail_mass.log().clamp_min(-15.0))
 
     active_weight = condition_weights.sum(dim=1) * response_mask_f
     per_token_loss = torch.sum(per_condition * condition_weights, dim=1) * response_mask_f
@@ -182,16 +184,16 @@ def compute_verl_sparse_reverse_kl(
         teacher_tail_log = teacher_tail_norm.clamp_min(eps).log()
 
     # ── Reverse KL: sum(P_s * (log P_s - log P_t)) ─────────────────────
-    # Clamp the per-token log-ratio to prevent single-token explosions
-    # when student places high mass on tokens the teacher assigns near-zero
-    # probability.  With diverse rollouts (n=8), this happens ~every few
-    # steps.  A clamp of ±5 nats bounds the per-token contribution to ≤5.
-    _log_ratio = student_topk_norm.clamp_min(eps).log() - teacher_log_norm
-    _log_ratio = _log_ratio.clamp(-5.0, 5.0)
+    # Clamp student log-probs to prevent explosion when student places
+    # near-zero mass on a teacher top-k token (or vice versa: high mass
+    # on a token the teacher assigns near-0 probability).  A floor of
+    # -15 nats bounds the per-token contribution to ~15 nats.
+    _student_log = student_topk_norm.clamp_min(eps).log().clamp_min(-15.0)
+    _log_ratio = _student_log - teacher_log_norm
     per_condition = torch.sum(student_topk_norm * _log_ratio, dim=-1)
     if tail_mass is not None:
-        _tail_ratio = (student_tail_norm.clamp_min(eps).log() - teacher_tail_log).clamp(-5.0, 5.0)
-        per_condition = per_condition + student_tail_norm * _tail_ratio
+        _student_tail_log = student_tail_norm.clamp_min(eps).log().clamp_min(-15.0)
+        per_condition = per_condition + student_tail_norm * (_student_tail_log - teacher_tail_log)
 
     active_weight = condition_weights.sum(dim=1) * response_mask_f
     per_token_loss = torch.sum(per_condition * condition_weights, dim=1) * response_mask_f

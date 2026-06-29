@@ -84,12 +84,17 @@ def sparse_forward_kl(
 
             teacher_log_mass = topk_mass.clamp_min(config.eps).log()
             student_selected_log_probs = student_log_probs[batch_index, token_index, ids]
+            # Clamp student log-probs to prevent single-token explosion when the
+            # student assigns near-zero mass to a teacher top-k token.  A floor
+            # of -15 nats (≈ 3e-7 probability) bounds the per-token KL at ~15.
+            student_selected_log_probs = student_selected_log_probs.clamp_min(-15.0)
             token_loss = torch.sum(topk_mass * (teacher_log_mass - student_selected_log_probs))
 
             if tail_mass > 0:
                 selected_student_mass = student_selected_log_probs.exp().sum()
                 student_tail_mass = (1.0 - selected_student_mass).clamp_min(config.eps)
-                token_loss = token_loss + tail_mass * (tail_mass.clamp_min(config.eps).log() - student_tail_mass.log())
+                student_tail_log = student_tail_mass.log().clamp_min(-15.0)
+                token_loss = token_loss + tail_mass * (tail_mass.clamp_min(config.eps).log() - student_tail_log)
             losses[batch_index, token_index] = token_loss
     return losses
 
