@@ -218,7 +218,7 @@ ${CONDA_ENV}/bin/python -m verl.trainer.main_ppo \
     "+algorithm.fc_opd.student_scorer_kwargs.top_k=${TOP_K}" \
     "+algorithm.fc_opd.teacher_url=http://127.0.0.1:${TEACHER_PORT}" \
     "+algorithm.fc_opd.conditions=[full,degraded,free,task_visible,task_infer,task_solve]" \
-    "+algorithm.fc_opd.loss_coef=0.1" \
+    "+algorithm.fc_opd.loss_coef=0.01" \
     "+algorithm.fc_opd.loss_mode=reverse" \
     "+algorithm.fc_opd.renormalize_topk=true" \
     "+algorithm.fc_opd.include_tail=true" \
