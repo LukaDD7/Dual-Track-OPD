@@ -118,7 +118,7 @@ class TransformersTeacherScorer(TeacherScorer):
             request.response_token_ids[next((i for i, (a, b) in enumerate(zip(request.response_token_ids, encoded)) if a != b), 0)],
             encoded[next((i for i, (a, b) in enumerate(zip(request.response_token_ids, encoded)) if a != b), 0)],
         )
-        request.response_token_ids = repaired
+        object.__setattr__(request, "response_token_ids", repaired)
 
     def _prepare_prompt(self, request: TeacherScoreRequest) -> dict[str, torch.Tensor]:
         rendered = render_teacher_prompt(
