@@ -16,7 +16,7 @@ from .online_batch import OnlineFCOPDSample, OnlineStudentScores
 
 
 class _BytesSafeEncoder(json.JSONEncoder):
-    """JSON encoder that transparently serialises ``bytes`` and PIL images."""
+    """JSON encoder that transparently serialises ``bytes``, PIL images, tensors."""
 
     def default(self, obj: object) -> object:
         if isinstance(obj, bytes):
@@ -26,6 +26,9 @@ class _BytesSafeEncoder(json.JSONEncoder):
             buf = BytesIO()
             obj.save(buf, format="PNG")
             return base64.b64encode(buf.getvalue()).decode("ascii")
+        # PyTorch tensor → list
+        if hasattr(obj, "tolist"):
+            return obj.tolist()
         return super().default(obj)
 
 
