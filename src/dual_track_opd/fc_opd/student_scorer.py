@@ -117,12 +117,14 @@ class StudentScorer:
             loss_logits=loss_logits, condition_log_probs=condition_log_probs
         )
 
+    _SCORE_MAX_SUB_BATCH = 4  # small batches to avoid OOM from large logits tensors [B, T, V]
+
     def _score_batched(
         self,
         samples: list[OnlineFCOPDSample],
         conditions: Sequence[Condition],
     ) -> list[OnlineStudentScores]:
-        """Batch-score: process FULL (grad) first, then other conditions (no_grad)."""
+        """Batch-score: one condition at a time, sub-batched to avoid OOM."""
         import sys as _sys, time as _time
         _t0 = _time.time()
         B = len(samples)
@@ -136,69 +138,76 @@ class StudentScorer:
         log_prob_maps: list[dict[Condition, torch.Tensor]] = [{} for _ in range(B)]
 
         for cond in ordered:
-            # Build B copies of the prompt
-            first = samples[0]
-            rendered = render_teacher_prompt(cond, first.question, first.condition_inputs)
-            prompt_text = self._processor.apply_chat_template(
-                list(rendered.messages), tokenize=False, add_generation_prompt=True,
-            )
-            images = None
-            if rendered.image_paths:
-                images = [self._image_cls.open(rendered.image_paths[0]).convert("RGB")]
-            try:
-                encoded = self._processor(
-                    text=[prompt_text] * B,
-                    images=[images] * B if images else None,
-                    padding=True, return_tensors="pt",
+            for _start in range(0, B, self._SCORE_MAX_SUB_BATCH):
+                _end = min(_start + self._SCORE_MAX_SUB_BATCH, B)
+                chunk = samples[_start:_end]
+                chunk_B = _end - _start
+
+                # Build chunk_B copies of the condition prompt
+                first = chunk[0]
+                rendered = render_teacher_prompt(cond, first.question, first.condition_inputs)
+                prompt_text = self._processor.apply_chat_template(
+                    list(rendered.messages), tokenize=False, add_generation_prompt=True,
                 )
-            finally:
-                for img in (images or []):
-                    img.close()
-            encoded = {k: v.to(self._model.device) for k, v in encoded.items()}
-            prompt_ids = encoded["input_ids"]  # [B, Pp]
+                images = None
+                if rendered.image_paths:
+                    images = [self._image_cls.open(rendered.image_paths[0]).convert("RGB")]
+                try:
+                    encoded = self._processor(
+                        text=[prompt_text] * chunk_B,
+                        images=[images] * chunk_B if images else None,
+                        padding=True, return_tensors="pt",
+                    )
+                finally:
+                    for img in (images or []):
+                        img.close()
+                encoded = {k: v.to(self._model.device) for k, v in encoded.items()}
+                prompt_ids = encoded["input_ids"]  # [chunk_B, Pp]
 
-            # Pad responses to max length
-            max_R = max(len(s.rollout_token_ids) for s in samples)
-            resp_lens = [len(s.rollout_token_ids) for s in samples]
-            padded = torch.zeros(B, max_R, dtype=torch.long, device=self._model.device)
-            for i, s in enumerate(samples):
-                rlen = resp_lens[i]
-                padded[i, :rlen] = torch.tensor(s.rollout_token_ids, dtype=torch.long, device=self._model.device)
+                # Pad responses to max length within this sub-batch
+                max_R = max(len(s.rollout_token_ids) for s in chunk)
+                resp_lens = [len(s.rollout_token_ids) for s in chunk]
+                padded = torch.zeros(chunk_B, max_R, dtype=torch.long, device=self._model.device)
+                for i, s in enumerate(chunk):
+                    rlen = resp_lens[i]
+                    padded[i, :rlen] = torch.tensor(s.rollout_token_ids, dtype=torch.long, device=self._model.device)
 
-            input_ids = torch.cat([prompt_ids, padded], dim=1)
-            resp_mask = (torch.arange(max_R, device=self._model.device).unsqueeze(0)
-                         < torch.tensor(resp_lens, device=self._model.device).unsqueeze(1))
-            am = torch.cat([encoded["attention_mask"], resp_mask.to(encoded["attention_mask"].dtype)], dim=1)
+                input_ids = torch.cat([prompt_ids, padded], dim=1)
+                resp_mask = (torch.arange(max_R, device=self._model.device).unsqueeze(0)
+                             < torch.tensor(resp_lens, device=self._model.device).unsqueeze(1))
+                am = torch.cat([encoded["attention_mask"], resp_mask.to(encoded["attention_mask"].dtype)], dim=1)
 
-            model_inputs = {}
-            for k, v in encoded.items():
-                if k in ("input_ids", "attention_mask"):
-                    continue
-                model_inputs[k] = v
-            model_inputs["input_ids"] = input_ids
-            model_inputs["attention_mask"] = am
-            for key in ("token_type_ids", "mm_token_type_ids"):
-                if key in model_inputs:
-                    ext = torch.zeros(B, max_R, dtype=model_inputs[key].dtype, device=self._model.device)
-                    model_inputs[key] = torch.cat([model_inputs[key], ext], dim=-1)
+                model_inputs: dict[str, torch.Tensor] = {}
+                for k, v in encoded.items():
+                    if k in ("input_ids", "attention_mask"):
+                        continue
+                    model_inputs[k] = v
+                model_inputs["input_ids"] = input_ids
+                model_inputs["attention_mask"] = am
+                for key in ("token_type_ids", "mm_token_type_ids"):
+                    if key in model_inputs:
+                        ext = torch.zeros(chunk_B, max_R, dtype=model_inputs[key].dtype, device=self._model.device)
+                        model_inputs[key] = torch.cat([model_inputs[key], ext], dim=-1)
 
-            grad_ctx = torch.enable_grad() if cond is Condition.FULL else torch.no_grad()
-            with grad_ctx:
-                outs = self._model(**model_inputs)
+                # No grad needed — loss is computed in dp_actor, not in the scorer.
+                with torch.no_grad():
+                    outs = self._model(**model_inputs)
 
-            for i in range(B):
-                rlen = resp_lens[i]
-                sample_logits = outs.logits[i, -rlen:, :]
-                log_probs = torch.log_softmax(sample_logits.float(), dim=-1)
-                resp_ids = torch.tensor(samples[i].rollout_token_ids, dtype=torch.long,
-                                        device=sample_logits.device).unsqueeze(0)
-                gathered = log_probs[torch.arange(rlen, device=log_probs.device), resp_ids.squeeze(0)].cpu()
-                log_prob_maps[i][cond] = gathered
-                if cond is Condition.FULL:
-                    loss_logits_list[i] = sample_logits
+                for i, s in enumerate(chunk):
+                    rlen = resp_lens[i]
+                    sample_logits = outs.logits[i, -rlen:, :]
+                    log_probs = torch.log_softmax(sample_logits.float(), dim=-1)
+                    resp_ids = torch.tensor(s.rollout_token_ids, dtype=torch.long,
+                                            device=sample_logits.device).unsqueeze(0)
+                    gathered = log_probs[torch.arange(rlen, device=log_probs.device), resp_ids.squeeze(0)].cpu()
+                    log_prob_maps[_start + i][cond] = gathered
+                    if cond is Condition.FULL:
+                        loss_logits_list[_start + i] = sample_logits.detach()
+
+                del outs, model_inputs, encoded
 
         _dt = _time.time() - _t0
-        print(f"[student] batched B={B} conditions={len(ordered)}: {_dt:.2f}s", file=_sys.stderr, flush=True)
+        print(f"[student] batched B={B} conditions={len(ordered)} sub_batch={self._SCORE_MAX_SUB_BATCH}: {_dt:.2f}s", file=_sys.stderr, flush=True)
         return [
             OnlineStudentScores(loss_logits=loss_logits_list[i], condition_log_probs=log_prob_maps[i])
             for i in range(B)
