@@ -698,13 +698,36 @@ def verifier_outcome_class(verifier: Mapping[str, Any] | None) -> str:
 
 
 def build_verifier_learning_value_gate(verifier: Mapping[str, Any] | None) -> dict[str, Any]:
-    outcome_class = verifier_outcome_class(verifier)
-    gates = dict(VERIFIER_LEARNING_VALUE_CHUNK_GATES[outcome_class])
+    """Build per-chunk learning-value gates from reward, smoothed instead of discrete.
+
+    Instead of three hard classes (correct/wrong/malformed), we use reward
+    directly as a continuous signal::
+
+        gate[chunk] = (1 − reward) × chunk_max
+
+    When reward=1 (correct), gate → 0 — still a small residual so we don't
+    completely stop learning from successful rollouts.  When reward=0 (wrong),
+    gate → chunk_max — full learning intensity.
+
+    This is smooth, interpretable, and avoids the "why only three classes?"
+    question in review.
+    """
+    reward = 1.0 if verifier is None else float(verifier.get("reward", 0.0))
+    # Per-chunk maximum learning weight.  Reasoning and answer chunks
+    # rely more on internal reasoning; visible_evidence is the most
+    # directly "teachable" from teacher behaviour.
+    _CHUNK_MAX: dict[str, float] = {
+        "visible_evidence": 1.00,
+        "diagram_inference": 0.80,
+        "reasoning": 0.60,
+        "answer": 0.40,
+    }
+    gates = {chunk: (1.0 - reward) * w for chunk, w in _CHUNK_MAX.items()}
     return {
-        "outcome_class": outcome_class,
+        "outcome_class": "reward_smoothed",  # no longer discrete
         "correct": None if verifier is None else verifier.get("correct"),
         "format_valid": True if verifier is None else bool(verifier.get("format_valid", False)),
-        "reward": 1.0 if verifier is None else float(verifier.get("reward", 0.0)),
+        "reward": reward,
         "chunk_gates": gates,
     }
 
