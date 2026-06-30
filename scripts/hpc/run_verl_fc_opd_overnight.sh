@@ -31,6 +31,7 @@ GPU_COUNT=4
 NUM_STEPS=1313  # 5 epochs × (2101 prompts / 8 batch), align VA-OPD
 TOP_K=32
 TEACHER_PORT=18080
+SCORER_PORT=18081
 RUN_BACKGROUND=false
 PARQUET_OVERRIDE=""
 
@@ -75,6 +76,7 @@ CONDA_ENV="/inspire/hdd/global_user/mengweicheng-240108120092/lzy/fc-opd-storage
 REPO_ROOT_ABS="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 RUN_ID="fc_opd_overnight_$(date +%Y%m%d_%H%M%S)"
 TEACHER_LOG="${REPO_ROOT_ABS}/artifacts/fc_opd/teacher_${RUN_ID}.log"
+SCORER_LOG="${REPO_ROOT_ABS}/artifacts/fc_opd/student_scorer_${RUN_ID}.log"
 TRAIN_LOG="${REPO_ROOT_ABS}/artifacts/fc_opd/train_${RUN_ID}.log"
 VERL_CONFIG_DIR="${REPO_ROOT_ABS}/third_party/verl/verl/trainer/config"
 REWARD_FN="file://${REPO_ROOT_ABS}/src/dual_track_opd/fc_opd/smoke_reward.py"
@@ -83,15 +85,16 @@ mkdir -p "$(dirname "${TEACHER_LOG}")"
 # ── GPU math ────────────────────────────────────────────────────────────────
 # GPU 0: Teacher (32B, 66 GB)
 # GPU 1..N-2: verl PPO training (WorkerDict + vLLM)
-# GPU N-1: StudentScorer Ray actor (4B, ~8 GB)
+# GPU N-1: dedicated StudentScorer HTTP service (4B, ~8 GB)
 if (( GPU_COUNT < 4 )); then
-    echo "ERROR: need at least 4 GPUs (1=teacher, 2=verl train, 1=StudentScorer)"
+    echo "ERROR: need at least 4 GPUs (1=teacher, 2=verl train, 1=dedicated StudentScorer)"
     exit 1
 fi
-VERL_GPUS=$(( GPU_COUNT - 1 ))
-TRAIN_GPUS=$(( VERL_GPUS - 1 ))
+TRAIN_GPUS=$(( GPU_COUNT - 2 ))
+VERL_GPUS=${TRAIN_GPUS}
 TEACHER_GPU=0
-VERL_GPU_LIST=$(seq -s, 1 $(( GPU_COUNT - 1 )))
+SCORER_GPU=$(( GPU_COUNT - 1 ))
+VERL_GPU_LIST=$(seq -s, 1 $(( GPU_COUNT - 2 )))
 SAVE_FREQ=25
 
 # Aligned with VA-OPD: batch_size=18 (VA-OPD=16, adjusted for 6 train GPUs),
@@ -114,7 +117,7 @@ echo "  Top-K:        ${TOP_K}"
 echo "  Rollout n:    ${ROLLOUT_N} (VA-OPD: 4)"
 echo "  Train batch:  ${TRAIN_BATCH_SIZE} (VA-OPD: 16)"
 echo "  LR:           2e-6 (VA-OPD: 2e-6)"
-echo "  GPU layout:   teacher=0, train=1..$((TRAIN_GPUS)), scorer=$((GPU_COUNT-1))"
+echo "  GPU layout:   teacher=${TEACHER_GPU}, train=${VERL_GPU_LIST}, scorer=${SCORER_GPU}"
 echo "  Data:         ${PARQUET}"
 echo "  Train log:    ${TRAIN_LOG}"
 echo "  Checkpoint:   ${CHECKPOINT_DIR}"
@@ -137,6 +140,10 @@ EXISTING_TEACHER=$(lsof -ti:${TEACHER_PORT} 2>/dev/null || true)
 if [ -n "${EXISTING_TEACHER}" ]; then
     kill -9 ${EXISTING_TEACHER} 2>/dev/null || true; sleep 2
 fi
+EXISTING_SCORER=$(lsof -ti:${SCORER_PORT} 2>/dev/null || true)
+if [ -n "${EXISTING_SCORER}" ]; then
+    kill -9 ${EXISTING_SCORER} 2>/dev/null || true; sleep 2
+fi
 rm -rf /dev/shm/*vllm* /dev/shm/*psm_* 2>/dev/null || true
 sleep 2
 
@@ -155,14 +162,30 @@ for i in $(seq 1 300); do
     echo -n "."; sleep 1
 done
 
-# ── 2) Ray ──────────────────────────────────────────────────────────────────
+# ── 2) Dedicated StudentScorer ──────────────────────────────────────────────
+echo "=== StudentScorer (GPU ${SCORER_GPU}) ==="
+CUDA_VISIBLE_DEVICES=${SCORER_GPU} \
+    ${CONDA_ENV}/bin/python -m dual_track_opd.fc_opd.student_scorer_service \
+    --model "${MODEL_PATH}" \
+    --port "${SCORER_PORT}" --top-k "${TOP_K}" --dtype bfloat16 --device "cuda:0" \
+    > "${SCORER_LOG}" 2>&1 &
+SCORER_PID=$!
+echo -n "  Waiting ."
+for i in $(seq 1 300); do
+    if curl -s "http://127.0.0.1:${SCORER_PORT}/health" >/dev/null 2>&1; then echo " OK"; break; fi
+    if ! kill -0 ${SCORER_PID} 2>/dev/null; then echo " DIED"; tail -20 "${SCORER_LOG}"; exit 1; fi
+    echo -n "."; sleep 1
+done
+
+# ── 3) Ray ──────────────────────────────────────────────────────────────────
 echo "=== Ray (${VERL_GPUS} GPUs) ==="
 CUDA_VISIBLE_DEVICES=${VERL_GPU_LIST} ray start --head --num-gpus=${VERL_GPUS} --disable-usage-stats
 sleep 3
 
-# ── 3) PPO ──────────────────────────────────────────────────────────────────
+# ── 4) PPO ──────────────────────────────────────────────────────────────────
 echo "=== Training (${NUM_STEPS} steps, reverse KL, rollout n=${ROLLOUT_N}) ==="
 set +e
+CUDA_VISIBLE_DEVICES=${VERL_GPU_LIST} \
 ${CONDA_ENV}/bin/python -m verl.trainer.main_ppo \
     --config-path="${VERL_CONFIG_DIR}" \
     --config-name=ppo_trainer \
@@ -210,11 +233,10 @@ ${CONDA_ENV}/bin/python -m verl.trainer.main_ppo \
     "algorithm.adv_estimator=grpo" \
     "algorithm.use_kl_in_reward=false" \
     "+algorithm.fc_opd.post_rollout_hook=dual_track_opd.fc_opd.verl_post_rollout_hook.fc_opd_post_rollout_hook" \
-    "+algorithm.fc_opd.student_scorer_fqn=dual_track_opd.fc_opd.student_scorer.StudentScorer" \
-    "+algorithm.fc_opd.student_scorer_kwargs.model_path=${MODEL_PATH}" \
-    "+algorithm.fc_opd.student_scorer_kwargs.device=cuda" \
-    "+algorithm.fc_opd.student_scorer_kwargs.dtype=bfloat16" \
-    "+algorithm.fc_opd.student_scorer_kwargs.top_k=${TOP_K}" \
+    "+algorithm.fc_opd.student_scorer_fqn=dual_track_opd.fc_opd.student_scorer_client.StudentScorerClient" \
+    "+algorithm.fc_opd.student_scorer_kwargs.base_url=http://127.0.0.1:${SCORER_PORT}" \
+    "+algorithm.fc_opd.student_scorer_kwargs.timeout_seconds=300" \
+    "+algorithm.fc_opd.compute_hook_loss=false" \
     "+algorithm.fc_opd.teacher_url=http://127.0.0.1:${TEACHER_PORT}" \
     "+algorithm.fc_opd.conditions=[full,degraded,free,task_visible,task_infer,task_solve]" \
     "+algorithm.fc_opd.loss_coef=0.01" \
@@ -240,6 +262,7 @@ echo ""
 echo "=== Cleanup ==="
 ray stop -f 2>/dev/null || true
 kill ${TEACHER_PID} 2>/dev/null || true
+kill ${SCORER_PID} 2>/dev/null || true
 sleep 2
 
 echo ""

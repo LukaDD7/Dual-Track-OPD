@@ -93,6 +93,12 @@ class TrainableStudent:
         return OnlineStudentScores(loss_logits=self.logits, condition_log_probs=values)
 
 
+class ScoresOnlyStudent(TrainableStudent):
+    def __call__(self, sample, conditions):
+        scores = super().__call__(sample, conditions)
+        return OnlineStudentScores(loss_logits=None, condition_log_probs=scores.condition_log_probs)
+
+
 def _wrong_valid(_sample):
     return {"correct": False, "format_valid": True, "malformed": False, "reward": 0.25}
 
@@ -210,6 +216,26 @@ def test_online_loss_ignores_stale_offline_fields_when_allowed():
 
     assert teacher.calls == [sample.rollout_token_ids]
     assert torch.isfinite(output.loss)
+
+
+def test_online_batch_can_skip_hook_loss_for_remote_student_scorer():
+    tokenizer = ByteTokenizer()
+    sample = _sample(tokenizer, answer="B")
+    teacher = RecordingTeacher({Condition.FULL: 0.9})
+    student = ScoresOnlyStudent(len(sample.rollout_token_ids))
+
+    output = compute_online_fc_opd_batch(
+        [sample],
+        tokenizer=tokenizer,
+        teacher_scorer=teacher,
+        student_scorer=student,
+        verifier=_wrong_valid,
+        config=OnlineFCOPDConfig(compute_hook_loss=False),
+    )
+
+    assert output.loss.item() == pytest.approx(0.0)
+    assert output.samples[0].condition_weights
+    assert output.samples[0].grouped_loss_tensors
 
 
 def test_online_batch_rejects_stale_offline_fields_by_default():

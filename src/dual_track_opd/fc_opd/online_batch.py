@@ -57,6 +57,7 @@ class OnlineFCOPDConfig:
     max_capabilities_per_token: int = 2
     reject_stale_offline_fields: bool = True
     grouped_loss_schema: str = "capability_chunk_v1"
+    compute_hook_loss: bool = True
 
 
 @dataclass(frozen=True)
@@ -77,7 +78,7 @@ class OnlineFCOPDSample:
 class OnlineStudentScores:
     """Current-student forced scores for the current rollout."""
 
-    loss_logits: torch.Tensor
+    loss_logits: torch.Tensor | None
     condition_log_probs: Mapping[Condition | str, Sequence[float] | torch.Tensor]
 
 
@@ -204,9 +205,15 @@ def _compute_online_sample(
     teacher_scores = _normalize_teacher_scores(teacher_scorer(sample, config.conditions))
     _validate_teacher_scores(sample, teacher_scores, response_token_ids)
     student = pre_scored_student if pre_scored_student is not None else student_scorer(sample, config.conditions)
-    loss_logits = _normalize_loss_logits(sample, student.loss_logits, len(sample.rollout_token_ids))
+    loss_logits = (
+        _normalize_loss_logits(sample, student.loss_logits, len(sample.rollout_token_ids))
+        if student.loss_logits is not None
+        else None
+    )
+    if config.compute_hook_loss and loss_logits is None:
+        raise ValueError(f"{sample.sample_uid}: loss_logits are required when compute_hook_loss=true")
 
-    target_device = loss_logits.device
+    target_device = loss_logits.device if loss_logits is not None else response_token_ids.device
     teacher_scores = {condition: _topk_to_device(score, target_device) for condition, score in teacher_scores.items()}
     response_ids_device = response_token_ids.to(target_device)
     response_mask = response_mask.to(target_device)
@@ -237,14 +244,18 @@ def _compute_online_sample(
         verifier_learning_value_gate=verifier_gate,
         response_mask=response_mask,
     )
-    loss, metrics = compute_fc_opd_loss(
-        loss_logits,
-        teacher_scores,
-        chunk_masks,
-        condition_weights,
-        response_mask,
-        config.loss_config,
-    )
+    if loss_logits is None:
+        loss = torch.zeros((), dtype=torch.float32, device=target_device)
+        metrics = {}
+    else:
+        loss, metrics = compute_fc_opd_loss(
+            loss_logits,
+            teacher_scores,
+            chunk_masks,
+            condition_weights,
+            response_mask,
+            config.loss_config,
+        )
     grouped = _grouped_loss_tensors(
         capability_scores=capability_scores,
         response_mask=response_mask,

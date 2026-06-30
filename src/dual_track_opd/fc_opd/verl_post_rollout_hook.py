@@ -66,7 +66,10 @@ def fc_opd_post_rollout_hook(
         teacher_scorer=teacher_scorer,
         student_scorer=student_scorer,
         verifier=verifier,
-        config=OnlineFCOPDConfig(conditions=conditions),
+        config=OnlineFCOPDConfig(
+            conditions=conditions,
+            compute_hook_loss=bool(_config_get(fc_config, "compute_hook_loss", True)),
+        ),
     )
     verl_tensors = online_batch_output_to_verl_tensors(
         output,
