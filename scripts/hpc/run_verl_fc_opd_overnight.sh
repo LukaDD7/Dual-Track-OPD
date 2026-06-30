@@ -38,9 +38,9 @@ PARQUET_OVERRIDE=""
 # ── parse args ──────────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --gpus)       GPU_COUNT="$2"; shift 2 ;;
-        --steps)      NUM_STEPS="$2"; shift 2 ;;
-        --data)       PARQUET_OVERRIDE="$2"; shift 2 ;;
+        --gpus)       GPU_COUNT="${2:?--gpus needs a value}"; shift 2 ;;
+        --steps)      NUM_STEPS="${2:?--steps needs a value}"; shift 2 ;;
+        --data)       PARQUET_OVERRIDE="${2:?--data needs a path}"; shift 2 ;;
         --background) RUN_BACKGROUND=true; shift ;;
         *) echo "Unknown arg: $1"; exit 1 ;;
     esac

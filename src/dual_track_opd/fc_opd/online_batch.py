@@ -153,7 +153,12 @@ def compute_online_fc_opd_batch(
         try:
             chunk_scores = student_scorer(chunk, config.conditions)
             all_student_scores.extend(chunk_scores if isinstance(chunk_scores, list) else [chunk_scores])
-        except (AttributeError, TypeError, NotImplementedError):
+        except (AttributeError, TypeError, NotImplementedError, RuntimeError):
+            import logging as _logging
+            _logging.getLogger(__name__).warning(
+                "student scorer batch call failed, falling back to per-sample scoring: %s",
+                exc_info=True,
+            )
             all_student_scores = None
             break
     if all_student_scores is not None and len(all_student_scores) != len(samples):

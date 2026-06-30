@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 from collections.abc import Mapping, Sequence
 from urllib.error import HTTPError, URLError
@@ -70,6 +71,8 @@ def _sample_to_dict(sample: OnlineFCOPDSample) -> dict[str, object]:
         "condition_inputs": sample.condition_inputs.to_dict(),
         "rollout_token_ids": list(sample.rollout_token_ids),
         "rollout_text": sample.rollout_text,
+        "prompt": _serialize_prompt(sample.prompt),
+        "images": _serialize_images(sample.images),
         "choices": list(sample.choices),
         "answer_metadata": sample.answer_metadata,
         "metadata": dict(sample.metadata),
@@ -83,10 +86,54 @@ def _sample_from_dict(payload: Mapping[str, object]) -> OnlineFCOPDSample:
         condition_inputs=build_condition_inputs({"condition_inputs": payload["condition_inputs"]}),
         rollout_token_ids=tuple(int(item) for item in payload["rollout_token_ids"]),  # type: ignore[index]
         rollout_text=str(payload["rollout_text"]),
+        prompt=_deserialize_prompt(payload.get("prompt")),
+        images=_deserialize_images(payload.get("images")),
         choices=tuple(str(item) for item in payload.get("choices", ()) or ()),  # type: ignore[arg-type]
         answer_metadata=payload.get("answer_metadata"),
         metadata=payload.get("metadata") if isinstance(payload.get("metadata"), Mapping) else {},
     )
+
+
+def _serialize_prompt(prompt: object) -> object:
+    """Prompt is typically a list of chat-message dicts — already JSON-serializable."""
+    return prompt
+
+
+def _deserialize_prompt(raw: object) -> object:
+    return raw
+
+
+def _serialize_images(images: object) -> object:
+    """Encode any ``bytes`` items inside the images field as base64 strings."""
+    if images is None:
+        return None
+    if isinstance(images, (str, bytes)):
+        return images if isinstance(images, str) else base64.b64encode(images).decode("ascii")
+    if isinstance(images, dict):
+        return {k: _serialize_images(v) for k, v in images.items()}
+    if isinstance(images, (list, tuple)):
+        return [_serialize_images(item) for item in images]
+    return images
+
+
+def _deserialize_images(raw: object) -> object:
+    """Decode base64-encoded bytes back.  Strings that look like paths are left alone."""
+    if raw is None:
+        return None
+    if isinstance(raw, str):
+        # Heuristic: a short-ish base64 string that is all ASCII — try to decode.
+        # Longer than 200 chars is almost certainly base64 image data.
+        if len(raw) > 200:
+            try:
+                return base64.b64decode(raw)
+            except Exception:
+                return raw
+        return raw
+    if isinstance(raw, dict):
+        return {k: _deserialize_images(v) for k, v in raw.items()}
+    if isinstance(raw, list):
+        return [_deserialize_images(item) for item in raw]
+    return raw
 
 
 def _scores_to_dict(scores: OnlineStudentScores) -> dict[str, object]:
