@@ -221,7 +221,7 @@ ${CONDA_ENV}/bin/python -m verl.trainer.main_ppo \
     "+algorithm.fc_opd.loss_mode=reverse" \
     "+algorithm.fc_opd.renormalize_topk=true" \
     "+algorithm.fc_opd.include_tail=true" \
-    "trainer.total_epochs=${NUM_STEPS}" \
+    "trainer.total_training_steps=${NUM_STEPS}" \
     "trainer.n_gpus_per_node=${TRAIN_GPUS}" \
     "trainer.nnodes=1" \
     "trainer.critic_warmup=0" \

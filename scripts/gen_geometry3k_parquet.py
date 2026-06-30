@@ -4,6 +4,7 @@ import sys
 sys.path.insert(0, '/inspire/hdd/global_user/mengweicheng-240108120092/lzy/projects/Dual-Track-OPD/src')
 
 import re
+import numpy as np
 import pandas as pd
 from pathlib import Path
 from dual_track_opd.fc_opd.geometry3k_adapter import normalize_geometry3k_record
@@ -28,13 +29,10 @@ for i in range(len(df)):
     # Extract image bytes and save to disk
     img_bytes = None
     images_field = row.get('images', [])
-    if isinstance(images_field, (list, tuple)) and len(images_field) > 0:
+    if isinstance(images_field, (list, tuple, np.ndarray)) and len(images_field) > 0:
         first_img = images_field[0]
         if isinstance(first_img, dict) and 'bytes' in first_img:
             img_bytes = first_img['bytes']
-    # Also check if images is a single dict with bytes
-    if img_bytes is None and isinstance(images_field, dict) and 'bytes' in images_field:
-        img_bytes = images_field['bytes']
 
     img_path = ''
     if img_bytes:
@@ -91,10 +89,22 @@ for i in range(len(df)):
         'task_solve_evidence': 'Apply geometric theorems using the labeled elements.',
     }
 
+    # Build images field: list of {'bytes': ..., 'path': ...} (same format as smoke)
+    images_field = []
+    if img_bytes:
+        images_field.append({'bytes': img_bytes, 'path': img_path})
+
+    # Build prompt as chat template with <image> tag (matching smoke format)
+    prompt_content = f'<image>\n{question}'
+    if choices:
+        prompt_content += '\n\nChoices: ' + ' '.join(choices)
+    prompt_content += '\n\nRespond using exactly this XML structure:\n<visible_evidence>\nDirectly visible image-grounded facts.\n</visible_evidence>\n<diagram_inference>\nIntermediate geometric facts.\n</diagram_inference>\n<reasoning>\nReason from evidence and choices.\n</reasoning>\n<answer>\nFinal option letter.\n</answer>'
+    prompt_field = [{'role': 'user', 'content': prompt_content}]
+
     rows.append({
         'data_source': 'geometry3k',
-        'prompt': [],
-        'images': [img_path],
+        'prompt': prompt_field,
+        'images': images_field,
         'ability': 'math',
         'reward_model': {'style': 'rule', 'ground_truth': answer},
         'extra_info': {
