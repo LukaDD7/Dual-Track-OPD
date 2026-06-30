@@ -142,6 +142,14 @@ def compute_online_fc_opd_batch(
     if not samples:
         raise ValueError("at least one online sample is required")
     config = config or OnlineFCOPDConfig()
+    # Pre-batch student scoring for all samples (per-condition batching).
+    # Teacher scoring is already batched server-side (score_batch groups by condition).
+    try:
+        all_student_scores = student_scorer(list(samples), config.conditions)
+    except (TypeError, NotImplementedError):
+        # Fallback: scorer doesn't support batched input.
+        all_student_scores = None
+
     sample_outputs = [
         _compute_online_sample(
             sample,
@@ -150,8 +158,9 @@ def compute_online_fc_opd_batch(
             student_scorer=student_scorer,
             verifier=verifier,
             config=config,
+            pre_scored_student=all_student_scores[idx] if all_student_scores else None,
         )
-        for sample in samples
+        for idx, sample in enumerate(samples)
     ]
     losses = [output.loss for output in sample_outputs]
     total_loss = torch.stack([loss.reshape(()) for loss in losses]).mean()
@@ -167,6 +176,7 @@ def _compute_online_sample(
     student_scorer: StudentForcedScorer,
     verifier: VerifierFn | None,
     config: OnlineFCOPDConfig,
+    pre_scored_student: OnlineStudentScores | None = None,
 ) -> OnlineFCOPDSampleOutput:
     _reject_stale_offline_fields(sample, config)
     if not sample.rollout_token_ids:
@@ -185,7 +195,7 @@ def _compute_online_sample(
 
     teacher_scores = _normalize_teacher_scores(teacher_scorer(sample, config.conditions))
     _validate_teacher_scores(sample, teacher_scores, response_token_ids)
-    student = student_scorer(sample, config.conditions)
+    student = pre_scored_student if pre_scored_student is not None else student_scorer(sample, config.conditions)
     loss_logits = _normalize_loss_logits(sample, student.loss_logits, len(sample.rollout_token_ids))
 
     target_device = loss_logits.device

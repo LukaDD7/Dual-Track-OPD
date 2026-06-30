@@ -75,15 +75,27 @@ class StudentScorer:
 
     def __call__(
         self,
+        sample_or_samples: OnlineFCOPDSample | Sequence[OnlineFCOPDSample],
+        conditions: Sequence[Condition],
+    ) -> OnlineStudentScores | list[OnlineStudentScores]:
+        """Score one or multiple samples under every requested condition."""
+        if isinstance(sample_or_samples, Sequence) and not isinstance(sample_or_samples, (str, bytes)):
+            samples_list = list(sample_or_samples)
+            if len(samples_list) == 0:
+                raise ValueError("at least one sample is required")
+            if len(samples_list) == 1:
+                return self._score_one(samples_list[0], conditions)
+            return self._score_batched(samples_list, conditions)
+        return self._score_one(sample_or_samples, conditions)  # type: ignore[arg-type]
+
+    def _score_one(
+        self,
         sample: OnlineFCOPDSample,
         conditions: Sequence[Condition],
     ) -> OnlineStudentScores:
-        """Score *sample.rollout_token_ids* under every requested condition."""
         if not conditions:
             raise ValueError("at least one condition is required")
-        loss_logits = self._condition_logits(
-            sample, Condition.FULL, grad=True
-        )
+        loss_logits = self._condition_logits(sample, Condition.FULL, grad=True)
         condition_log_probs: dict[Condition, torch.Tensor] = {}
         response_ids = torch.tensor(
             sample.rollout_token_ids, dtype=torch.long, device=loss_logits.device
@@ -92,7 +104,6 @@ class StudentScorer:
             for condition in conditions:
                 cond = Condition(condition)
                 if cond is Condition.FULL:
-                    # Re-use the grad-enabled logits (saves one forward pass).
                     log_probs = torch.log_softmax(loss_logits.float(), dim=-1)
                 else:
                     logits = self._condition_logits(sample, cond, grad=False)
@@ -105,6 +116,93 @@ class StudentScorer:
         return OnlineStudentScores(
             loss_logits=loss_logits, condition_log_probs=condition_log_probs
         )
+
+    def _score_batched(
+        self,
+        samples: list[OnlineFCOPDSample],
+        conditions: Sequence[Condition],
+    ) -> list[OnlineStudentScores]:
+        """Batch-score: process FULL (grad) first, then other conditions (no_grad).
+
+        For each condition we encode the prompt B times via the processor
+        (same as the teacher batching) and pad responses to max length.
+        """
+        B = len(samples)
+        norm_conditions = [Condition(c) for c in conditions]
+        # Ensure FULL is first so we get loss_logits right away
+        ordered = [c for c in norm_conditions if c is Condition.FULL]
+        ordered += [c for c in norm_conditions if c is not Condition.FULL]
+
+        # Per-sample loss_logits and condition_log_probs
+        loss_logits_list: list[torch.Tensor] = [None] * B  # type: ignore[assignment]
+        log_prob_maps: list[dict[Condition, torch.Tensor]] = [{} for _ in range(B)]
+
+        for cond in ordered:
+            # Build B copies of the prompt
+            first = samples[0]
+            rendered = render_teacher_prompt(cond, first.question, first.condition_inputs)
+            prompt_text = self._processor.apply_chat_template(
+                list(rendered.messages), tokenize=False, add_generation_prompt=True,
+            )
+            images = None
+            if rendered.image_paths:
+                images = [self._image_cls.open(rendered.image_paths[0]).convert("RGB")]
+            try:
+                encoded = self._processor(
+                    text=[prompt_text] * B,
+                    images=[images] * B if images else None,
+                    padding=True, return_tensors="pt",
+                )
+            finally:
+                for img in (images or []):
+                    img.close()
+            encoded = {k: v.to(self._model.device) for k, v in encoded.items()}
+            prompt_ids = encoded["input_ids"]  # [B, Pp]
+
+            # Pad responses to max length
+            max_R = max(len(s.rollout_token_ids) for s in samples)
+            resp_lens = [len(s.rollout_token_ids) for s in samples]
+            padded = torch.zeros(B, max_R, dtype=torch.long, device=self._model.device)
+            for i, s in enumerate(samples):
+                rlen = resp_lens[i]
+                padded[i, :rlen] = torch.tensor(s.rollout_token_ids, dtype=torch.long, device=self._model.device)
+
+            input_ids = torch.cat([prompt_ids, padded], dim=1)
+            resp_mask = (torch.arange(max_R, device=self._model.device).unsqueeze(0)
+                         < torch.tensor(resp_lens, device=self._model.device).unsqueeze(1))
+            am = torch.cat([encoded["attention_mask"], resp_mask.to(encoded["attention_mask"].dtype)], dim=1)
+
+            model_inputs = {}
+            for k, v in encoded.items():
+                if k in ("input_ids", "attention_mask"):
+                    continue
+                model_inputs[k] = v
+            model_inputs["input_ids"] = input_ids
+            model_inputs["attention_mask"] = am
+            for key in ("token_type_ids", "mm_token_type_ids"):
+                if key in model_inputs:
+                    ext = torch.zeros(B, max_R, dtype=model_inputs[key].dtype, device=self._model.device)
+                    model_inputs[key] = torch.cat([model_inputs[key], ext], dim=-1)
+
+            grad_ctx = torch.enable_grad() if cond is Condition.FULL else torch.no_grad()
+            with grad_ctx:
+                outs = self._model(**model_inputs)
+
+            for i in range(B):
+                rlen = resp_lens[i]
+                sample_logits = outs.logits[i, -rlen:, :]
+                log_probs = torch.log_softmax(sample_logits.float(), dim=-1)
+                resp_ids = torch.tensor(samples[i].rollout_token_ids, dtype=torch.long,
+                                        device=sample_logits.device).unsqueeze(0)
+                gathered = log_probs.gather(-1, resp_ids.unsqueeze(-1)).squeeze(-1).cpu()
+                log_prob_maps[i][cond] = gathered
+                if cond is Condition.FULL:
+                    loss_logits_list[i] = sample_logits
+
+        return [
+            OnlineStudentScores(loss_logits=loss_logits_list[i], condition_log_probs=log_prob_maps[i])
+            for i in range(B)
+        ]
 
     # -- helpers -------------------------------------------------------------
 
