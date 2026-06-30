@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import json
 from collections.abc import Mapping, Sequence
+from io import BytesIO
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -15,11 +16,16 @@ from .online_batch import OnlineFCOPDSample, OnlineStudentScores
 
 
 class _BytesSafeEncoder(json.JSONEncoder):
-    """JSON encoder that transparently base64-encodes any stray ``bytes`` objects."""
+    """JSON encoder that transparently serialises ``bytes`` and PIL images."""
 
     def default(self, obj: object) -> object:
         if isinstance(obj, bytes):
             return base64.b64encode(obj).decode("ascii")
+        # PIL / Pillow image
+        if hasattr(obj, "save"):
+            buf = BytesIO()
+            obj.save(buf, format="PNG")
+            return base64.b64encode(buf.getvalue()).decode("ascii")
         return super().default(obj)
 
 
@@ -118,15 +124,23 @@ def _deserialize_prompt(raw: object) -> object:
 
 
 def _serialize_images(images: object) -> object:
-    """Encode any ``bytes`` items inside the images field as base64 strings."""
+    """Encode any ``bytes`` or PIL images as base64 strings (JSON-safe)."""
     if images is None:
         return None
-    if isinstance(images, (str, bytes)):
-        return images if isinstance(images, str) else base64.b64encode(images).decode("ascii")
+    # PIL / Pillow image → PNG bytes → base64
+    if hasattr(images, "save"):
+        buf = BytesIO()
+        images.save(buf, format="PNG")
+        return base64.b64encode(buf.getvalue()).decode("ascii")
+    if isinstance(images, bytes):
+        return base64.b64encode(images).decode("ascii")
+    if isinstance(images, str):
+        return images
     if isinstance(images, dict):
         return {k: _serialize_images(v) for k, v in images.items()}
     if isinstance(images, (list, tuple)):
         return [_serialize_images(item) for item in images]
+    # Fallthrough — _BytesSafeEncoder will catch stragglers during json.dumps
     return images
 
 
