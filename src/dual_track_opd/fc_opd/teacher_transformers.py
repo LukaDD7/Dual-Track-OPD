@@ -245,16 +245,10 @@ class TransformersTeacherScorer(TeacherScorer):
         self,
         requests: list[TeacherScoreRequest],
     ) -> list[TeacherScoreResponse]:
-        """Score multiple requests sharing the same condition in one forward pass.
-
-        All requests must have the same condition (and thus the same prompt text
-        and image).  Responses are padded to the longest one; the attention mask
-        prevents cross-sample contamination.
-        """
+        """Batch-score requests sharing the same condition via processor-native batching."""
         if len(requests) <= 1:
             return [self._score_one(r) for r in requests]
 
-        # Validate and repair
         for r in requests:
             if r.tokenizer_hash != self.metadata.tokenizer_hash:
                 raise ValueError("tokenizer hash mismatch")
@@ -264,11 +258,32 @@ class TransformersTeacherScorer(TeacherScorer):
 
         B = len(requests)
         first = requests[0]
-        prompt_inputs = self._prepare_prompt(first)
-        prompt_ids = prompt_inputs["input_ids"]  # [1, P]
-        P = prompt_ids.shape[1]
 
-        # Pad responses to max length
+        # ── Build B copies of the same prompt via the processor ──────────
+        rendered = render_teacher_prompt(first.condition, first.question, first.condition_inputs)
+        prompt_text = self.processor.apply_chat_template(
+            list(rendered.messages), tokenize=False, add_generation_prompt=True,
+        )
+        images = None
+        if rendered.image_paths:
+            from PIL import Image as _PIL
+
+            images = [_PIL.open(p).convert("RGB") for p in rendered.image_paths]
+            _apply_image_transform(first.condition, images, first.condition_inputs)
+        try:
+            encoded = self.processor(
+                text=[prompt_text] * B,
+                images=[images] * B if images else None,
+                padding=True,
+                return_tensors="pt",
+            )
+        finally:
+            for img in (images or []):
+                img.close()
+        encoded = {k: v.to(self.device) for k, v in encoded.items()}
+        prompt_ids = encoded["input_ids"]  # [B, Pp]  (padded prompt)
+
+        # ── Pad & concatenate responses ──────────────────────────────────
         max_R = max(len(r.response_token_ids) for r in requests)
         resp_lens = torch.zeros(B, dtype=torch.long, device=self.device)
         padded = torch.zeros(B, max_R, dtype=torch.long, device=self.device)
@@ -277,62 +292,50 @@ class TransformersTeacherScorer(TeacherScorer):
             resp_lens[i] = rlen
             padded[i, :rlen] = torch.tensor(r.response_token_ids, dtype=torch.long, device=self.device)
 
-        # Build batched inputs
-        input_ids = torch.cat([prompt_ids.expand(B, -1), padded], dim=1)  # [B, P+max_R]
-        prompt_mask = prompt_inputs["attention_mask"].expand(B, -1)  # [B, P]
-        resp_mask = torch.arange(max_R, device=self.device).unsqueeze(0) < resp_lens.unsqueeze(1)
-        resp_mask = resp_mask.to(prompt_mask.dtype)
-        attention_mask = torch.cat([prompt_mask, resp_mask], dim=1)  # [B, P+max_R]
+        input_ids = torch.cat([prompt_ids, padded], dim=1)
+        resp_mask = (torch.arange(max_R, device=self.device).unsqueeze(0) < resp_lens.unsqueeze(1))
+        resp_mask = resp_mask.to(encoded["attention_mask"].dtype)
+        attention_mask = torch.cat([encoded["attention_mask"], resp_mask], dim=1)
 
-        model_inputs = dict(prompt_inputs)
+        # ── Model inputs ────────────────────────────────────────────────
+        keep = ("input_ids", "attention_mask", "image_grid_thw", "video_grid_thw",
+                "pixel_values", "pixel_values_videos", "image_sizes",
+                "token_type_ids", "mm_token_type_ids", "position_ids", "second_per_grid_ts")
+        model_inputs = {k: encoded[k] for k in keep if k in encoded}
         model_inputs["input_ids"] = input_ids
         model_inputs["attention_mask"] = attention_mask
 
-        # Expand vision tensor to batch dimension
-        for key in ("image_grid_thw", "video_grid_thw"):
-            thw = model_inputs.get(key)
-            if thw is not None and thw.ndim >= 1 and thw.shape[0] == 1:
-                model_inputs[key] = thw.expand(B, -1)
-
-        # Extend token_type / mm_token_type for response tokens
         for key in ("token_type_ids", "mm_token_type_ids"):
-            if key not in model_inputs:
-                continue
-            tok = model_inputs[key]
-            if tok.shape[0] == 1:
-                tok = tok.expand(B, -1)
-            if tok.shape[-1] != P:
-                raise RuntimeError(f"{key} does not align with prompt input IDs")
-            extension = torch.zeros(B, max_R, dtype=tok.dtype, device=tok.device)
-            model_inputs[key] = torch.cat([tok, extension], dim=-1)
+            if key in model_inputs:
+                ext = torch.zeros(B, max_R, dtype=model_inputs[key].dtype, device=self.device)
+                model_inputs[key] = torch.cat([model_inputs[key], ext], dim=-1)
 
         model_inputs.pop("position_ids", None)
         position_ids = self._position_ids(model_inputs)
         if position_ids is not None:
             model_inputs["position_ids"] = position_ids
 
-        # Single batched forward
         outputs = self.model(**model_inputs, use_cache=False)
 
-        # Extract per-sample results
+        # ── Extract per-sample top-K ─────────────────────────────────────
         results: list[TeacherScoreResponse] = []
         for i, request in enumerate(requests):
             rlen = int(resp_lens[i].item())
-            sample_logits = outputs.logits[i, -rlen:, :]  # [rlen, V]
+            sample_logits = outputs.logits[i, -rlen:, :]
             log_probs = torch.log_softmax(sample_logits.float(), dim=-1)
             values, indices = torch.topk(log_probs, k=self.top_k, dim=-1)
             topk_mass = values.exp().sum(dim=-1)
-            tail_log_prob = (1.0 - topk_mass).clamp_min(torch.finfo(torch.float32).tiny).log()
+            tail = (1.0 - topk_mass).clamp_min(torch.finfo(torch.float32).tiny).log()
             probs = log_probs.exp()
-            entropy = -(probs * log_probs).sum(dim=-1)
+            ent = -(probs * log_probs).sum(dim=-1)
             results.append(TeacherScoreResponse(
                 request_id=request.request_id,
                 condition=request.condition,
                 token_ids=request.response_token_ids,
                 topk_token_ids=tuple(tuple(int(x) for x in row) for row in indices.cpu().tolist()),
                 topk_log_probs=tuple(tuple(float(x) for x in row) for row in values.cpu().tolist()),
-                tail_log_prob=tuple(float(x) for x in tail_log_prob.cpu().tolist()),
-                teacher_entropy=tuple(float(x) for x in entropy.cpu().tolist()),
+                tail_log_prob=tuple(float(x) for x in tail.cpu().tolist()),
+                teacher_entropy=tuple(float(x) for x in ent.cpu().tolist()),
             ))
         return results
 
@@ -340,12 +343,10 @@ class TransformersTeacherScorer(TeacherScorer):
         self,
         requests: Sequence[TeacherScoreRequest],
     ) -> list[TeacherScoreResponse]:
-        # Group by condition, then batch each group in one forward pass.
-        # 16 samples × 6 conditions = 96 requests → 6 batched forwards
-        # instead of 96 individual forwards.  ~16× faster.
-        from collections import defaultdict as _defaultdict
+        # Group by condition → 6 batched forwards instead of 96.
+        from collections import defaultdict as _dd
 
-        groups: dict[Any, list[TeacherScoreRequest]] = _defaultdict(list)
+        groups: dict[Any, list[TeacherScoreRequest]] = _dd(list)
         for req in requests:
             groups[req.condition].append(req)
 
