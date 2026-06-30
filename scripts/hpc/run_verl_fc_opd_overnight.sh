@@ -27,8 +27,8 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 export PYTHONPATH="${REPO_ROOT}:${PYTHONPATH:-}"
 
-GPU_COUNT=8
-NUM_STEPS=585  # 5 epochs × (2101 prompts / 18 batch), align VA-OPD
+GPU_COUNT=4
+NUM_STEPS=1313  # 5 epochs × (2101 prompts / 8 batch), align VA-OPD
 TOP_K=32
 TEACHER_PORT=18080
 RUN_BACKGROUND=false
@@ -97,7 +97,7 @@ SAVE_FREQ=25
 # Aligned with VA-OPD: batch_size=18 (VA-OPD=16, adjusted for 6 train GPUs),
 # rollout_n=4, 5 epochs.
 # Geometry3K: 2101 prompts / 18 batch ≈ 117 steps/epoch × 5 ≈ 584 steps.
-TRAIN_BATCH_SIZE=18
+TRAIN_BATCH_SIZE=8
 ROLLOUT_N=4
 PPO_MINI_BATCH_SIZE=${TRAIN_BATCH_SIZE}
 MICRO_BATCH_PER_GPU=1
