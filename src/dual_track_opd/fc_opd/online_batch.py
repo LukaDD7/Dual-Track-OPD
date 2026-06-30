@@ -144,11 +144,10 @@ def compute_online_fc_opd_batch(
     config = config or OnlineFCOPDConfig()
     # Pre-batch student scoring for all samples (per-condition batching).
     # Teacher scoring is already batched server-side (score_batch groups by condition).
-    try:
-        all_student_scores = student_scorer(list(samples), config.conditions)
-    except (TypeError, NotImplementedError):
-        # Fallback: scorer doesn't support batched input.
-        all_student_scores = None
+    import sys as _sys
+    print(f"[hook] student_scorer type: {type(student_scorer).__name__}, samples: {len(samples)}", file=_sys.stderr, flush=True)
+    all_student_scores = student_scorer(list(samples), config.conditions)
+    print(f"[hook] student batching returned {len(all_student_scores)} scores", file=_sys.stderr, flush=True)
 
     sample_outputs = [
         _compute_online_sample(
