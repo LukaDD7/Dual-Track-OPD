@@ -34,6 +34,7 @@ TEACHER_PORT=18080
 SCORER_PORT=18081
 RUN_BACKGROUND=false
 PARQUET_OVERRIDE=""
+KEEPALIVE_SEC=86400
 
 # ── parse args ──────────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
@@ -41,6 +42,7 @@ while [[ $# -gt 0 ]]; do
         --gpus)       GPU_COUNT="${2:?--gpus needs a value}"; shift 2 ;;
         --steps)      NUM_STEPS="${2:?--steps needs a value}"; shift 2 ;;
         --data)       PARQUET_OVERRIDE="${2:?--data needs a path}"; shift 2 ;;
+        --keepalive) KEEPALIVE_SEC=86400; shift ;;
         --background) RUN_BACKGROUND=true; shift ;;
         *) echo "Unknown arg: $1"; exit 1 ;;
     esac
@@ -273,4 +275,15 @@ echo "  Log:    ${TRAIN_LOG}"
 echo "  CKPT:   ${CHECKPOINT_DIR}"
 echo "  Exit:   ${VERL_EXIT}"
 echo "══════════════════════════════════════════════════════════════"
+
+# ── keepalive ────────────────────────────────────────────────────────────────
+# Default: sleep 24h with heartbeat to prevent the GPU instance from being
+# reclaimed while the user reviews results / checkpoints.
+_KEEPALIVE_SEC=${KEEPALIVE:-86400}
+echo ""
+echo "=== Keepalive (${KEEPALIVE_SEC}s) — kill this process when done ==="
+for ((_i = 0; _i < KEEPALIVE_SEC; _i += 300)); do
+    sleep 300
+    echo "[keepalive] $(date '+%Y-%m-%d %H:%M:%S') — PID $$ alive (${_i}s elapsed)"
+done
 exit ${VERL_EXIT}
