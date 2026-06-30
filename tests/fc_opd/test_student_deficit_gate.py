@@ -44,7 +44,9 @@ def test_student_deficit_formula_and_chunk_gate():
     assert visual["student_deficit"][0] > 0
     assert visual["student_deficit"][1] == 0
     assert visual["teacher_attribution"][2] == 0
-    assert visual["final_token_weight"][3] == 0
+    assert visual["chunk_compatibility_prior"][3] == 0
+    assert visual["chunk_compatibility"][3] > 0
+    assert visual["final_token_weight"][3] > 0
 
 
 def test_verifier_learning_value_gate_prioritizes_wrong_valid_rollouts():
@@ -60,8 +62,8 @@ def test_verifier_learning_value_gate_prioritizes_wrong_valid_rollouts():
 
     assert wrong_gate["chunk_gates"]["visible_evidence"] > correct_gate["chunk_gates"]["visible_evidence"]
     assert wrong_gate["chunk_gates"]["diagram_inference"] > correct_gate["chunk_gates"]["diagram_inference"]
-    assert correct_gate["chunk_gates"]["answer"] == 0.0
-    assert wrong_gate["chunk_gates"]["visible_evidence"] == 1.0
-    assert wrong_gate["chunk_gates"]["diagram_inference"] == 1.0
-    assert malformed_gate["chunk_gates"]["reasoning"] == 0.0
-    assert malformed_gate["chunk_gates"]["answer"] == 0.0
+    assert correct_gate["chunk_gates"]["answer"] > 0.0
+    assert wrong_gate["chunk_gates"]["visible_evidence"] < malformed_gate["chunk_gates"]["visible_evidence"]
+    assert wrong_gate["chunk_gates"]["diagram_inference"] < malformed_gate["chunk_gates"]["diagram_inference"]
+    assert malformed_gate["chunk_gates"]["reasoning"] > correct_gate["chunk_gates"]["reasoning"]
+    assert malformed_gate["chunk_gates"]["answer"] > correct_gate["chunk_gates"]["answer"]

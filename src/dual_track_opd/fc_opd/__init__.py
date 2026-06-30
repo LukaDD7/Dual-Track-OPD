@@ -1,5 +1,16 @@
 """Framework-independent failure-calibrated OPD primitives."""
 
+
+def _missing_optional_class(name: str, requirement: str):
+    class _MissingOptional:
+        def __init__(self, *args, **kwargs):
+            del args, kwargs
+            raise ModuleNotFoundError(f"{name} requires optional packages: {requirement}")
+
+    _MissingOptional.__name__ = name
+    return _MissingOptional
+
+
 from .chunk_parser import ChunkMasks, parse_response_chunks
 from .conditions import Condition, ConditionInputs, build_condition_inputs
 from .loss import FCOPDLossConfig, compute_fc_opd_loss, sparse_forward_kl
@@ -67,7 +78,12 @@ from .teacher_protocol import (
     tokenizer_fingerprint,
 )
 from .teacher_prompts import render_teacher_prompt
-from .verl_dataset import FCOPDDataset
+try:
+    from .verl_dataset import FCOPDDataset
+except ModuleNotFoundError as exc:
+    if exc.name not in {"transformers", "verl"}:
+        raise
+    FCOPDDataset = _missing_optional_class("FCOPDDataset", "transformers and verl")
 from .verl_integration import (
     DEFAULT_VERL_CONDITION_ORDER,
     VERL_CONDITION_IDS,

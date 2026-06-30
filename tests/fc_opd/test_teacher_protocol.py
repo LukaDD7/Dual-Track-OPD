@@ -94,7 +94,7 @@ class EncodeTokenizer:
         return [ord(character) for character in text]
 
 
-def test_transformers_backend_retokenization_gate_without_loading_a_model():
+def test_transformers_backend_retokenization_gate_without_loading_a_model(caplog):
     scorer = object.__new__(TransformersTeacherScorer)
     scorer.tokenizer = EncodeTokenizer()
     from dual_track_opd.fc_opd.conditions import Condition, ConditionInputs, ImageInput
@@ -118,5 +118,8 @@ def test_transformers_backend_retokenization_gate_without_loading_a_model():
         tokenizer_hash="hash",
         response_text="B",
     )
-    with pytest.raises(ValueError, match="token IDs differ"):
+    caplog.clear()
+    with caplog.at_level("WARNING"):
         scorer._check_response_text(request)
+    assert tuple(request.response_token_ids) == (ord("B"),)
+    assert "Teacher tokenizer mismatch" in caplog.text

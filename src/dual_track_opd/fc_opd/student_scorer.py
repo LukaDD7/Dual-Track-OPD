@@ -75,18 +75,18 @@ class StudentScorer:
 
     def __call__(
         self,
-        sample_or_samples: OnlineFCOPDSample | Sequence[OnlineFCOPDSample],
+        sample: OnlineFCOPDSample | Sequence[OnlineFCOPDSample],
         conditions: Sequence[Condition],
     ) -> OnlineStudentScores | list[OnlineStudentScores]:
         """Score one or multiple samples under every requested condition."""
-        if isinstance(sample_or_samples, Sequence) and not isinstance(sample_or_samples, (str, bytes)):
-            samples_list = list(sample_or_samples)
+        if isinstance(sample, Sequence) and not isinstance(sample, (str, bytes)):
+            samples_list = list(sample)
             if len(samples_list) == 0:
                 raise ValueError("at least one sample is required")
             if len(samples_list) == 1:
                 return self._score_one(samples_list[0], conditions)
             return self._score_batched(samples_list, conditions)
-        return self._score_one(sample_or_samples, conditions)  # type: ignore[arg-type]
+        return self._score_one(sample, conditions)  # type: ignore[arg-type]
 
     def _score_one(
         self,

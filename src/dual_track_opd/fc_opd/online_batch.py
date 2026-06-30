@@ -142,6 +142,8 @@ def compute_online_fc_opd_batch(
     if not samples:
         raise ValueError("at least one online sample is required")
     config = config or OnlineFCOPDConfig()
+    for sample in samples:
+        _reject_stale_offline_fields(sample, config)
     # Pre-batch student scoring — split into sub-batches of 8 to avoid OOM.
     _STUDENT_BATCH_MAX = 8
     all_student_scores = []
@@ -150,7 +152,7 @@ def compute_online_fc_opd_batch(
         try:
             chunk_scores = student_scorer(chunk, config.conditions)
             all_student_scores.extend(chunk_scores if isinstance(chunk_scores, list) else [chunk_scores])
-        except (TypeError, NotImplementedError):
+        except (AttributeError, TypeError, NotImplementedError):
             all_student_scores = None
             break
     if all_student_scores is not None and len(all_student_scores) != len(samples):

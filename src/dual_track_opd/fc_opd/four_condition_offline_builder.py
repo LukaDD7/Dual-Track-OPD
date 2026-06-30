@@ -61,6 +61,14 @@ FOUR_CLEAN_CONDITIONS: tuple[Condition, ...] = (
     Condition.TASK,
 )
 DEFAULT_STUDENT_MODEL = "hf:$DTOPD_MODEL_ROOT/Qwen3-VL-4B-Instruct"
+VERIFIER_GATE_RESIDUAL_FLOOR = 0.05
+VERIFIER_GATE_CHUNK_MAX: dict[str, float] = {
+    "visible_evidence": 1.00,
+    "diagram_inference": 0.80,
+    "reasoning": 0.60,
+    "answer": 0.40,
+}
+CHUNK_CAPABILITY_COMPATIBILITY_FLOOR = 0.05
 VERIFIER_LEARNING_VALUE_CHUNK_GATES: dict[str, dict[str, float]] = {
     "correct": {
         "visible_evidence": 0.25,
@@ -698,33 +706,21 @@ def verifier_outcome_class(verifier: Mapping[str, Any] | None) -> str:
 
 
 def build_verifier_learning_value_gate(verifier: Mapping[str, Any] | None) -> dict[str, Any]:
-    """Build per-chunk learning-value gates from reward, smoothed instead of discrete.
-
-    Instead of three hard classes (correct/wrong/malformed), we use reward
-    directly as a continuous signal::
-
-        gate[chunk] = (1 − reward) × chunk_max
-
-    When reward=1 (correct), gate → 0 — still a small residual so we don't
-    completely stop learning from successful rollouts.  When reward=0 (wrong),
-    gate → chunk_max — full learning intensity.
-
-    This is smooth, interpretable, and avoids the "why only three classes?"
-    question in review.
-    """
-    reward = 1.0 if verifier is None else float(verifier.get("reward", 0.0))
-    # Per-chunk maximum learning weight.  Reasoning and answer chunks
-    # rely more on internal reasoning; visible_evidence is the most
-    # directly "teachable" from teacher behaviour.
-    _CHUNK_MAX: dict[str, float] = {
-        "visible_evidence": 1.00,
-        "diagram_inference": 0.80,
-        "reasoning": 0.60,
-        "answer": 0.40,
-    }
-    gates = {chunk: (1.0 - reward) * w for chunk, w in _CHUNK_MAX.items()}
+    """Build continuous per-chunk learning-value weights from verifier reward."""
+    outcome_class = verifier_outcome_class(verifier)
+    if verifier is None:
+        reward = None
+        gates = {chunk: 1.0 for chunk in VERIFIER_GATE_CHUNK_MAX}
+    else:
+        reward = _clamp01(float(verifier.get("reward", 0.0)))
+        learning_value = 1.0 - reward
+        gates = {
+            chunk: VERIFIER_GATE_RESIDUAL_FLOOR + (chunk_max - VERIFIER_GATE_RESIDUAL_FLOOR) * learning_value
+            for chunk, chunk_max in VERIFIER_GATE_CHUNK_MAX.items()
+        }
     return {
-        "outcome_class": "reward_smoothed",  # no longer discrete
+        "outcome_class": outcome_class,
+        "gate_policy": "reward_smoothed_v2",
         "correct": None if verifier is None else verifier.get("correct"),
         "format_valid": True if verifier is None else bool(verifier.get("format_valid", False)),
         "reward": reward,
@@ -792,8 +788,12 @@ def compute_student_deficit_capability_scores(
             max(0.0, t_value - s_value - float(margin))
             for t_value, s_value in zip(teacher_delta, student_delta, strict=True)
         ]
-        chunk_compatibility = [
+        chunk_compatibility_prior = [
             float(CHUNK_CAPABILITY_COMPATIBILITY.get(label, {}).get(capability, 0.0))
+            for label in chunk_labels
+        ]
+        chunk_compatibility = [
+            _soft_chunk_capability_compatibility(label, capability)
             for label in chunk_labels
         ]
         chunk_gates = (
@@ -820,6 +820,7 @@ def compute_student_deficit_capability_scores(
             "student_delta": student_delta,
             "teacher_attribution": teacher_attribution,
             "student_deficit": student_deficit,
+            "chunk_compatibility_prior": chunk_compatibility_prior,
             "chunk_compatibility": chunk_compatibility,
             "verifier_learning_value_gate": verifier_learning_value_weights,
             "final_token_weight": final,
@@ -850,6 +851,7 @@ def _invalid_capability(length: int, positive: str, negative: str, reason: str) 
         "student_delta": [0.0] * length,
         "teacher_attribution": [0.0] * length,
         "student_deficit": [0.0] * length,
+        "chunk_compatibility_prior": [0.0] * length,
         "chunk_compatibility": [0.0] * length,
         "verifier_learning_value_gate": [0.0] * length,
         "final_token_weight": [0.0] * length,
@@ -862,6 +864,18 @@ def _score_length(block: Mapping[str, Any]) -> int:
     if isinstance(block.get("actual_token_log_probs"), Sequence):
         return len(block["actual_token_log_probs"])
     return len(block.get("token_ids", []))
+
+
+def _soft_chunk_capability_compatibility(label: str, capability: str) -> float:
+    prior = float(CHUNK_CAPABILITY_COMPATIBILITY.get(label, {}).get(capability, 0.0))
+    prior = _clamp01(prior)
+    return CHUNK_CAPABILITY_COMPATIBILITY_FLOOR + (1.0 - CHUNK_CAPABILITY_COMPATIBILITY_FLOOR) * prior
+
+
+def _clamp01(value: float) -> float:
+    if math.isnan(value):
+        return 0.0
+    return min(1.0, max(0.0, value))
 
 
 def _actual_log_probs(block: Mapping[str, Any], length: int) -> list[float]:

@@ -56,8 +56,7 @@ class TestStudentScorerContract:
         param_names = list(sig.parameters)
         assert "sample" in param_names
         assert "conditions" in param_names
-        # Return annotation should be OnlineStudentScores
-        assert sig.return_annotation == "OnlineStudentScores" or sig.return_annotation is inspect.Parameter.empty
+        assert "OnlineStudentScores" in str(sig.return_annotation) or sig.return_annotation is inspect.Parameter.empty
 
 
 class TestStudentScorerMultiCondition:

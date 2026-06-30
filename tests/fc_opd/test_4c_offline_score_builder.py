@@ -392,8 +392,8 @@ def test_6c_builder_writes_expanded_condition_schema(tmp_path):
     assert set(row["student_condition_scores"]) == set(expected)
     assert row["verifier"]["format_valid"] is True
     assert row["verifier_learning_value_gate"]["outcome_class"] == "wrong_but_format_valid"
-    assert row["verifier_learning_value_gate"]["chunk_gates"]["visible_evidence"] == 1.0
-    assert row["verifier_learning_value_gate"]["chunk_gates"]["diagram_inference"] == 1.0
+    assert 0.0 < row["verifier_learning_value_gate"]["chunk_gates"]["diagram_inference"] < 1.0
+    assert row["verifier_learning_value_gate"]["chunk_gates"]["visible_evidence"] > row["verifier_learning_value_gate"]["chunk_gates"]["diagram_inference"]
     assert row["grouped_loss_plan"]["solve"] == ["solving"]
     assert row["routing_mode"] == "student_deficit_chunk_gated"
     assert row["chunk_spans"]["token_counts"]["diagram_inference"] > 0

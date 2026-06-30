@@ -111,8 +111,8 @@ def test_student_deficit_router_uses_verifier_learning_value_gate():
     )
 
     assert wrong_scores["visual_text_inference"]["final_token_weight"][1] > correct_scores["visual_text_inference"]["final_token_weight"][1]
-    assert correct_scores["solving"]["final_token_weight"][3] == 0.0
-    assert wrong_scores["solving"]["final_token_weight"][3] > 0.0
+    assert correct_scores["solving"]["final_token_weight"][3] > 0.0
+    assert wrong_scores["solving"]["final_token_weight"][3] > correct_scores["solving"]["final_token_weight"][3]
 
     weights = route_condition_weights(
         {"capability_scores": wrong_scores},

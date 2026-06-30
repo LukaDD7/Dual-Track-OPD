@@ -146,10 +146,12 @@ def test_online_verifier_gate_favors_wrong_valid_over_correct_answer_chunk():
     wrong_visible = wrong.verifier_learning_value_gate["chunk_gates"]["visible_evidence"]
     correct_visible = correct.verifier_learning_value_gate["chunk_gates"]["visible_evidence"]
     assert wrong_visible > correct_visible
-    assert correct.verifier_learning_value_gate["chunk_gates"]["answer"] == 0.0
+    assert correct.verifier_learning_value_gate["chunk_gates"]["answer"] > 0.0
     answer_mask = correct.chunk_masks["answer"]
+    wrong_answer_weight = sum(weight[answer_mask].sum() for weight in wrong.condition_weights.values())
     correct_answer_weight = sum(weight[answer_mask].sum() for weight in correct.condition_weights.values())
-    assert correct_answer_weight.item() == pytest.approx(0.0)
+    assert correct_answer_weight.item() > 0.0
+    assert correct_answer_weight.item() < wrong_answer_weight.item()
 
 
 def test_online_grouped_loss_is_finite_and_backward_updates_current_student():
