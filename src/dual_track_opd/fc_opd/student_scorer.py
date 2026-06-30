@@ -122,11 +122,9 @@ class StudentScorer:
         samples: list[OnlineFCOPDSample],
         conditions: Sequence[Condition],
     ) -> list[OnlineStudentScores]:
-        """Batch-score: process FULL (grad) first, then other conditions (no_grad).
-
-        For each condition we encode the prompt B times via the processor
-        (same as the teacher batching) and pad responses to max length.
-        """
+        """Batch-score: process FULL (grad) first, then other conditions (no_grad)."""
+        import sys as _sys, time as _time
+        _t0 = _time.time()
         B = len(samples)
         norm_conditions = [Condition(c) for c in conditions]
         # Ensure FULL is first so we get loss_logits right away
@@ -199,6 +197,8 @@ class StudentScorer:
                 if cond is Condition.FULL:
                     loss_logits_list[i] = sample_logits
 
+        _dt = _time.time() - _t0
+        print(f"[student] batched B={B} conditions={len(ordered)}: {_dt:.2f}s", file=_sys.stderr, flush=True)
         return [
             OnlineStudentScores(loss_logits=loss_logits_list[i], condition_log_probs=log_prob_maps[i])
             for i in range(B)
