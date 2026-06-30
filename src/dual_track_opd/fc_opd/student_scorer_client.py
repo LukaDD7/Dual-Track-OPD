@@ -14,6 +14,15 @@ from .conditions import Condition, build_condition_inputs
 from .online_batch import OnlineFCOPDSample, OnlineStudentScores
 
 
+class _BytesSafeEncoder(json.JSONEncoder):
+    """JSON encoder that transparently base64-encodes any stray ``bytes`` objects."""
+
+    def default(self, obj: object) -> object:
+        if isinstance(obj, bytes):
+            return base64.b64encode(obj).decode("ascii")
+        return super().default(obj)
+
+
 class StudentScorerServiceError(RuntimeError):
     pass
 
@@ -51,7 +60,12 @@ class StudentScorerClient:
         data = None
         headers = {"Accept": "application/json"}
         if payload is not None:
-            data = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()
+            data = json.dumps(
+                payload,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                cls=_BytesSafeEncoder,
+            ).encode()
             headers["Content-Type"] = "application/json"
         request = Request(f"{self.base_url}{path}", method=method, data=data, headers=headers)
         try:
