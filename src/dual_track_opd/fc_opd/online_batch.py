@@ -132,12 +132,17 @@ def compute_online_fc_opd_batch(
     student_scorer: StudentForcedScorer,
     verifier: VerifierFn | None = None,
     config: OnlineFCOPDConfig | None = None,
+    pre_scored_students: Sequence[OnlineStudentScores] | None = None,
 ) -> OnlineFCOPDBatchOutput:
     """Compute online FC-OPD losses for fresh runtime rollouts.
 
     The function never reads offline score JSONL data. Teacher and student
     scorers are called with ``sample.rollout_token_ids`` from the current
     training step.
+
+    When *pre_scored_students* is provided (one per sample), the pre-batch
+    student-scoring loop is skipped entirely — this is the preferred path
+    for production because it mirrors how the teacher is pre-batched.
     """
 
     if not samples:
@@ -145,22 +150,25 @@ def compute_online_fc_opd_batch(
     config = config or OnlineFCOPDConfig()
     for sample in samples:
         _reject_stale_offline_fields(sample, config)
-    # Pre-batch student scoring — split into sub-batches of 8 to avoid OOM.
-    _STUDENT_BATCH_MAX = 8
-    all_student_scores = []
-    for _start in range(0, len(samples), _STUDENT_BATCH_MAX):
-        chunk = list(samples)[_start:_start + _STUDENT_BATCH_MAX]
-        try:
-            chunk_scores = student_scorer(chunk, config.conditions)
-            all_student_scores.extend(chunk_scores if isinstance(chunk_scores, list) else [chunk_scores])
-        except (AttributeError, TypeError, NotImplementedError, RuntimeError):
-            import logging as _logging
-            _logging.getLogger(__name__).warning(
-                "student scorer batch call failed, falling back to per-sample scoring: %s",
-                exc_info=True,
-            )
-            all_student_scores = None
-            break
+    if pre_scored_students is not None:
+        all_student_scores = list(pre_scored_students)
+    else:
+        # Pre-batch student scoring — split into sub-batches of 8 to avoid OOM.
+        _STUDENT_BATCH_MAX = 8
+        all_student_scores = []
+        for _start in range(0, len(samples), _STUDENT_BATCH_MAX):
+            chunk = list(samples)[_start:_start + _STUDENT_BATCH_MAX]
+            try:
+                chunk_scores = student_scorer(chunk, config.conditions)
+                all_student_scores.extend(chunk_scores if isinstance(chunk_scores, list) else [chunk_scores])
+            except (AttributeError, TypeError, NotImplementedError, RuntimeError):
+                import logging as _logging2
+                _logging2.getLogger(__name__).warning(
+                    "student scorer batch call failed, falling back to per-sample scoring",
+                    exc_info=True,
+                )
+                all_student_scores = None
+                break
     if all_student_scores is not None and len(all_student_scores) != len(samples):
         all_student_scores = None
 

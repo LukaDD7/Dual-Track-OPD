@@ -47,7 +47,6 @@ def fc_opd_post_rollout_hook(
     if responses.ndim != 2 or response_mask.shape != responses.shape:
         raise ValueError("responses and response_mask must have shape [B, T]")
 
-    student_scorer = _build_student_scorer(fc_config)
     verifier = _optional_callable(fc_config, "verifier", "verifier_fqn")
     samples = [
         _sample_from_batch_row(
@@ -60,16 +59,20 @@ def fc_opd_post_rollout_hook(
         for index in range(int(responses.shape[0]))
     ]
     teacher_scorer = _build_teacher_scorer(fc_config, tokenizer, samples, conditions)
+    # Pre-batch student scoring the same way we pre-batch teacher scoring:
+    # one HTTP call for all samples, then do dict lookups in the sample loop.
+    pre_scored_students = _pre_score_students(fc_config, samples, conditions)
     output = compute_online_fc_opd_batch(
         samples,
         tokenizer=tokenizer,
         teacher_scorer=teacher_scorer,
-        student_scorer=student_scorer,
+        student_scorer=_build_student_scorer(fc_config),
         verifier=verifier,
         config=OnlineFCOPDConfig(
             conditions=conditions,
             compute_hook_loss=bool(_config_get(fc_config, "compute_hook_loss", True)),
         ),
+        pre_scored_students=pre_scored_students,
     )
     verl_tensors = online_batch_output_to_verl_tensors(
         output,
@@ -197,6 +200,32 @@ def _build_student_scorer(fc_config: Mapping[str, Any]) -> StudentForcedScorer:
         student_scorer_fqn=str(fqn),
         student_scorer_kwargs=dict(kwargs),
     )
+
+
+def _pre_score_students(
+    fc_config: Mapping[str, Any],
+    samples: list[OnlineFCOPDSample],
+    conditions: tuple[Condition, ...],
+) -> list[OnlineStudentScores] | None:
+    """Pre-score all student samples in one HTTP batch, matching the teacher pattern."""
+    fqn = str(_config_get(fc_config, "student_scorer_fqn", ""))
+    if not fqn:
+        return None
+    kwargs = dict(_config_get(fc_config, "student_scorer_kwargs", {}) or {})
+    try:
+        loaded = _load_fqn(fqn)
+        if kwargs:
+            loaded = loaded(**kwargs)
+        result = loaded(samples, conditions)
+        return list(result) if isinstance(result, list) else [result]
+    except Exception:
+        import logging as _logging
+
+        _logging.getLogger(__name__).warning(
+            "student pre-scoring failed, falling back to per-sample scoring",
+            exc_info=True,
+        )
+        return None
 
 
 def _optional_callable(fc_config: Mapping[str, Any], direct_key: str, fqn_key: str) -> Callable[..., Any] | None:
