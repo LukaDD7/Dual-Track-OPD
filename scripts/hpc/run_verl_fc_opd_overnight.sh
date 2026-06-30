@@ -27,8 +27,8 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 export PYTHONPATH="${REPO_ROOT}:${PYTHONPATH:-}"
 
-GPU_COUNT=4
-NUM_STEPS=660  # 5 epochs × (2101 prompts / 16 batch), align VA-OPD
+GPU_COUNT=8
+NUM_STEPS=585  # 5 epochs × (2101 prompts / 18 batch), align VA-OPD
 TOP_K=32
 TEACHER_PORT=18080
 RUN_BACKGROUND=false
@@ -94,11 +94,12 @@ TEACHER_GPU=0
 VERL_GPU_LIST=$(seq -s, 1 $(( GPU_COUNT - 1 )))
 SAVE_FREQ=25
 
-# Aligned with VA-OPD: batch_size=16, rollout_n=4, 5 epochs.
-# Geometry3K: 2101 prompts / 16 batch ≈ 132 steps/epoch × 5 = 660 steps.
-TRAIN_BATCH_SIZE=16
+# Aligned with VA-OPD: batch_size=18 (VA-OPD=16, adjusted for 6 train GPUs),
+# rollout_n=4, 5 epochs.
+# Geometry3K: 2101 prompts / 18 batch ≈ 117 steps/epoch × 5 ≈ 584 steps.
+TRAIN_BATCH_SIZE=18
 ROLLOUT_N=4
-PPO_MINI_BATCH_SIZE=${TRAIN_BATCH_SIZE}   # verl requires mini <= train_batch_size (both in prompts)
+PPO_MINI_BATCH_SIZE=${TRAIN_BATCH_SIZE}
 MICRO_BATCH_PER_GPU=1
 
 CHECKPOINT_DIR="${REPO_ROOT_ABS}/checkpoints/verl_fc_opd_overnight/${RUN_ID}"
@@ -106,7 +107,7 @@ CHECKPOINT_DIR="${REPO_ROOT_ABS}/checkpoints/verl_fc_opd_overnight/${RUN_ID}"
 echo "══════════════════════════════════════════════════════════════"
 echo "  FC-OPD Training — VA-OPD aligned"
 echo "  Run ID:       ${RUN_ID}"
-echo "  Steps:        ${NUM_STEPS} (5 epochs × 2101/16 batch)"
+echo "  Steps:        ${NUM_STEPS} (5 epochs × 2101/${TRAIN_BATCH_SIZE} batch)"
 echo "  Save freq:    ${SAVE_FREQ}"
 echo "  Loss mode:    reverse (mode-seeking KL)"
 echo "  Top-K:        ${TOP_K}"
