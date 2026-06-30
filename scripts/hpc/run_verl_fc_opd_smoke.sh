@@ -231,8 +231,8 @@ ${CONDA_ENV}/bin/python -m verl.trainer.main_ppo \
     "data.custom_cls.path=file://${REPO_ROOT_ABS}/src/dual_track_opd/fc_opd/verl_dataset.py" \
     "data.custom_cls.name=FCOPDDataset" \
     "actor_rollout_ref.model.path=${MODEL_PATH}" \
-    "actor_rollout_ref.model.use_remove_padding=true" \
-    "actor_rollout_ref.model.use_fused_kernels=true" \
+    "actor_rollout_ref.model.use_remove_padding=false" \
+    "actor_rollout_ref.model.use_fused_kernels=false" \
     "actor_rollout_ref.model.enable_gradient_checkpointing=true" \
     "++actor_rollout_ref.model.override_config.attn_implementation=sdpa" \
     "actor_rollout_ref.actor.optim.lr=${LR}" \

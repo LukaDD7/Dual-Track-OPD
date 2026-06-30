@@ -315,7 +315,11 @@ class TransformersTeacherScorer(TeacherScorer):
         if position_ids is not None:
             model_inputs["position_ids"] = position_ids
 
+        import sys, time as _time
+        _t0 = _time.time()
         outputs = self.model(**model_inputs, use_cache=False)
+        _dt = _time.time() - _t0
+        print(f"[teacher] batched B={B} forward: {_dt:.2f}s", file=sys.stderr, flush=True)
 
         # ── Extract per-sample top-K ─────────────────────────────────────
         results: list[TeacherScoreResponse] = []
@@ -345,10 +349,14 @@ class TransformersTeacherScorer(TeacherScorer):
     ) -> list[TeacherScoreResponse]:
         # Group by condition → 6 batched forwards instead of 96.
         from collections import defaultdict as _dd
+        import sys as _sys
 
         groups: dict[Any, list[TeacherScoreRequest]] = _dd(list)
         for req in requests:
             groups[req.condition].append(req)
+
+        print(f"[teacher] score_batch: {len(requests)} requests → {len(groups)} groups "
+              f"{ {str(c): len(g) for c, g in groups.items()} }", file=_sys.stderr, flush=True)
 
         results_map: dict[str, TeacherScoreResponse] = {}
         for _condition, group in groups.items():
