@@ -25,8 +25,6 @@ class _RayStudentScorerActor:
 
     def score(self, sample: OnlineFCOPDSample, conditions: list[Condition]) -> OnlineStudentScores:
         result = self._scorer(sample, conditions)
-        # Move CUDA tensors to CPU before Ray serializes the return value
-        # back to the CPU-only TaskRunner.
         return OnlineStudentScores(
             loss_logits=result.loss_logits.detach().cpu(),
             condition_log_probs={
@@ -34,6 +32,21 @@ class _RayStudentScorerActor:
                 for c, lp in result.condition_log_probs.items()
             },
         )
+
+    def score_batch(
+        self, samples: list[OnlineFCOPDSample], conditions: list[Condition]
+    ) -> list[OnlineStudentScores]:
+        results = self._scorer(samples, conditions)
+        return [
+            OnlineStudentScores(
+                loss_logits=r.loss_logits.detach().cpu(),
+                condition_log_probs={
+                    c: lp.detach().cpu() if isinstance(lp, torch.Tensor) else lp
+                    for c, lp in r.condition_log_probs.items()
+                },
+            )
+            for r in results
+        ]
 
 
 class RayStudentScorerProxy:
@@ -59,11 +72,23 @@ class RayStudentScorerProxy:
         )
 
     def __call__(
-        self, sample: OnlineFCOPDSample, conditions: list[Condition]
-    ) -> OnlineStudentScores:
-        result: OnlineStudentScores = ray.get(self._actor.score.remote(sample, conditions))
-        # Move CUDA tensors to CPU so Ray can serialize them back to the
-        # CPU-only TaskRunner that hosts the post-rollout hook.
+        self, sample_or_samples: OnlineFCOPDSample | list[OnlineFCOPDSample], conditions: list[Condition]
+    ) -> OnlineStudentScores | list[OnlineStudentScores]:
+        if isinstance(sample_or_samples, list):
+            results: list[OnlineStudentScores] = ray.get(
+                self._actor.score_batch.remote(sample_or_samples, conditions)
+            )
+            return [
+                OnlineStudentScores(
+                    loss_logits=r.loss_logits.detach().cpu(),
+                    condition_log_probs={
+                        c: lp.detach().cpu() if isinstance(lp, torch.Tensor) else lp
+                        for c, lp in r.condition_log_probs.items()
+                    },
+                )
+                for r in results
+            ]
+        result: OnlineStudentScores = ray.get(self._actor.score.remote(sample_or_samples, conditions))
         return OnlineStudentScores(
             loss_logits=result.loss_logits.detach().cpu(),
             condition_log_probs={

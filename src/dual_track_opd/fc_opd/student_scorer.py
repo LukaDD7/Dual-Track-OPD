@@ -194,7 +194,7 @@ class StudentScorer:
                 log_probs = torch.log_softmax(sample_logits.float(), dim=-1)
                 resp_ids = torch.tensor(samples[i].rollout_token_ids, dtype=torch.long,
                                         device=sample_logits.device).unsqueeze(0)
-                gathered = log_probs.gather(-1, resp_ids.unsqueeze(-1)).squeeze(-1).cpu()
+                gathered = log_probs[torch.arange(rlen, device=log_probs.device), resp_ids.squeeze(0)].cpu()
                 log_prob_maps[i][cond] = gathered
                 if cond is Condition.FULL:
                     loss_logits_list[i] = sample_logits
