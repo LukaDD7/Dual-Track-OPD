@@ -28,7 +28,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 export PYTHONPATH="${REPO_ROOT}:${PYTHONPATH:-}"
 
 GPU_COUNT=4
-NUM_STEPS=200
+NUM_STEPS=660  # 5 epochs × (2101 prompts / 16 batch), align VA-OPD
 TOP_K=32
 TEACHER_PORT=18080
 RUN_BACKGROUND=false
@@ -70,7 +70,7 @@ fi
 
 MODEL_PATH="/inspire/hdd/global_user/mengweicheng-240108120092/lzy/models/Qwen3-VL-4B-Instruct"
 TEACHER_MODEL="/inspire/hdd/global_user/mengweicheng-240108120092/lzy/models/Qwen3-VL-32B-Instruct"
-PARQUET="${PARQUET_OVERRIDE:-/inspire/hdd/global_user/mengweicheng-240108120092/lzy/fc-opd-storage/outputs/fc_opd/verl_smoke/train.parquet}"
+PARQUET="${PARQUET_OVERRIDE:-/inspire/hdd/global_user/mengweicheng-240108120092/lzy/fc-opd-storage/outputs/fc_opd/geometry3k_full/train.parquet}"
 CONDA_ENV="/inspire/hdd/global_user/mengweicheng-240108120092/lzy/fc-opd-storage/envs/fc-opd-verl071-cu128"
 REPO_ROOT_ABS="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 RUN_ID="fc_opd_overnight_$(date +%Y%m%d_%H%M%S)"
@@ -94,30 +94,29 @@ TEACHER_GPU=0
 VERL_GPU_LIST=$(seq -s, 1 $(( GPU_COUNT - 1 )))
 SAVE_FREQ=25
 
-# Batch size: with the smoke dataset (2 prompts) we keep train_batch_size=2.
-# At rollout n=8 that's 16 samples/step — decent for a smoke run.
-# For full Geometry3K (2K prompts), scale to train_batch_size=32 (VA-OPD setting).
-TRAIN_BATCH_SIZE=2
-ROLLOUT_N=8
+# Aligned with VA-OPD: batch_size=16, rollout_n=4, 5 epochs.
+# Geometry3K: 2101 prompts / 16 batch ≈ 132 steps/epoch × 5 = 660 steps.
+TRAIN_BATCH_SIZE=16
+ROLLOUT_N=4
 PPO_MINI_BATCH_SIZE=${TRAIN_BATCH_SIZE}   # verl requires mini <= train_batch_size (both in prompts)
 MICRO_BATCH_PER_GPU=1
 
 CHECKPOINT_DIR="${REPO_ROOT_ABS}/checkpoints/verl_fc_opd_overnight/${RUN_ID}"
 
 echo "══════════════════════════════════════════════════════════════"
-echo "  FC-OPD Overnight Training"
+echo "  FC-OPD Training — VA-OPD aligned"
 echo "  Run ID:       ${RUN_ID}"
-echo "  Steps:        ${NUM_STEPS}"
+echo "  Steps:        ${NUM_STEPS} (5 epochs × 2101/16 batch)"
 echo "  Save freq:    ${SAVE_FREQ}"
 echo "  Loss mode:    reverse (mode-seeking KL)"
 echo "  Top-K:        ${TOP_K}"
-echo "  Rollout n:    ${ROLLOUT_N}"
-echo "  Train batch:  ${TRAIN_BATCH_SIZE}"
-echo "  LR:           2e-6"
+echo "  Rollout n:    ${ROLLOUT_N} (VA-OPD: 4)"
+echo "  Train batch:  ${TRAIN_BATCH_SIZE} (VA-OPD: 16)"
+echo "  LR:           2e-6 (VA-OPD: 2e-6)"
 echo "  GPU layout:   teacher=0, train=1..$((TRAIN_GPUS)), scorer=$((GPU_COUNT-1))"
+echo "  Data:         ${PARQUET} ($(python3 -c \"import pandas as pd; print(len(pd.read_parquet('${PARQUET}')))\" 2>/dev/null || echo '?') rows)"
 echo "  Train log:    ${TRAIN_LOG}"
 echo "  Checkpoint:   ${CHECKPOINT_DIR}"
-echo "  Data:         ${PARQUET}"
 echo "══════════════════════════════════════════════════════════════"
 echo ""
 
