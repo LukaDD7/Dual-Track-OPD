@@ -36,7 +36,7 @@ TEACHER_PORT=18080
 ROLLOUT_N=8
 PPO_MINI_BATCH_SIZE=2  # must be <= train_batch_size; matches TRAIN_GPUS for smoke
 LR=2e-6
-GPU_MEM_UTIL=0.5
+GPU_MEM_UTIL=0.7
 
 # ── paths (NFS, visible to all nodes) ───────────────────────────────────────
 MODEL_PATH="/inspire/hdd/global_user/mengweicheng-240108120092/lzy/models/Qwen3-VL-4B-Instruct"
@@ -240,17 +240,15 @@ ${CONDA_ENV}/bin/python -m verl.trainer.main_ppo \
     "actor_rollout_ref.actor.use_dynamic_bsz=true" \
     "actor_rollout_ref.actor.ppo_max_token_len_per_gpu=16384" \
     "actor_rollout_ref.actor.use_kl_loss=false" \
-    "actor_rollout_ref.actor.fsdp_config.param_offload=false" \
-    "actor_rollout_ref.actor.fsdp_config.optimizer_offload=false" \
+    "actor_rollout_ref.actor.fsdp_config.param_offload=true" \
+    "actor_rollout_ref.actor.fsdp_config.optimizer_offload=true" \
     "actor_rollout_ref.rollout.name=vllm" \
     "actor_rollout_ref.rollout.tensor_model_parallel_size=1" \
     "actor_rollout_ref.rollout.gpu_memory_utilization=${GPU_MEM_UTIL}" \
     "actor_rollout_ref.rollout.max_model_len=2048" \
     "actor_rollout_ref.rollout.n=${ROLLOUT_N}" \
-    "actor_rollout_ref.rollout.free_cache_engine=true" \
-    "actor_rollout_ref.rollout.enforce_eager=true" \
-    "actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=4" \
-    "actor_rollout_ref.rollout.agent.num_workers=4" \
+    "actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=8" \
+    "actor_rollout_ref.rollout.agent.num_workers=8" \
     "actor_rollout_ref.ref.fsdp_config.param_offload=true" \
     "reward_model.enable=false" \
     "reward_model.num_workers=null" \
