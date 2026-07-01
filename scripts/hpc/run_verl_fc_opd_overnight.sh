@@ -277,13 +277,21 @@ echo "  Exit:   ${VERL_EXIT}"
 echo "══════════════════════════════════════════════════════════════"
 
 # ── keepalive ────────────────────────────────────────────────────────────────
-# Default: sleep 24h with heartbeat to prevent the GPU instance from being
-# reclaimed while the user reviews results / checkpoints.
-_KEEPALIVE_SEC=${KEEPALIVE:-86400}
+# Default 24h GPU-busy keepalive on GPUs 2,3 to prevent instance reclamation.
+_KEEPALIVE_SEC=${KEEPALIVE_SEC:-86400}
+KEEPALIVE_GPUS="${KEEPALIVE_GPUS:-2,3}"
+_KEEPALIVE_SCRIPT="/inspire/hdd/global_user/mengweicheng-240108120092/lzy/scripts/busy_keepalive.py"
 echo ""
-echo "=== Keepalive (${KEEPALIVE_SEC}s) — kill this process when done ==="
-for ((_i = 0; _i < KEEPALIVE_SEC; _i += 300)); do
-    sleep 300
-    echo "[keepalive] $(date '+%Y-%m-%d %H:%M:%S') — PID $$ alive (${_i}s elapsed)"
-done
+echo "=== Keepalive (${_KEEPALIVE_SEC}s, GPUs ${KEEPALIVE_GPUS}) — kill this process when done ==="
+if [ -f "${_KEEPALIVE_SCRIPT}" ]; then
+    CUDA_VISIBLE_DEVICES="${KEEPALIVE_GPUS}" \
+        timeout "${_KEEPALIVE_SEC}" \
+        ${CONDA_ENV}/bin/python -u "${_KEEPALIVE_SCRIPT}"
+else
+    echo "[keepalive] busy_keepalive.py not found, falling back to sleep"
+    for ((_i = 0; _i < _KEEPALIVE_SEC; _i += 300)); do
+        sleep 300
+        echo "[keepalive] $(date '+%Y-%m-%d %H:%M:%S') — PID $$ alive (${_i}s elapsed)"
+    done
+fi
 exit ${VERL_EXIT}
