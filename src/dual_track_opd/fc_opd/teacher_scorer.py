@@ -70,6 +70,7 @@ class SyntheticTeacherScorer(TeacherScorer):
         topk_log_probs: list[tuple[float, ...]] = []
         tails: list[float] = []
         entropies: list[float] = []
+        sampled_lps: list[float] = []
 
         for position, response_token_id in enumerate(request.response_token_ids):
             vocab = torch.arange(self.metadata.vocab_size, dtype=torch.float32)
@@ -88,6 +89,8 @@ class SyntheticTeacherScorer(TeacherScorer):
             tails.append(float(tail_mass.log().item()))
             probabilities = log_probs.exp()
             entropies.append(float((-(probabilities * log_probs).sum()).item()))
+            # Exact log P_T(y_t|condition) — gather at the sampled token
+            sampled_lps.append(float(log_probs[response_token_id].item()))
 
         response = TeacherScoreResponse(
             request_id=request.request_id,
@@ -97,6 +100,7 @@ class SyntheticTeacherScorer(TeacherScorer):
             topk_log_probs=tuple(topk_log_probs),
             tail_log_prob=tuple(tails),
             teacher_entropy=tuple(entropies),
+            sampled_token_log_probs=tuple(sampled_lps),
         )
         ensure_exact_token_alignment(
             request.response_token_ids,

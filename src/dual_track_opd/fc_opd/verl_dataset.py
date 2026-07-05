@@ -4,6 +4,9 @@ verl's AgentLoop drops non-standard non-tensor columns from the batch.
 The only reliable channel is ``extra_info``.  This dataset subclass ensures
 FC-OPD fields (question, choices, answer, condition_inputs) are always
 available inside ``extra_info``, regardless of the raw parquet layout.
+
+For VA-OPD: student prompts are cleaned to raw image + question (no XML
+format instructions, no answer choices).
 """
 
 from __future__ import annotations
@@ -41,6 +44,21 @@ class FCOPDDataset(RLHFDataset):
         max_samples: int = -1,
     ):
         super().__init__(data_files, tokenizer, config, processor, max_samples)
+        self.dataframe = self._clean_prompts(self.dataframe)
+
+    @staticmethod
+    def _clean_prompts(dataframe):
+        """Replace prompts with clean ``<image> + question`` format.
+
+        Strips XML format instructions and answer choices — VA-OPD requires
+        the student to see only the raw image and question, no formatting bias.
+        """
+        def _clean(row: dict) -> dict:
+            question = str(row.get("question", "")).strip()
+            if question:
+                row["prompt"] = [{"role": "user", "content": f"<image>\n{question}"}]
+            return row
+        return dataframe.map(_clean)
 
     def __getitem__(self, item):
         row_dict = super().__getitem__(item)

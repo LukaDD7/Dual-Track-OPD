@@ -223,6 +223,14 @@ class TransformersTeacherScorer(TeacherScorer):
         tail_log_prob = (1.0 - topk_mass).clamp_min(torch.finfo(torch.float32).tiny).log()
         probabilities = log_probs.exp()
         entropy = -(probabilities * log_probs).sum(dim=-1)
+        # ── Exact log P_T(y_t | condition) via direct indexing ──
+        _t_idx = torch.arange(_n_resp, device=response_logits.device)
+        _r_ids = torch.tensor(request.response_token_ids, dtype=torch.long, device=response_logits.device)
+        if log_probs.ndim == 3:
+            sampled_lp = log_probs[0, _t_idx, _r_ids]  # [T]
+        else:
+            sampled_lp = log_probs[_t_idx, _r_ids]      # [T]
+        sampled_lp = sampled_lp.unsqueeze(0)              # [1, T]
 
         response = TeacherScoreResponse(
             request_id=request.request_id,
@@ -234,6 +242,7 @@ class TransformersTeacherScorer(TeacherScorer):
             ),
             tail_log_prob=tuple(float(item) for item in tail_log_prob[0].cpu().tolist()),
             teacher_entropy=tuple(float(item) for item in entropy[0].cpu().tolist()),
+            sampled_token_log_probs=tuple(float(item) for item in sampled_lp[0].cpu().tolist()),
         )
         # NOTE: request.response_token_ids may have been repaired by
         # _check_response_text; response.token_ids is set from the same
@@ -332,6 +341,14 @@ class TransformersTeacherScorer(TeacherScorer):
             tail = (1.0 - topk_mass).clamp_min(torch.finfo(torch.float32).tiny).log()
             probs = log_probs.exp()
             ent = -(probs * log_probs).sum(dim=-1)
+            # Exact log P_T(y_t | condition) via direct indexing
+            _t_idx = torch.arange(rlen, device=sample_logits.device)
+            _r_ids = torch.tensor(request.response_token_ids, dtype=torch.long, device=sample_logits.device)
+            if log_probs.ndim == 3:
+                sampled_lp = log_probs[0, _t_idx, _r_ids]  # [T]
+            else:
+                sampled_lp = log_probs[_t_idx, _r_ids]      # [T]
+            sampled_lp = sampled_lp.unsqueeze(0)              # [1, T]
             results.append(TeacherScoreResponse(
                 request_id=request.request_id,
                 condition=request.condition,
@@ -340,6 +357,7 @@ class TransformersTeacherScorer(TeacherScorer):
                 topk_log_probs=tuple(tuple(float(x) for x in row) for row in values.cpu().tolist()),
                 tail_log_prob=tuple(float(x) for x in tail.cpu().tolist()),
                 teacher_entropy=tuple(float(x) for x in ent.cpu().tolist()),
+                sampled_token_log_probs=tuple(float(x) for x in sampled_lp[0].cpu().tolist()),
             ))
         return results
 

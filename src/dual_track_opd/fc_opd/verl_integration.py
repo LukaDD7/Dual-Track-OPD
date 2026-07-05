@@ -36,6 +36,7 @@ class VerlFCOPDTensors:
     condition_weights: torch.Tensor
     condition_ids: torch.Tensor
     teacher_tail_log_prob: torch.Tensor | None = None
+    teacher_sampled_log_probs: torch.Tensor | None = None  # [B,C,T] exact log P_T(y_t|cond)
 
     def as_batch_dict(self) -> dict[str, torch.Tensor]:
         tensors = {
@@ -46,6 +47,8 @@ class VerlFCOPDTensors:
         }
         if self.teacher_tail_log_prob is not None:
             tensors["fc_teacher_tail_log_prob"] = self.teacher_tail_log_prob
+        if self.teacher_sampled_log_probs is not None:
+            tensors["fc_teacher_sampled_log_probs"] = self.teacher_sampled_log_probs
         return tensors
 
 
@@ -94,6 +97,7 @@ def online_sample_outputs_to_verl_tensors(
     topk_log_probs = []
     condition_weights = []
     tail_blocks = []
+    sampled_lp_blocks = []
     has_any_tail = False
     for sample in samples:
         sample_seq_len = sample.response_token_ids.shape[-1]
@@ -103,6 +107,7 @@ def online_sample_outputs_to_verl_tensors(
         sample_log_probs = []
         sample_weights = []
         sample_tails = []
+        sample_sampled_lp = []
         for condition in normalized_order:
             if condition not in sample.teacher_scores:
                 raise ValueError(f"{sample.sample_uid}: missing teacher scores for {condition.value}")
@@ -129,10 +134,17 @@ def online_sample_outputs_to_verl_tensors(
             else:
                 has_any_tail = True
                 sample_tails.append(_pad_vector(teacher.tail_log_prob.squeeze(0), seq_len, pad_value=0.0).to(device=device, dtype=torch.float32))
+            # Exact teacher log P_T(y_t | condition_c) per response token
+            if teacher.sampled_log_probs is not None:
+                sample_slp = _pad_vector(teacher.sampled_log_probs.squeeze(0), seq_len, pad_value=-30.0)
+                sample_sampled_lp.append(sample_slp.to(device=device, dtype=torch.float32))
+            else:
+                sample_sampled_lp.append(torch.full((seq_len,), -30.0, dtype=torch.float32, device=device))
         topk_ids.append(torch.stack(sample_ids, dim=0))
         topk_log_probs.append(torch.stack(sample_log_probs, dim=0))
         condition_weights.append(torch.stack(sample_weights, dim=0))
         tail_blocks.append(torch.stack(sample_tails, dim=0))
+        sampled_lp_blocks.append(torch.stack(sample_sampled_lp, dim=0))
 
     condition_ids = torch.tensor(
         [VERL_CONDITION_IDS.get(condition, -1) for condition in normalized_order],
@@ -153,6 +165,7 @@ def online_sample_outputs_to_verl_tensors(
         condition_weights=stacked_weights,
         condition_ids=condition_ids,
         teacher_tail_log_prob=torch.stack(tail_blocks, dim=0) if has_any_tail else None,
+        teacher_sampled_log_probs=torch.stack(sampled_lp_blocks, dim=0),  # [B,C,T]
     )
 
 

@@ -25,6 +25,10 @@ from .teacher_protocol import tokenizer_fingerprint
 from .verl_integration import DEFAULT_VERL_CONDITION_ORDER, online_batch_output_to_verl_tensors
 
 
+# No-op student scorer for VA-OPD mode (student scores not used, avoids GPU allocation).
+_NOOP_SCORER: StudentForcedScorer = lambda sample, conditions: None
+
+
 def fc_opd_post_rollout_hook(
     *,
     batch: Any,
@@ -59,18 +63,20 @@ def fc_opd_post_rollout_hook(
         for index in range(int(responses.shape[0]))
     ]
     teacher_scorer = _build_teacher_scorer(fc_config, tokenizer, samples, conditions)
-    # Pre-batch student scoring the same way we pre-batch teacher scoring:
-    # one HTTP call for all samples, then do dict lookups in the sample loop.
-    pre_scored_students = _pre_score_students(fc_config, samples, conditions)
+    # VA-OPD mode: full+degraded only → skip chunk parsing, student scorer, routing
+    _is_va_opd = set(conditions) == {Condition.FULL, Condition.DEGRADED} and len(conditions) == 2
+    pre_scored_students = None if _is_va_opd else _pre_score_students(fc_config, samples, conditions)
+    student_scorer = _NOOP_SCORER if _is_va_opd else _build_student_scorer(fc_config)
     output = compute_online_fc_opd_batch(
         samples,
         tokenizer=tokenizer,
         teacher_scorer=teacher_scorer,
-        student_scorer=_build_student_scorer(fc_config),
+        student_scorer=student_scorer,
         verifier=verifier,
         config=OnlineFCOPDConfig(
             conditions=conditions,
             compute_hook_loss=bool(_config_get(fc_config, "compute_hook_loss", True)),
+            skip_routing=_is_va_opd,
         ),
         pre_scored_students=pre_scored_students,
     )
@@ -97,6 +103,16 @@ def fc_opd_post_rollout_hook(
     loss_mode = str(_config_get(fc_config, "loss_mode", "forward"))
     import numpy as np
     batch.non_tensor_batch["fc_opd_loss_mode"] = np.array([loss_mode] * B, dtype=object)
+
+    # ── Formal pipeline verification log (VA-OPD reproducibility) ───
+    _log_pipeline_verification(
+        conditions=conditions,
+        loss_mode=loss_mode,
+        B=B,
+        T=int(responses.shape[1]),
+        sampled_lp_shape=getattr(verl_tensors.teacher_sampled_log_probs, "shape", None),
+        top_k=int(verl_tensors.teacher_topk_indices.shape[-1]) if verl_tensors.teacher_topk_indices is not None else None,
+    )
 
     metrics = {
         "fc_opd/hook_loss": float(output.loss.detach().cpu().item()),
@@ -385,3 +401,38 @@ def _load_fqn(fqn: str) -> Callable[..., Any]:
         raise ValueError(f"expected a fully qualified name, got: {fqn}")
     module = importlib.import_module(module_name)
     return getattr(module, attr)
+
+
+def _log_pipeline_verification(
+    *,
+    conditions: tuple[Condition, ...],
+    loss_mode: str,
+    B: int,
+    T: int,
+    sampled_lp_shape: tuple[int, ...] | None,
+    top_k: int | None,
+) -> None:
+    """Print formal pipeline verification header for VA-OPD reproducibility."""
+    import logging as _logging
+    import sys as _sys
+    _log = _logging.getLogger(__name__)
+    lines = [
+        "=" * 72,
+        "  VA-OPD Pipeline Verification (arXiv 2605.21924 §3.2-3.3)",
+        "=" * 72,
+        f"  C          = {len(conditions)}  conditions: {[c.value for c in conditions]}",
+        f"  loss_mode  = {loss_mode}",
+        f"  batch      = [B={B}, T={T}]",
+        f"  top_k      = {top_k}",
+        f"  exact_lp   = {sampled_lp_shape}  (None=tail-fallback)",
+        f"  Student    = raw image + question  (no XML, no choices)",
+        f"  Teacher    = raw image + question  (no XML, no format bias)",
+        f"  KL         = {'reverse (mode-seeking) KL(P_S || P_T)' if loss_mode == 'va_opd' else 'forward'}",
+        f"  Formula §3.2: w^(k) = K·softmax(z_score(ā^(k)) / τ), sums to K",
+        f"  Formula §3.3: L_group = 0.5·mean(KL_rev,HighVA) + 0.5·mean(KL_rev,LowVA)",
+        f"  Total (formula 7): L = Σ_k w^(k)·L_group^(k)   (pure distillation, no GRPO)",
+        "=" * 72,
+    ]
+    for line in lines:
+        _log.warning(line)
+    print("\n".join(lines), file=_sys.stderr, flush=True)

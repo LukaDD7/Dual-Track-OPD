@@ -58,6 +58,7 @@ class OnlineFCOPDConfig:
     reject_stale_offline_fields: bool = True
     grouped_loss_schema: str = "capability_chunk_v1"
     compute_hook_loss: bool = True
+    skip_routing: bool = False  # VA-OPD: skip chunk parsing, capability scores, student scoring
 
 
 @dataclass(frozen=True)
@@ -205,81 +206,109 @@ def _compute_online_sample(
         raise ValueError(f"{sample.sample_uid}: rollout_token_ids must be non-empty")
 
     response_token_ids = torch.tensor([sample.rollout_token_ids], dtype=torch.long)
-    chunks = parse_response_chunks(sample.rollout_token_ids, sample.rollout_text, tokenizer)
-    chunk_masks = {
-        "visible_evidence": chunks.visible_evidence_mask.unsqueeze(0),
-        "diagram_inference": chunks.diagram_inference_mask.unsqueeze(0),
-        "reasoning": chunks.reasoning_mask.unsqueeze(0),
-        "answer": chunks.answer_mask.unsqueeze(0),
-    }
-    response_mask = torch.ones_like(response_token_ids, dtype=torch.bool)
-    format_valid = torch.tensor([chunks.format_valid], dtype=torch.bool)
+    T = len(sample.rollout_token_ids)
 
-    teacher_scores = _normalize_teacher_scores(teacher_scorer(sample, config.conditions))
-    _validate_teacher_scores(sample, teacher_scores, response_token_ids)
-    student = pre_scored_student if pre_scored_student is not None else student_scorer(sample, config.conditions)
-    loss_logits = (
-        _normalize_loss_logits(sample, student.loss_logits, len(sample.rollout_token_ids))
-        if student.loss_logits is not None
-        else None
-    )
-    if config.compute_hook_loss and loss_logits is None:
-        raise ValueError(f"{sample.sample_uid}: loss_logits are required when compute_hook_loss=true")
-
-    target_device = loss_logits.device if loss_logits is not None else response_token_ids.device
-    teacher_scores = {condition: _topk_to_device(score, target_device) for condition, score in teacher_scores.items()}
-    response_ids_device = response_token_ids.to(target_device)
-    response_mask = response_mask.to(target_device)
-    chunk_masks = {name: mask.to(target_device) for name, mask in chunk_masks.items()}
-
-    verifier_result = dict(verifier(sample) if verifier is not None else _default_verifier(sample))
-    verifier_gate = build_verifier_learning_value_gate(verifier_result)
-    capability_scores = compute_student_deficit_capability_scores(
-        teacher_condition_scores=_actual_logprob_blocks_from_teacher(teacher_scores, response_ids_device),
-        student_condition_scores=_student_logprob_blocks(student.condition_log_probs, len(sample.rollout_token_ids)),
-        chunk_spans=_chunk_spans_for_deficit(chunks),
-        verifier_learning_value_gate=verifier_gate,
-        margin=config.capability_margin,
-        max_capabilities_per_token=config.max_capabilities_per_token,
-        enable_student_deficit_gate=True,
-    )
-    condition_weights = route_condition_weights(
-        signals={"capability_scores": capability_scores},
-        chunk_masks=chunk_masks,
-        router_config=config.router_config,
-        response_mask=response_mask,
-        available_conditions=tuple(teacher_scores),
-        format_valid=format_valid.to(target_device),
-    )
-    condition_weights = _apply_verifier_token_gate(
-        condition_weights=condition_weights,
-        chunk_masks=chunk_masks,
-        verifier_learning_value_gate=verifier_gate,
-        response_mask=response_mask,
-    )
-    if loss_logits is None:
+    if config.skip_routing:
+        # ── VA-OPD fast path: no XML parsing, no student scorer, no routing ──
+        chunk_masks = {}
+        response_mask = torch.ones_like(response_token_ids, dtype=torch.bool)
+        teacher_scores = _normalize_teacher_scores(teacher_scorer(sample, config.conditions))
+        _validate_teacher_scores(sample, teacher_scores, response_token_ids)
+        target_device = response_token_ids.device
+        teacher_scores = {c: _topk_to_device(s, target_device) for c, s in teacher_scores.items()}
+        response_ids_device = response_token_ids.to(target_device)
+        response_mask = response_mask.to(target_device)
+        # Uniform condition weights: all response tokens weighted equally
+        C = len(config.conditions)
+        condition_weights = {
+            Condition(c): torch.ones(1, T, device=target_device)
+            for c in config.conditions
+        }
         loss = torch.zeros((), dtype=torch.float32, device=target_device)
         metrics = {}
+        verifier_result = {}
+        verifier_gate = {}
+        capability_scores = {}
     else:
-        loss, metrics = compute_fc_opd_loss(
-            loss_logits,
-            teacher_scores,
-            chunk_masks,
-            condition_weights,
-            response_mask,
-            config.loss_config,
+        chunks = parse_response_chunks(sample.rollout_token_ids, sample.rollout_text, tokenizer)
+        chunk_masks = {
+            "visible_evidence": chunks.visible_evidence_mask.unsqueeze(0),
+            "diagram_inference": chunks.diagram_inference_mask.unsqueeze(0),
+            "reasoning": chunks.reasoning_mask.unsqueeze(0),
+            "answer": chunks.answer_mask.unsqueeze(0),
+        }
+        response_mask = torch.ones_like(response_token_ids, dtype=torch.bool)
+        format_valid = torch.tensor([chunks.format_valid], dtype=torch.bool)
+
+        teacher_scores = _normalize_teacher_scores(teacher_scorer(sample, config.conditions))
+        _validate_teacher_scores(sample, teacher_scores, response_token_ids)
+        student = pre_scored_student if pre_scored_student is not None else student_scorer(sample, config.conditions)
+        loss_logits = (
+            _normalize_loss_logits(sample, student.loss_logits, len(sample.rollout_token_ids))
+            if student.loss_logits is not None
+            else None
         )
+        if config.compute_hook_loss and loss_logits is None:
+            raise ValueError(f"{sample.sample_uid}: loss_logits are required when compute_hook_loss=true")
+
+        target_device = loss_logits.device if loss_logits is not None else response_token_ids.device
+        teacher_scores = {c: _topk_to_device(s, target_device) for c, s in teacher_scores.items()}
+        response_ids_device = response_token_ids.to(target_device)
+        response_mask = response_mask.to(target_device)
+        chunk_masks = {name: mask.to(target_device) for name, mask in chunk_masks.items()}
+
+        verifier_result = dict(verifier(sample) if verifier is not None else _default_verifier(sample))
+        verifier_gate = build_verifier_learning_value_gate(verifier_result)
+        capability_scores = compute_student_deficit_capability_scores(
+            teacher_condition_scores=_actual_logprob_blocks_from_teacher(teacher_scores, response_ids_device),
+            student_condition_scores=_student_logprob_blocks(student.condition_log_probs, len(sample.rollout_token_ids)),
+            chunk_spans=_chunk_spans_for_deficit(chunks),
+            verifier_learning_value_gate=verifier_gate,
+            margin=config.capability_margin,
+            max_capabilities_per_token=config.max_capabilities_per_token,
+            enable_student_deficit_gate=True,
+        )
+        condition_weights = route_condition_weights(
+            signals={"capability_scores": capability_scores},
+            chunk_masks=chunk_masks,
+            router_config=config.router_config,
+            response_mask=response_mask,
+            available_conditions=tuple(teacher_scores),
+            format_valid=format_valid.to(target_device),
+        )
+        condition_weights = _apply_verifier_token_gate(
+            condition_weights=condition_weights,
+            chunk_masks=chunk_masks,
+            verifier_learning_value_gate=verifier_gate,
+            response_mask=response_mask,
+        )
+        if loss_logits is None:
+            loss = torch.zeros((), dtype=torch.float32, device=target_device)
+            metrics = {}
+        else:
+            loss, metrics = compute_fc_opd_loss(
+                loss_logits,
+                teacher_scores,
+                chunk_masks,
+                condition_weights,
+                response_mask,
+                config.loss_config,
+            )
     grouped = _grouped_loss_tensors(
         capability_scores=capability_scores,
         response_mask=response_mask,
         condition_weights=condition_weights,
         schema=config.grouped_loss_schema,
     )
+    if config.skip_routing:
+        student_scores = {}
+    else:
+        student_scores = _student_logprob_blocks(student.condition_log_probs, len(sample.rollout_token_ids))
     return OnlineFCOPDSampleOutput(
         sample_uid=sample.sample_uid,
         response_token_ids=response_ids_device,
         teacher_scores=teacher_scores,
-        student_scores=_student_logprob_blocks(student.condition_log_probs, len(sample.rollout_token_ids)),
+        student_scores=student_scores,
         capability_scores=capability_scores,
         verifier=verifier_result,
         verifier_learning_value_gate=verifier_gate,

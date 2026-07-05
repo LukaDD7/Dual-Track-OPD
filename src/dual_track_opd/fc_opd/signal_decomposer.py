@@ -16,6 +16,7 @@ class TeacherTopK:
     log_probs: torch.Tensor
     tail_log_prob: torch.Tensor | None = None
     entropy: torch.Tensor | None = None
+    sampled_log_probs: torch.Tensor | None = None  # [B,T] exact log P_T(y_t|cond) per response token
 
     def validate(self) -> None:
         if self.token_ids.ndim != 3:
@@ -38,6 +39,11 @@ class TeacherTopK:
                 raise ValueError("entropy must have shape [batch, seq]")
             if not torch.isfinite(self.entropy).all():
                 raise ValueError("entropy contains NaN or Inf")
+        if self.sampled_log_probs is not None:
+            if self.sampled_log_probs.shape != self.token_ids.shape[:2]:
+                raise ValueError("sampled_log_probs must have shape [batch, seq]")
+            if not torch.isfinite(self.sampled_log_probs).all():
+                raise ValueError("sampled_log_probs contains NaN or Inf")
 
 
 def _coalesced_distribution(

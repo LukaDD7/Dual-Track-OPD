@@ -143,6 +143,7 @@ class TeacherScoreResponse:
     topk_log_probs: tuple[tuple[float, ...], ...]
     tail_log_prob: tuple[float, ...] | None
     teacher_entropy: tuple[float, ...]
+    sampled_token_log_probs: tuple[float, ...]  # exact log P_T(y_t | cond) per response token
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -153,6 +154,7 @@ class TeacherScoreResponse:
             "topk_log_probs": [list(row) for row in self.topk_log_probs],
             "tail_log_prob": None if self.tail_log_prob is None else list(self.tail_log_prob),
             "teacher_entropy": list(self.teacher_entropy),
+            "sampled_token_log_probs": list(self.sampled_token_log_probs),
         }
 
     @classmethod
@@ -173,6 +175,7 @@ class TeacherScoreResponse:
                 else tuple(float(item) for item in value["tail_log_prob"])
             ),
             teacher_entropy=tuple(float(item) for item in value["teacher_entropy"]),
+            sampled_token_log_probs=tuple(float(item) for item in value["sampled_token_log_probs"]),
         )
 
 
@@ -212,6 +215,8 @@ def validate_score_response(response: TeacherScoreResponse, metadata: TeacherMet
         raise ValueError("teacher response positions do not align with token_ids")
     if len(response.teacher_entropy) != length:
         raise ValueError("teacher_entropy does not align with token_ids")
+    if len(response.sampled_token_log_probs) != length:
+        raise ValueError("sampled_token_log_probs does not align with token_ids")
     if response.tail_log_prob is not None and len(response.tail_log_prob) != length:
         raise ValueError("tail_log_prob does not align with token_ids")
 
@@ -238,6 +243,8 @@ def validate_score_response(response: TeacherScoreResponse, metadata: TeacherMet
             raise ValueError("teacher top-k and tail probability mass must sum to one")
     if not all(math.isfinite(value) and value >= 0 for value in response.teacher_entropy):
         raise ValueError("teacher entropy must be finite and non-negative")
+    if not all(math.isfinite(value) and value <= 1e-6 for value in response.sampled_token_log_probs):
+        raise ValueError("sampled_token_log_probs must be finite and non-positive (log-probs)")
     if response.tail_log_prob is not None and not all(
         math.isfinite(value) and value <= 1e-6 for value in response.tail_log_prob
     ):
