@@ -1,5 +1,11 @@
 # VA-OPD Metrics Pipeline Gap
 
+> 2026-07-05 Codex note: this report correctly identifies that actor-side VA
+> diagnostics were not surfaced, but it was written against the older dp_actor
+> patch shape. In faithful VA-OPD, rollout weights sum to 1 per prompt sibling
+> group, so `rollout_weight_sum` should be approximately the number of prompts
+> in the actor mini-batch, not the rollout batch size.
+
 ## Problem
 
 `compute_va_opd_loss()` in `va_opd_loss.py` computes a rich `metrics` dict, but it is
@@ -107,8 +113,8 @@ After fix, training logs should show these additional metrics each step:
 
 ```
 actor/fc_opd_va_opd/loss: 11.56
-actor/fc_opd_va_opd/token_mean_loss: ~-0.5 to -2.0
-actor/fc_opd_va_opd/rollout_weight_sum: ~8.0 (should ≈ batch_size)
+actor/fc_opd_va_opd/token_mean_loss: non-negative scalar KL diagnostic
+actor/fc_opd_va_opd/rollout_weight_sum: ≈ number of prompts in the mini-batch
 actor/fc_opd_va/mean: ~0.01 to 0.5
 actor/fc_opd_va/sparsity: ~0.3 to 0.9
 ```

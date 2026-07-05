@@ -1,12 +1,17 @@
 # VA-OPD Pure Distillation Experiment — 2026-07-03
 
+> Historical note: this run predates the 2026-07-05 VA-OPD correctness fixes
+> for teacher batching, degraded-image protocol, prompt equivalence, and the
+> actor-side `va_opd` patch. Treat the results below as a pre-fix postmortem,
+> not as evidence about a faithful VA-OPD reproduction.
+
 ## Setup
 
 - **Algorithm**: VA-OPD (arXiv 2605.21924 §3.2-3.3) — pure reverse KL distillation, no GRPO
 - **Student**: Qwen2.5-VL-4B-Instruct
 - **Teacher**: Qwen2.5-VL-32B-Instruct
 - **Dataset**: Geometry3K (multiple-choice visual geometry)
-- **Conditions**: FULL (raw image) + DEGRADED (blurred image)
+- **Conditions**: FULL (raw image) + DEGRADED (10% bilinear downsample, nearest upsample)
 - **GPU**: 4× H200, 200 steps
 - **Loss**: `L = Σ_k w^(k) · L_group^(k)` (formula 7), no external `loss_coef`
 
@@ -17,7 +22,7 @@ Student rollout → Teacher forced-forward (full + degraded, exact log P_T)
                 → VA = log P_T(full) - log P_T(degraded), rectified ≥ 0
                 → HighVA/LowVA split (top 20%)
                 → L_group = 0.5·mean(KL_rev, HighVA) + 0.5·mean(KL_rev, LowVA)
-                → w^(k) = K·softmax(z_score(ā^(k)) / τ)
+                → w^(k) = softmax(z_score(ā^(k)) / τ)
                 → Loss = Σ w^(k) · L_group^(k)
                 → backward → optimizer.step()
 ```
@@ -28,9 +33,9 @@ Student rollout → Teacher forced-forward (full + degraded, exact log P_T)
 |-------|--------|
 | VA compute | Full-vocab `log_softmax` gather at sampled token position — **no top-32 tail approximation** |
 | KL | Reverse KL: `KL(P_S \|\| P_T)` (mode-seeking, standard for distillation) |
-| Student prompt | `<image>\n{question}` — clean, no XML, no choices |
-| Teacher prompt | `Question:\n{question}` + image — clean, no format bias |
-| Rollout weights | z-score normalized, K·softmax with τ=1.0, sums to K |
+| Student prompt | `<image>\n{canonical_question}` — choices allowed, no XML |
+| Teacher prompt | same canonical question + image — no format bias |
+| Rollout weights | z-score normalized softmax with τ=1.0, sums to 1 per prompt sibling group |
 | Grouped KL | λ=0.5, HighVA=top 20%, LowVA=bottom 80% |
 | Grad check | All `requires_grad=True` verified: `per_token_kl.grad_fn=<MulBackward0>` → `L_group.grad_fn=<AddBackward0>` → `numerator.grad_fn=<AddBackward0>` |
 
@@ -88,7 +93,7 @@ All VA-OPD implementation files changed from `8f79753`:
 - `teacher_protocol.py` — `sampled_token_log_probs` field
 - `signal_decomposer.py` — `TeacherTopK.sampled_log_probs` field
 - `teacher_client.py` — HTTP → TeacherTopK conversion
-- `teacher_prompts.py` — cleaned (no XML, no choices)
+- `teacher_prompts.py` — cleaned (no XML; same canonical question as student)
 - `verl_dataset.py` — clean student prompts
 - `verl_integration.py` — `teacher_sampled_log_probs` tensor
 - `online_batch.py` — `skip_routing` fast path for VA-OPD

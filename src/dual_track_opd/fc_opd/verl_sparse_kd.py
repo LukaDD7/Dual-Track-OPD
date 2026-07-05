@@ -8,6 +8,7 @@ owns the sparse-KD math and validation policy.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 import torch
 import torch.nn.functional as F
@@ -17,6 +18,7 @@ import torch.nn.functional as F
 class VerlSparseKDOutput:
     per_token_loss: torch.Tensor
     active_weight: torch.Tensor
+    metrics: dict[str, Any] | None = None
 
 
 def compute_verl_sparse_topk_kd(

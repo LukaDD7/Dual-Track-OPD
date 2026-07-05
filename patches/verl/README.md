@@ -26,11 +26,15 @@ Patches:
 
 - `fc_opd_fsdp_actor_aux_kd.patch`
   - Preserves FC-OPD tensor fields through `DataParallelPPOActor.update_policy`.
-  - Computes sparse top-k forward KL/JSD-ready auxiliary loss from live actor
-    logits in `_forward_micro_batch`.
-  - Adds `actor/fc_opd_loss`, `actor/fc_opd_coef`, and active-weight metrics.
-  - Uses `dual_track_opd.fc_opd.verl_sparse_kd.compute_verl_sparse_topk_kd`
-    for the actual tensor math.
+  - Computes the actor-side auxiliary loss from live actor logits in
+    `_forward_micro_batch`.
+  - Supports the faithful VA-OPD path (`loss_mode=va_opd`): full/degraded
+    teacher scores, exact sampled-token VA, rollout softmax weights that sum
+    to 1 per prompt, and grouped reverse KL.
+  - Adds `actor/fc_opd_loss`, `actor/fc_opd_coef`, denominator metrics, and
+    VA diagnostics such as `actor/fc_opd_va/mean`.
+  - Delegates tensor math to `dual_track_opd.fc_opd.verl_actor_loss` so the
+    third-party patch stays thin.
 
 Expected tensor fields attached by the trainer hook:
 
@@ -38,8 +42,12 @@ Expected tensor fields attached by the trainer hook:
 fc_teacher_topk_indices    [B, C, T, K] int64
 fc_teacher_topk_log_probs  [B, C, T, K] float32
 fc_teacher_tail_log_prob   [B, C, T]    float32, optional
+fc_teacher_sampled_log_probs [B, C, T]  float32, required for VA-OPD
 fc_condition_weights       [B, C, T]    float32
-fc_condition_ids           [C]          int64
+fc_rollout_weights         [B]          float32, required for VA-OPD actor path
+fc_condition_ids           [B, C]       int64, non-tensor batch
+fc_opd_loss_mode           [B]          object/string, non-tensor batch
+fc_prompt_ids              [B]          object/string, non-tensor batch
 ```
 
 Apply from inside the checked-out `third_party/verl` tree, or from repo root

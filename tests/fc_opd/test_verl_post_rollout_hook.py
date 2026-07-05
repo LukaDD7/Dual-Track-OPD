@@ -41,6 +41,7 @@ def _teacher_topk(token_ids, probability):
         token_ids=topk_ids,
         log_probs=log_probs.reshape(1, 1, 2).expand(1, len(token_ids), 2).clone(),
         tail_log_prob=torch.full((1, len(token_ids)), math.log(1e-6)),
+        sampled_log_probs=torch.full((1, len(token_ids)), math.log(probability), dtype=torch.float32),
     )
 
 
@@ -113,6 +114,7 @@ def test_post_rollout_hook_attaches_verl_tensors_and_masks_padding():
     # fc_condition_ids has shape [C] (per-condition), stored in non_tensor_batch
     # because TensorDict requires all tensors in batch to share [B] leading dim.
     assert batch.non_tensor_batch["fc_condition_ids"].tolist() == [[0, 1, 2, 3, 4, 5]]
+    assert batch.non_tensor_batch["fc_prompt_ids"].tolist() == ["sample-1"]
     assert batch.batch["fc_condition_weights"][:, :, -len(pad) :].sum().item() == 0.0
     assert metrics["fc_opd/hook_num_samples"] == 1.0
     assert metrics["fc_opd/hook_active_weight"] > 0.0
@@ -141,3 +143,44 @@ def test_post_rollout_hook_requires_student_scorer():
             config={"algorithm": {"fc_opd": {"teacher_scorer": RecordingTeacher()}}},
             global_steps=1,
         )
+
+
+def test_post_rollout_hook_va_path_skips_student_scorer_and_records_prompt_ids():
+    tokenizer = ByteTokenizer()
+    valid_ids = tuple(tokenizer.encode("Reasoning.\nAnswer: B"))
+    responses = torch.tensor([valid_ids], dtype=torch.long)
+    response_mask = torch.ones_like(responses, dtype=torch.bool)
+    teacher = RecordingTeacher()
+    batch = SimpleNamespace(
+        batch={"responses": responses, "response_mask": response_mask},
+        non_tensor_batch={
+            "uid": ["prompt-1"],
+            "question": ["Find the angle.\n\nChoices: A. 30 B. 40"],
+            "condition_inputs": [_condition_inputs().to_dict()],
+        },
+    )
+
+    updated, metrics = fc_opd_post_rollout_hook(
+        batch=batch,
+        tokenizer=tokenizer,
+        processor=None,
+        config={
+            "algorithm": {
+                "fc_opd": {
+                    "teacher_scorer": teacher,
+                    "conditions": ["full", "degraded"],
+                    "loss_mode": "va_opd",
+                }
+            }
+        },
+        global_steps=7,
+    )
+
+    assert updated is batch
+    assert teacher.calls == [valid_ids]
+    assert batch.batch["fc_teacher_topk_indices"].shape == (1, 2, len(valid_ids), 2)
+    assert batch.batch["fc_teacher_sampled_log_probs"].shape == (1, 2, len(valid_ids))
+    assert batch.non_tensor_batch["fc_condition_ids"].tolist() == [[0, 1]]
+    assert batch.non_tensor_batch["fc_opd_loss_mode"].tolist() == ["va_opd"]
+    assert batch.non_tensor_batch["fc_prompt_ids"].tolist() == ["prompt-1"]
+    assert metrics["fc_opd/hook_num_samples"] == 1.0

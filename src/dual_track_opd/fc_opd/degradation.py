@@ -40,7 +40,13 @@ def degraded_transform(mode: str, *, blur_sigma: float = 2.0) -> dict[str, Any]:
             "degraded_mode": mode,
         }
     if mode == "lowres_10pct_nearest":
-        return {"type": "lowres_nearest", "scale": 0.1, "degraded_mode": mode}
+        return {
+            "type": "lowres_bilinear_nearest",
+            "scale": 0.1,
+            "downsample": "bilinear",
+            "upsample": "nearest",
+            "degraded_mode": mode,
+        }
     if mode.startswith("blur_sigma_"):
         sigma = float(mode.rsplit("_", 1)[1])
         return {"type": "gaussian_blur", "sigma": sigma, "degraded_mode": mode}
@@ -51,6 +57,21 @@ def degraded_transform(mode: str, *, blur_sigma: float = 2.0) -> dict[str, Any]:
     if mode == "blank_control":
         return {"type": "blank_control", "degraded_mode": mode}
     raise ValueError(f"degraded_mode must be one of {DEGRADED_MODES}")
+
+
+def precomputed_degraded_transform(mode: str, *, blur_sigma: float = 2.0) -> dict[str, Any]:
+    """Metadata for a degraded image already materialized on disk.
+
+    The nested ``source_transform`` records the operation used to create the
+    file; teacher/scorer code must treat this wrapper as a no-op to avoid
+    applying the degradation twice.
+    """
+
+    return {
+        "type": "precomputed_degraded",
+        "degraded_mode": mode,
+        "source_transform": degraded_transform(mode, blur_sigma=blur_sigma),
+    }
 
 
 def materialize_degraded_image(
@@ -89,7 +110,10 @@ def materialize_degraded_image(
             result = low.resize((width, height), Image.Resampling.NEAREST)
             result.save(target)
         elif mode == "lowres_10pct_nearest":
-            low = original.resize((max(1, width // 10), max(1, height // 10)), Image.Resampling.NEAREST)
+            low = original.resize(
+                (max(1, int(round(width * 0.1))), max(1, int(round(height * 0.1)))),
+                Image.Resampling.BILINEAR,
+            )
             low.resize((width, height), Image.Resampling.NEAREST).save(target)
         elif mode.startswith("blur_sigma_") or mode == "gaussian_blur_s2":
             sigma = float(degraded_transform(mode, blur_sigma=blur_sigma)["sigma"])

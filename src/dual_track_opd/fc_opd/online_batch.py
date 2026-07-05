@@ -151,7 +151,9 @@ def compute_online_fc_opd_batch(
     config = config or OnlineFCOPDConfig()
     for sample in samples:
         _reject_stale_offline_fields(sample, config)
-    if pre_scored_students is not None:
+    if config.skip_routing:
+        all_student_scores = [None] * len(samples)
+    elif pre_scored_students is not None:
         all_student_scores = list(pre_scored_students)
     else:
         # Pre-batch student scoring — split into sub-batches of 8 to avoid OOM.

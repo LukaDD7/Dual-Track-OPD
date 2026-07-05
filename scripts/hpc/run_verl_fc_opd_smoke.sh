@@ -1,13 +1,12 @@
 #!/usr/bin/env bash
-# FC-OPD verl smoke — teacher + PPO, parameterized GPU count.
+# VA-OPD verl smoke — teacher + PPO, parameterized GPU count.
 #
 # Usage:
-#   bash scripts/hpc/run_verl_fc_opd_smoke.sh [--gpus N] [--top-k K] [--steps S] [--loss-mode forward|reverse] [--background] [--dry-run]
+#   bash scripts/hpc/run_verl_fc_opd_smoke.sh [--gpus N] [--top-k K] [--steps S] [--background] [--dry-run]
 #
 #   --gpus N       GPUs to use (default: 8). GPU 0 → teacher; GPU 1..N-1 → verl.
 #   --top-k K      Teacher/student top-K (default: 32).
 #   --steps S      PPO steps to run (default: 1).
-#   --loss-mode    forward (default) or reverse KL.
 #   --background   Detach via nohup — safe to close terminal/code-server.
 #   --dry-run      Print the command without running.
 #
@@ -16,7 +15,7 @@
 # Examples:
 #   bash scripts/hpc/run_verl_fc_opd_smoke.sh --gpus 4 --steps 2
 #   bash scripts/hpc/run_verl_fc_opd_smoke.sh --gpus 4 --steps 200 --background
-#   bash scripts/hpc/run_verl_fc_opd_smoke.sh --gpus 8 --top-k 100 --loss-mode reverse
+#   bash scripts/hpc/run_verl_fc_opd_smoke.sh --gpus 8 --top-k 100
 
 set -euo pipefail
 
@@ -28,13 +27,12 @@ export PYTHONPATH="${REPO_ROOT}:${PYTHONPATH:-}"
 GPU_COUNT=8
 TOP_K=32
 NUM_STEPS=1
-LOSS_MODE="reverse"
+LOSS_MODE="va_opd"
 DRY_RUN=false
 RUN_BACKGROUND=false
 KEEP_TEACHER=false
 TEACHER_PORT=18080
 ROLLOUT_N=8
-PPO_MINI_BATCH_SIZE=2  # must be <= train_batch_size; matches TRAIN_GPUS for smoke
 LR=2e-6
 GPU_MEM_UTIL=0.7
 
@@ -55,7 +53,6 @@ while [[ $# -gt 0 ]]; do
         --gpus)       GPU_COUNT="$2"; shift 2 ;;
         --top-k)      TOP_K="$2";      shift 2 ;;
         --steps)      NUM_STEPS="$2";  shift 2 ;;
-        --loss-mode)  LOSS_MODE="$2";  shift 2 ;;
         --dry-run)    DRY_RUN=true;    shift ;;
         --background) RUN_BACKGROUND=true; shift ;;
         --keep-teacher) KEEP_TEACHER=true; shift ;;
@@ -79,22 +76,22 @@ if ${RUN_BACKGROUND}; then
     exit 0
 fi
 
-if (( GPU_COUNT < 4 )); then
-    echo "ERROR: need at least 4 GPUs (1=teacher, 2=verl train, 1=StudentScorer)"
+if (( GPU_COUNT < 2 )); then
+    echo "ERROR: need at least 2 GPUs (1=teacher, >=1=verl train)"
     exit 1
 fi
 
 VERL_GPUS=$(( GPU_COUNT - 1 ))
-# Reserve 1 GPU from the verl pool for the StudentScorer Ray actor.
-# Verl PPO training uses (VERL_GPUS - 1) GPUs; the last GPU hosts StudentScorer.
-TRAIN_GPUS=$(( VERL_GPUS - 1 ))
+TRAIN_GPUS=${VERL_GPUS}
+TRAIN_BATCH_SIZE=${TRAIN_GPUS}
+PPO_MINI_BATCH_SIZE=$(( TRAIN_BATCH_SIZE * ROLLOUT_N ))
 TEACHER_GPU=0
 VERL_GPU_LIST=$(seq -s, 1 $(( GPU_COUNT - 1 )))
 
 echo "══════════════════════════════════════════════════════════════"
-echo "  FC-OPD Smoke — $(date)"
+echo "  VA-OPD Smoke — $(date)"
 echo "══════════════════════════════════════════════════════════════"
-echo "  GPU count:      ${GPU_COUNT} (teacher=0, train=1..$((TRAIN_GPUS)), scorer=$((GPU_COUNT-1)))"
+echo "  GPU count:      ${GPU_COUNT} (teacher=0, train=${VERL_GPU_LIST})"
 echo "  Top-K:          ${TOP_K}"
 echo "  Steps:          ${NUM_STEPS}"
 echo "  Loss mode:      ${LOSS_MODE}"
@@ -107,7 +104,7 @@ echo "  Teacher log:    ${TEACHER_LOG}"
 echo ""
 
 # ── verify prerequisites ────────────────────────────────────────────────────
-if ! grep -q "compute_verl_sparse_topk_kd" third_party/verl/verl/workers/actor/dp_actor.py; then
+if ! grep -q "compute_verl_fc_opd_actor_loss" third_party/verl/verl/workers/actor/dp_actor.py; then
     echo "FATAL: actor patch not applied to dp_actor.py"
     exit 1
 fi
@@ -149,8 +146,8 @@ if ${DRY_RUN}; then
     echo "1) Teacher on GPU ${TEACHER_GPU}, port ${TEACHER_PORT}"
     echo "2) Ray on GPUs ${VERL_GPU_LIST} (${VERL_GPUS} GPUs)"
     echo "3) verl PPO with --config-path=${VERL_CONFIG_DIR} --config-name=ppo_trainer"
-    echo "   + FC-OPD overrides: top_k=${TOP_K}, loss_mode=${LOSS_MODE}, coef=0.1"
-    echo "   + Conditions: full,degraded,free,task_visible,task_infer,task_solve"
+    echo "   + VA-OPD overrides: top_k=${TOP_K}, loss_mode=${LOSS_MODE}, coef=1.0"
+    echo "   + Conditions: full,degraded"
     exit 0
 fi
 
@@ -221,7 +218,7 @@ ${CONDA_ENV}/bin/python -m verl.trainer.main_ppo \
     --config-name=ppo_trainer \
     "data.train_files=${PARQUET}" \
     "data.val_files=${PARQUET}" \
-    "data.train_batch_size=${TRAIN_GPUS}" \
+    "data.train_batch_size=${TRAIN_BATCH_SIZE}" \
     "data.max_prompt_length=1024" \
     "data.max_response_length=512" \
     "data.filter_overlong_prompts=false" \
@@ -263,14 +260,10 @@ ${CONDA_ENV}/bin/python -m verl.trainer.main_ppo \
     "algorithm.adv_estimator=grpo" \
     "algorithm.use_kl_in_reward=false" \
     "+algorithm.fc_opd.post_rollout_hook=dual_track_opd.fc_opd.verl_post_rollout_hook.fc_opd_post_rollout_hook" \
-    "+algorithm.fc_opd.student_scorer_fqn=dual_track_opd.fc_opd.student_scorer.StudentScorer" \
-    "+algorithm.fc_opd.student_scorer_kwargs.model_path=${MODEL_PATH}" \
-    "+algorithm.fc_opd.student_scorer_kwargs.device=cuda" \
-    "+algorithm.fc_opd.student_scorer_kwargs.dtype=bfloat16" \
-    "+algorithm.fc_opd.student_scorer_kwargs.top_k=${TOP_K}" \
+    "+algorithm.fc_opd.compute_hook_loss=false" \
     "+algorithm.fc_opd.teacher_url=http://127.0.0.1:${TEACHER_PORT}" \
-    "+algorithm.fc_opd.conditions=[full,degraded,free,task_visible,task_infer,task_solve]" \
-    "+algorithm.fc_opd.loss_coef=0.01" \
+    "+algorithm.fc_opd.conditions=[full,degraded]" \
+    "+algorithm.fc_opd.loss_coef=1.0" \
     "+algorithm.fc_opd.loss_mode=${LOSS_MODE}" \
     "+algorithm.fc_opd.renormalize_topk=true" \
     "+algorithm.fc_opd.include_tail=true" \

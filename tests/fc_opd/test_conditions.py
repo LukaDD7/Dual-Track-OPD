@@ -47,8 +47,21 @@ def test_verified_facts_require_source():
         build_condition_inputs(record)
 
 
-def test_only_gaussian_blur_is_accepted():
+def test_lowres_bilinear_nearest_is_accepted():
+    record = _record("full.png", "blur.png")
+    record["condition_inputs"]["degraded_image"]["transform"] = {
+        "type": "lowres_bilinear_nearest",
+        "scale": 0.1,
+        "downsample": "bilinear",
+        "upsample": "nearest",
+    }
+    inputs = build_condition_inputs(record)
+    assert inputs.degraded_image.transform["type"] == "lowres_bilinear_nearest"
+    assert inputs.degraded_image.transform["scale"] == 0.1
+
+
+def test_unknown_degraded_transform_is_rejected():
     record = _record("full.png", "blur.png")
     record["condition_inputs"]["degraded_image"]["transform"]["type"] = "crop"
-    with pytest.raises(ValueError, match="gaussian_blur"):
+    with pytest.raises(ValueError, match="unsupported degraded image transform"):
         build_condition_inputs(record)

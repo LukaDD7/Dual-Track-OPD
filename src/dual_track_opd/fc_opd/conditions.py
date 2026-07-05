@@ -115,6 +115,10 @@ class ConditionInputs:
                 raise ValueError("jpeg quality must be an integer in [1, 100]")
         elif transform_type == "blank_control":
             pass
+        elif transform_type == "precomputed_degraded":
+            source = transform.get("source_transform")
+            if not isinstance(source, Mapping):
+                raise ValueError("precomputed_degraded requires source_transform metadata")
         else:
             raise ValueError("unsupported degraded image transform; expected gaussian_blur-compatible degraded transform")
         _validate_verified_facts(self.verified_facts, self.verified_facts_source)
@@ -230,6 +234,10 @@ def build_condition_inputs(
             raise ValueError("jpeg quality must be an integer in [1, 100]")
     elif transform.get("type") == "blank_control":
         pass
+    elif transform.get("type") == "precomputed_degraded":
+        source = transform.get("source_transform")
+        if not isinstance(source, Mapping):
+            raise ValueError("precomputed_degraded requires source_transform metadata")
     else:
         raise ValueError("unsupported degraded image transform; expected gaussian_blur-compatible degraded transform")
 

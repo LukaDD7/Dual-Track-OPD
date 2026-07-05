@@ -254,112 +254,14 @@ class TransformersTeacherScorer(TeacherScorer):
         self,
         requests: list[TeacherScoreRequest],
     ) -> list[TeacherScoreResponse]:
-        """Batch-score requests sharing the same condition via processor-native batching."""
-        if len(requests) <= 1:
-            return [self._score_one(r) for r in requests]
+        """Score independently until a verified multimodal batch path exists.
 
-        for r in requests:
-            if r.tokenizer_hash != self.metadata.tokenizer_hash:
-                raise ValueError("tokenizer hash mismatch")
-            if not r.response_token_ids:
-                raise ValueError("empty response_token_ids")
-            self._check_response_text(r)
-
-        B = len(requests)
-        first = requests[0]
-
-        # ── Build B copies of the same prompt via the processor ──────────
-        rendered = render_teacher_prompt(first.condition, first.question, first.condition_inputs)
-        prompt_text = self.processor.apply_chat_template(
-            list(rendered.messages), tokenize=False, add_generation_prompt=True,
-        )
-        images = None
-        if rendered.image_paths:
-            from PIL import Image as _PIL
-
-            images = [_PIL.open(p).convert("RGB") for p in rendered.image_paths]
-            _apply_image_transform(first.condition, images, first.condition_inputs)
-        try:
-            encoded = self.processor(
-                text=[prompt_text] * B,
-                images=[images] * B if images else None,
-                padding=True,
-                return_tensors="pt",
-            )
-        finally:
-            for img in (images or []):
-                img.close()
-        encoded = {k: v.to(self.device) for k, v in encoded.items()}
-        prompt_ids = encoded["input_ids"]  # [B, Pp]  (padded prompt)
-
-        # ── Pad & concatenate responses ──────────────────────────────────
-        max_R = max(len(r.response_token_ids) for r in requests)
-        resp_lens = torch.zeros(B, dtype=torch.long, device=self.device)
-        padded = torch.zeros(B, max_R, dtype=torch.long, device=self.device)
-        for i, r in enumerate(requests):
-            rlen = len(r.response_token_ids)
-            resp_lens[i] = rlen
-            padded[i, :rlen] = torch.tensor(r.response_token_ids, dtype=torch.long, device=self.device)
-
-        input_ids = torch.cat([prompt_ids, padded], dim=1)
-        resp_mask = (torch.arange(max_R, device=self.device).unsqueeze(0) < resp_lens.unsqueeze(1))
-        resp_mask = resp_mask.to(encoded["attention_mask"].dtype)
-        attention_mask = torch.cat([encoded["attention_mask"], resp_mask], dim=1)
-
-        # ── Model inputs ────────────────────────────────────────────────
-        keep = ("input_ids", "attention_mask", "image_grid_thw", "video_grid_thw",
-                "pixel_values", "pixel_values_videos", "image_sizes",
-                "token_type_ids", "mm_token_type_ids", "position_ids", "second_per_grid_ts")
-        model_inputs = {k: encoded[k] for k in keep if k in encoded}
-        model_inputs["input_ids"] = input_ids
-        model_inputs["attention_mask"] = attention_mask
-
-        for key in ("token_type_ids", "mm_token_type_ids"):
-            if key in model_inputs:
-                ext = torch.zeros(B, max_R, dtype=model_inputs[key].dtype, device=self.device)
-                model_inputs[key] = torch.cat([model_inputs[key], ext], dim=-1)
-
-        model_inputs.pop("position_ids", None)
-        position_ids = self._position_ids(model_inputs)
-        if position_ids is not None:
-            model_inputs["position_ids"] = position_ids
-
-        import sys, time as _time
-        _t0 = _time.time()
-        outputs = self.model(**model_inputs, use_cache=False)
-        _dt = _time.time() - _t0
-        print(f"[teacher] batched B={B} forward: {_dt:.2f}s", file=sys.stderr, flush=True)
-
-        # ── Extract per-sample top-K ─────────────────────────────────────
-        results: list[TeacherScoreResponse] = []
-        for i, request in enumerate(requests):
-            rlen = int(resp_lens[i].item())
-            sample_logits = outputs.logits[i, -rlen:, :]
-            log_probs = torch.log_softmax(sample_logits.float(), dim=-1)
-            values, indices = torch.topk(log_probs, k=self.top_k, dim=-1)
-            topk_mass = values.exp().sum(dim=-1)
-            tail = (1.0 - topk_mass).clamp_min(torch.finfo(torch.float32).tiny).log()
-            probs = log_probs.exp()
-            ent = -(probs * log_probs).sum(dim=-1)
-            # Exact log P_T(y_t | condition) via direct indexing
-            _t_idx = torch.arange(rlen, device=sample_logits.device)
-            _r_ids = torch.tensor(request.response_token_ids, dtype=torch.long, device=sample_logits.device)
-            if log_probs.ndim == 3:
-                sampled_lp = log_probs[0, _t_idx, _r_ids]  # [T]
-            else:
-                sampled_lp = log_probs[_t_idx, _r_ids]      # [T]
-            sampled_lp = sampled_lp.unsqueeze(0)              # [1, T]
-            results.append(TeacherScoreResponse(
-                request_id=request.request_id,
-                condition=request.condition,
-                token_ids=request.response_token_ids,
-                topk_token_ids=tuple(tuple(int(x) for x in row) for row in indices.cpu().tolist()),
-                topk_log_probs=tuple(tuple(float(x) for x in row) for row in values.cpu().tolist()),
-                tail_log_prob=tuple(float(x) for x in tail.cpu().tolist()),
-                teacher_entropy=tuple(float(x) for x in ent.cpu().tolist()),
-                sampled_token_log_probs=tuple(float(x) for x in sampled_lp[0].cpu().tolist()),
-            ))
-        return results
+        The previous processor-native batch path replicated the first request's
+        prompt/image across the whole condition group and sliced variable-length
+        responses from padded tails. Both errors corrupt token-level VA, so the
+        faithful path favors correctness over throughput.
+        """
+        return [self._score_one(request) for request in requests]
 
     def score_batch(
         self,
@@ -397,12 +299,15 @@ def _apply_image_transform(
 
     if condition in (C.DEGRADED, C.BLUR):
         transform = getattr(condition_inputs.degraded_image, "transform", None)
-        if transform and transform.get("type") == "lowres_nearest":
+        if transform and transform.get("type") == "precomputed_degraded":
+            return
+        if transform and transform.get("type") in {"lowres_nearest", "lowres_bilinear_nearest"}:
             scale = float(transform.get("scale", 0.1))
+            downsample = Image.BILINEAR if transform.get("type") == "lowres_bilinear_nearest" else Image.NEAREST
             for i, img in enumerate(images):
                 w, h = img.size
                 new_size = (max(1, int(w * scale)), max(1, int(h * scale)))
-                images[i] = img.resize(new_size, Image.NEAREST).resize((w, h), Image.NEAREST)
+                images[i] = img.resize(new_size, downsample).resize((w, h), Image.NEAREST)
         elif transform and transform.get("type") == "gaussian_blur":
             from PIL import ImageFilter
 

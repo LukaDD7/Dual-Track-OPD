@@ -6,7 +6,7 @@ Algorithm per prompt x with K sibling rollouts:
   1. a_t = max(log P_T(y_t|full) - log P_T(y_t|degraded), 0)         [VA, §3.1]
   2. ā^(k) = (1/T) Σ_t a_t^(k)                                        [trajectory mean]
   3. ẑ^(k) = (ā^(k) - μ) / (σ + ε)  where μ,σ over {ā^(j)}_{j=1..K}  [z-score]
-  4. w^(k) = K * softmax(ẑ^(k) / τ)       (τ=1.0)                     [rollout weight]
+  4. w^(k) = softmax(ẑ^(k) / τ)           (τ=1.0, sums to 1)           [rollout weight]
   5. HighVA = top= p_v of a_t,  LowVA = rest       (p_v = 0.20)        [token groups]
   6. L_group = λ·mean(KL_High) + (1-λ)·mean(KL_Low)  (λ = 0.50)       [grouped KL]
   7. L_VA-OPD(x) = Σ_k w^(k) * L_group^(k)                            [full objective]
@@ -34,9 +34,10 @@ VA_TAU = 1.0              # §3.2: rollout softmax temperature τ
 
 @dataclass(frozen=True)
 class VAOPDLossResult:
-    loss: torch.Tensor                          # scalar: active-weight-normalized L_VA-OPD
+    loss: torch.Tensor                          # scalar: L_VA-OPD
     token_mean_loss: torch.Tensor               # scalar: token-mean KL (diagnostic)
-    per_token_kl: torch.Tensor                  # [B, T]: raw per-token forward KL
+    per_token_kl: torch.Tensor                  # [B, T]: raw per-token reverse KL
+    per_rollout_loss: torch.Tensor              # [B]: rollout-weighted grouped KL
     va_pos: torch.Tensor                        # [B, T]: rectified visual advantage
     rollout_weights: torch.Tensor               # [B]: per-rollout VA softmax weight
     metrics: dict[str, torch.Tensor]
@@ -68,12 +69,12 @@ def compute_rollout_va_weights(
     prompt_ids: Sequence[int | str] | None = None,
     tau: float = VA_TAU,
 ) -> torch.Tensor:
-    """Compute sibling-rollout VA softmax weights that sum to K (§3.2).
+    """Compute sibling-rollout VA softmax weights that sum to 1 (§3.2).
 
     Steps per prompt group with K rollouts:
       ā^(k) = (1/T) Σ_t a_t^(k)                    [mean over ALL tokens]
       ẑ^(k) = (ā^(k) - μ) / (σ + ε)                [z-score within group]
-      w^(k) = K * softmax(ẑ^(k) / τ)               [sums to K]
+      w^(k) = softmax(ẑ^(k) / τ)                   [sums to 1]
     """
     if va_pos.ndim != 2:
         raise ValueError("va_pos must have shape [batch, seq]")
@@ -149,6 +150,7 @@ def compute_va_opd_loss(
     tau_rollout: float = VA_TAU,
     lambda_high: float = VA_LAMBDA,
     min_high_tokens: int = 1,
+    rollout_weights: torch.Tensor | None = None,
     renormalize_topk: bool = True,
     include_tail: bool = True,
     eps: float = 1e-8,
@@ -187,10 +189,18 @@ def compute_va_opd_loss(
     va_raw = compute_va(teacher_full, teacher_degraded, sampled_token_ids)
     va_pos = va_raw.clamp_min(0.0)
 
-    # ── 3. Rollout weights: ā → ẑ → w = K·softmax(ẑ/τ) §3.2 ────────────
-    rollout_weights = compute_rollout_va_weights(
-        va_pos, response_mask=response_mask, prompt_ids=prompt_ids, tau=tau_rollout,
-    )  # [B]
+    if rollout_weights is None and prompt_ids is None and B > 1:
+        raise ValueError("prompt_ids are required for VA-OPD batches with multiple rollouts")
+
+    # ── 3. Rollout weights: ā → ẑ → w = softmax(ẑ/τ) §3.2 ───────────────
+    if rollout_weights is None:
+        rollout_weights = compute_rollout_va_weights(
+            va_pos, response_mask=response_mask, prompt_ids=prompt_ids, tau=tau_rollout,
+        )  # [B]
+    else:
+        rollout_weights = rollout_weights.to(device=student_logits.device, dtype=torch.float32)
+        if rollout_weights.shape != (B,):
+            raise ValueError("rollout_weights must have shape [B]")
 
     # ── 4. HighVA / LowVA grouped reverse KL §3.3 ────────────────────────
     high, low = split_high_low_va(va_pos, mask=response_mask, top_q=top_q,
@@ -199,6 +209,7 @@ def compute_va_opd_loss(
     numerator = torch.zeros((), dtype=torch.float32, device=student_logits.device)
     token_sum = torch.zeros((), dtype=torch.float32, device=student_logits.device)
     token_count = torch.zeros((), dtype=torch.float32, device=student_logits.device)
+    per_rollout_loss = torch.zeros((B,), dtype=torch.float32, device=student_logits.device)
 
     for i in range(B):
         w_r = rollout_weights[i].float()
@@ -210,7 +221,9 @@ def compute_va_opd_loss(
 
         # L_group = λ·mean(KL_High) + (1-λ)·mean(KL_Low)  (λ=0.50)
         L_group = lambda_high * high_loss + (1.0 - lambda_high) * low_loss
-        numerator = numerator + w_r * L_group
+        weighted_group_loss = w_r * L_group
+        per_rollout_loss[i] = weighted_group_loss
+        numerator = numerator + weighted_group_loss
 
         n_high = high[i].sum()
         n_low = low[i].sum()
@@ -236,6 +249,7 @@ def compute_va_opd_loss(
         loss=loss,
         token_mean_loss=token_mean,
         per_token_kl=per_token_kl,
+        per_rollout_loss=per_rollout_loss,
         va_pos=va_pos,
         rollout_weights=rollout_weights,
         metrics=metrics,

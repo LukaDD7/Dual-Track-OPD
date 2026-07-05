@@ -1,21 +1,22 @@
 #!/usr/bin/env bash
-# FC-OPD overnight multi-step training (reverse KL, up to 200 steps).
+# VA-OPD overnight multi-step training.
 #
 # Scaled-up config referencing Vision-OPD (VA-OPD) paper settings:
-#   - Rollout n=8 (VA-OPD: 8, OPD-SFT: 16).  Was 1.
+#   - Rollout n=8.
 #   - LR 2e-6 (VA-OPD: 2e-6 for 4B).
 #   - GPU memory 0.5 for vLLM (VA-OPD: 0.7; we're conservative with FSDP).
-#   - Reverse KL (mode-seeking) as default.
+#   - Grouped reverse KL with rollout-level VA reweighting.
 #   - Checkpoint every 25 steps.
 #   - Log to file + console.
 #
 # Usage:
 #   bash scripts/hpc/run_verl_fc_opd_overnight.sh [--gpus N] [--steps S] [--background] [--data /path/to/train.parquet]
 #
-#   --gpus N        GPUs to use (default: 4).  GPU 0=teacher, 1..N-2=verl, N-1=scorer.
+#   --gpus N        GPUs to use (default: 4).  GPU 0=teacher, 1..N-1=verl.
 #   --steps S       PPO steps (default: 200).
 #   --background    Detach from terminal via nohup — safe to close code-server.
 #   --data PATH     Override parquet path (default: verl_smoke/train.parquet).
+#   --keepalive     Start post-success GPU keepalive after Ray/teacher cleanup.
 #
 # Background mode:
 #   When --background is passed, the script re-launches itself under nohup and
@@ -31,10 +32,9 @@ GPU_COUNT=4
 NUM_STEPS=1313  # 5 epochs × (2101 prompts / 8 batch), align VA-OPD
 TOP_K=32
 TEACHER_PORT=18080
-SCORER_PORT=18081
 RUN_BACKGROUND=false
 PARQUET_OVERRIDE=""
-KEEPALIVE_SEC=86400
+KEEPALIVE_SEC=0
 
 # ── parse args ──────────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
@@ -78,7 +78,6 @@ CONDA_ENV="/inspire/hdd/global_user/mengweicheng-240108120092/lzy/fc-opd-storage
 REPO_ROOT_ABS="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 RUN_ID="fc_opd_overnight_$(date +%Y%m%d_%H%M%S)"
 TEACHER_LOG="${REPO_ROOT_ABS}/artifacts/fc_opd/teacher_${RUN_ID}.log"
-SCORER_LOG="${REPO_ROOT_ABS}/artifacts/fc_opd/student_scorer_${RUN_ID}.log"
 TRAIN_LOG="${REPO_ROOT_ABS}/artifacts/fc_opd/train_${RUN_ID}.log"
 VERL_CONFIG_DIR="${REPO_ROOT_ABS}/third_party/verl/verl/trainer/config"
 REWARD_FN="file://${REPO_ROOT_ABS}/src/dual_track_opd/fc_opd/smoke_reward.py"
@@ -86,25 +85,21 @@ mkdir -p "$(dirname "${TEACHER_LOG}")"
 
 # ── GPU math ────────────────────────────────────────────────────────────────
 # GPU 0: Teacher (32B, 66 GB)
-# GPU 1..N-2: verl PPO training (WorkerDict + vLLM)
-# GPU N-1: dedicated StudentScorer HTTP service (4B, ~8 GB)
-if (( GPU_COUNT < 4 )); then
-    echo "ERROR: need at least 4 GPUs (1=teacher, 2=verl train, 1=dedicated StudentScorer)"
+# GPU 1..N-1: verl PPO training (WorkerDict + vLLM)
+if (( GPU_COUNT < 2 )); then
+    echo "ERROR: need at least 2 GPUs (1=teacher, >=1=verl train)"
     exit 1
 fi
-TRAIN_GPUS=$(( GPU_COUNT - 2 ))
+TRAIN_GPUS=$(( GPU_COUNT - 1 ))
 VERL_GPUS=${TRAIN_GPUS}
 TEACHER_GPU=0
-SCORER_GPU=$(( GPU_COUNT - 1 ))
-VERL_GPU_LIST=$(seq -s, 1 $(( GPU_COUNT - 2 )))
+VERL_GPU_LIST=$(seq -s, 1 $(( GPU_COUNT - 1 )))
 SAVE_FREQ=25
 
-# Aligned with VA-OPD: batch_size=18 (VA-OPD=16, adjusted for 6 train GPUs),
-# rollout_n=4, 5 epochs.
-# Geometry3K: 2101 prompts / 18 batch ≈ 117 steps/epoch × 5 ≈ 584 steps.
+# Aligned with VA-OPD: K=8 sibling rollouts, 5 epochs.
 TRAIN_BATCH_SIZE=8
-ROLLOUT_N=4
-PPO_MINI_BATCH_SIZE=${TRAIN_BATCH_SIZE}
+ROLLOUT_N=8
+PPO_MINI_BATCH_SIZE=$(( TRAIN_BATCH_SIZE * ROLLOUT_N ))
 MICRO_BATCH_PER_GPU=1
 
 CHECKPOINT_DIR="${REPO_ROOT_ABS}/checkpoints/verl_fc_opd_overnight/${RUN_ID}"
@@ -114,12 +109,12 @@ echo "  FC-OPD Training — VA-OPD aligned"
 echo "  Run ID:       ${RUN_ID}"
 echo "  Steps:        ${NUM_STEPS} (5 epochs × 2101/${TRAIN_BATCH_SIZE} batch)"
 echo "  Save freq:    ${SAVE_FREQ}"
-echo "  Loss mode:    reverse (mode-seeking KL)"
+echo "  Loss mode:    va_opd (VA grouped reverse KL)"
 echo "  Top-K:        ${TOP_K}"
-echo "  Rollout n:    ${ROLLOUT_N} (VA-OPD: 4)"
+echo "  Rollout n:    ${ROLLOUT_N}"
 echo "  Train batch:  ${TRAIN_BATCH_SIZE} (VA-OPD: 16)"
 echo "  LR:           2e-6 (VA-OPD: 2e-6)"
-echo "  GPU layout:   teacher=${TEACHER_GPU}, train=${VERL_GPU_LIST}, scorer=${SCORER_GPU}"
+echo "  GPU layout:   teacher=${TEACHER_GPU}, train=${VERL_GPU_LIST}"
 echo "  Data:         ${PARQUET}"
 echo "  Train log:    ${TRAIN_LOG}"
 echo "  Checkpoint:   ${CHECKPOINT_DIR}"
@@ -127,7 +122,7 @@ echo "════════════════════════�
 echo ""
 
 # ── verify ──────────────────────────────────────────────────────────────────
-if ! grep -q "compute_verl_sparse_topk_kd" third_party/verl/verl/workers/actor/dp_actor.py; then
+if ! grep -q "compute_verl_fc_opd_actor_loss" third_party/verl/verl/workers/actor/dp_actor.py; then
     echo "FATAL: actor patch not applied"; exit 1
 fi
 if [ -z "${CC:-}" ] || ! command -v "${CC}" >/dev/null 2>&1; then
@@ -141,10 +136,6 @@ ray stop -f 2>/dev/null || true
 EXISTING_TEACHER=$(lsof -ti:${TEACHER_PORT} 2>/dev/null || true)
 if [ -n "${EXISTING_TEACHER}" ]; then
     kill -9 ${EXISTING_TEACHER} 2>/dev/null || true; sleep 2
-fi
-EXISTING_SCORER=$(lsof -ti:${SCORER_PORT} 2>/dev/null || true)
-if [ -n "${EXISTING_SCORER}" ]; then
-    kill -9 ${EXISTING_SCORER} 2>/dev/null || true; sleep 2
 fi
 rm -rf /dev/shm/*vllm* /dev/shm/*psm_* 2>/dev/null || true
 sleep 2
@@ -164,28 +155,13 @@ for i in $(seq 1 300); do
     echo -n "."; sleep 1
 done
 
-# ── 2) Dedicated StudentScorer ──────────────────────────────────────────────
-echo "=== StudentScorer (GPU ${SCORER_GPU}) ==="
-CUDA_VISIBLE_DEVICES=${SCORER_GPU} \
-    ${CONDA_ENV}/bin/python -m dual_track_opd.fc_opd.student_scorer_service \
-    --model "${MODEL_PATH}" \
-    --port "${SCORER_PORT}" --top-k "${TOP_K}" --dtype bfloat16 --device "cuda:0" \
-    > "${SCORER_LOG}" 2>&1 &
-SCORER_PID=$!
-echo -n "  Waiting ."
-for i in $(seq 1 300); do
-    if curl -s "http://127.0.0.1:${SCORER_PORT}/health" >/dev/null 2>&1; then echo " OK"; break; fi
-    if ! kill -0 ${SCORER_PID} 2>/dev/null; then echo " DIED"; tail -20 "${SCORER_LOG}"; exit 1; fi
-    echo -n "."; sleep 1
-done
-
-# ── 3) Ray ──────────────────────────────────────────────────────────────────
+# ── 2) Ray ──────────────────────────────────────────────────────────────────
 echo "=== Ray (${VERL_GPUS} GPUs) ==="
 CUDA_VISIBLE_DEVICES=${VERL_GPU_LIST} ray start --head --num-gpus=${VERL_GPUS} --disable-usage-stats
 sleep 3
 
-# ── 4) PPO ──────────────────────────────────────────────────────────────────
-echo "=== Training (${NUM_STEPS} steps, reverse KL, rollout n=${ROLLOUT_N}) ==="
+# ── 3) PPO ──────────────────────────────────────────────────────────────────
+echo "=== Training (${NUM_STEPS} steps, VA-OPD, rollout n=${ROLLOUT_N}) ==="
 set +e
 CUDA_VISIBLE_DEVICES=${VERL_GPU_LIST} \
 ${CONDA_ENV}/bin/python -m verl.trainer.main_ppo \
@@ -235,14 +211,11 @@ ${CONDA_ENV}/bin/python -m verl.trainer.main_ppo \
     "algorithm.adv_estimator=grpo" \
     "algorithm.use_kl_in_reward=false" \
     "+algorithm.fc_opd.post_rollout_hook=dual_track_opd.fc_opd.verl_post_rollout_hook.fc_opd_post_rollout_hook" \
-    "+algorithm.fc_opd.student_scorer_fqn=dual_track_opd.fc_opd.student_scorer_client.StudentScorerClient" \
-    "+algorithm.fc_opd.student_scorer_kwargs.base_url=http://127.0.0.1:${SCORER_PORT}" \
-    "+algorithm.fc_opd.student_scorer_kwargs.timeout_seconds=300" \
     "+algorithm.fc_opd.compute_hook_loss=false" \
     "+algorithm.fc_opd.teacher_url=http://127.0.0.1:${TEACHER_PORT}" \
-    "+algorithm.fc_opd.conditions=[full,degraded,free,task_visible,task_infer,task_solve]" \
-    "+algorithm.fc_opd.loss_coef=0.01" \
-    "+algorithm.fc_opd.loss_mode=reverse" \
+    "+algorithm.fc_opd.conditions=[full,degraded]" \
+    "+algorithm.fc_opd.loss_coef=1.0" \
+    "+algorithm.fc_opd.loss_mode=va_opd" \
     "+algorithm.fc_opd.renormalize_topk=true" \
     "+algorithm.fc_opd.include_tail=true" \
     "trainer.total_training_steps=${NUM_STEPS}" \
@@ -264,7 +237,6 @@ echo ""
 echo "=== Cleanup ==="
 ray stop -f 2>/dev/null || true
 kill ${TEACHER_PID} 2>/dev/null || true
-kill ${SCORER_PID} 2>/dev/null || true
 sleep 2
 
 echo ""
@@ -277,21 +249,23 @@ echo "  Exit:   ${VERL_EXIT}"
 echo "══════════════════════════════════════════════════════════════"
 
 # ── keepalive ────────────────────────────────────────────────────────────────
-# Default 24h GPU-busy keepalive on GPUs 2,3 to prevent instance reclamation.
-_KEEPALIVE_SEC=${KEEPALIVE_SEC:-86400}
+# Optional GPU-busy keepalive, only after successful training and cleanup.
+_KEEPALIVE_SEC=${KEEPALIVE_SEC:-0}
 KEEPALIVE_GPUS="${KEEPALIVE_GPUS:-2,3}"
 _KEEPALIVE_SCRIPT="/inspire/hdd/global_user/mengweicheng-240108120092/lzy/scripts/busy_keepalive.py"
 echo ""
-echo "=== Keepalive (${_KEEPALIVE_SEC}s, GPUs ${KEEPALIVE_GPUS}) — kill this process when done ==="
-if [ -f "${_KEEPALIVE_SCRIPT}" ]; then
-    CUDA_VISIBLE_DEVICES="${KEEPALIVE_GPUS}" \
-        timeout "${_KEEPALIVE_SEC}" \
-        ${CONDA_ENV}/bin/python -u "${_KEEPALIVE_SCRIPT}"
-else
-    echo "[keepalive] busy_keepalive.py not found, falling back to sleep"
-    for ((_i = 0; _i < _KEEPALIVE_SEC; _i += 300)); do
-        sleep 300
-        echo "[keepalive] $(date '+%Y-%m-%d %H:%M:%S') — PID $$ alive (${_i}s elapsed)"
-    done
+if (( VERL_EXIT == 0 && _KEEPALIVE_SEC > 0 )); then
+    echo "=== Keepalive (${_KEEPALIVE_SEC}s, GPUs ${KEEPALIVE_GPUS}) — kill this process when done ==="
+    if [ -f "${_KEEPALIVE_SCRIPT}" ]; then
+        CUDA_VISIBLE_DEVICES="${KEEPALIVE_GPUS}" \
+            timeout "${_KEEPALIVE_SEC}" \
+            ${CONDA_ENV}/bin/python -u "${_KEEPALIVE_SCRIPT}"
+    else
+        echo "[keepalive] busy_keepalive.py not found, falling back to sleep"
+        for ((_i = 0; _i < _KEEPALIVE_SEC; _i += 300)); do
+            sleep 300
+            echo "[keepalive] $(date '+%Y-%m-%d %H:%M:%S') — PID $$ alive (${_i}s elapsed)"
+        done
+    fi
 fi
 exit ${VERL_EXIT}

@@ -8,7 +8,10 @@ import numpy as np
 import pandas as pd
 from pathlib import Path
 from dual_track_opd.fc_opd.geometry3k_adapter import normalize_geometry3k_record
-from dual_track_opd.fc_opd.dataset_signal_audit import materialize_gaussian_blur
+from dual_track_opd.fc_opd.degradation import (
+    materialize_degraded_image,
+    precomputed_degraded_transform,
+)
 
 SRC = '/inspire/hdd/global_user/mengweicheng-240108120092/lzy/dataset/geometry3k/data/train-00000-of-00001.parquet'
 OUT = '/inspire/hdd/global_user/mengweicheng-240108120092/lzy/fc-opd-storage/outputs/fc_opd/geometry3k_full/train.parquet'
@@ -71,17 +74,26 @@ for i in range(len(df)):
         elif 1 <= idx <= len(choices):
             answer = chr(ord('A') + idx - 1)
 
-    # Generate degraded image
-    degraded_img = str(DEG / f'{i}.lowres_10pct_nearest.png')
+    # Generate paper-faithful degraded image: 10% bilinear downsample + nearest upsample.
+    degraded_img = ''
     try:
         if img_path and Path(img_path).exists():
-            materialize_gaussian_blur(img_path, degraded_img, 2.0)
-    except Exception:
-        pass
+            degraded_img = materialize_degraded_image(
+                img_path,
+                mode='lowres_10pct_nearest',
+                degraded_dir=str(DEG),
+            )
+    except Exception as e:
+        print(f'Warning: failed to create degraded image for {i}: {e}')
+    if not degraded_img:
+        degraded_img = img_path
 
     ci = {  # plain dict, no dataclass objects
         'full_image': {'path': img_path},
-        'degraded_image': {'path': degraded_img, 'transform': {'type': 'lowres_nearest', 'scale': 0.5}},
+        'degraded_image': {
+            'path': degraded_img,
+            'transform': precomputed_degraded_transform('lowres_10pct_nearest'),
+        },
         'free_caption': 'A geometry diagram with labeled points and lines.',
         'task_evidence': 'Points, lines, and angles are labeled in the diagram.',
         'task_visible_evidence': 'The diagram shows labeled geometric elements.',
@@ -94,11 +106,13 @@ for i in range(len(df)):
     if img_bytes:
         images_field.append({'bytes': img_bytes, 'path': img_path})
 
-    # Build prompt as chat template with <image> tag (matching smoke format)
-    prompt_content = f'<image>\n{question}'
+    canonical_question = question
     if choices:
-        prompt_content += '\n\nChoices: ' + ' '.join(choices)
-    prompt_content += '\n\nRespond using exactly this XML structure:\n<visible_evidence>\nDirectly visible image-grounded facts.\n</visible_evidence>\n<diagram_inference>\nIntermediate geometric facts.\n</diagram_inference>\n<reasoning>\nReason from evidence and choices.\n</reasoning>\n<answer>\nFinal option letter.\n</answer>'
+        canonical_question += '\n\nChoices: ' + ' '.join(choices)
+
+    # Build prompt as chat template with <image> tag. VA-OPD should not inject
+    # XML/format constraints unless the teacher sees the exact same prompt.
+    prompt_content = f'<image>\n{canonical_question}'
     prompt_field = [{'role': 'user', 'content': prompt_content}]
 
     rows.append({
@@ -108,12 +122,12 @@ for i in range(len(df)):
         'ability': 'math',
         'reward_model': {'style': 'rule', 'ground_truth': answer},
         'extra_info': {
-            'question': question,
+            'question': canonical_question,
             'choices': choices,
             'answer': answer,
             'condition_inputs': ci,
         },
-        'question': question,
+        'question': canonical_question,
         'condition_inputs': ci,
         'choices': choices,
         'answer': answer,

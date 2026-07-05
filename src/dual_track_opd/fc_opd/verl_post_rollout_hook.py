@@ -22,6 +22,7 @@ from .teacher_client import (
     score_teacher_conditions_multi_sample,
 )
 from .teacher_protocol import tokenizer_fingerprint
+from .va_opd_loss import compute_rollout_va_weights
 from .verl_integration import DEFAULT_VERL_CONDITION_ORDER, online_batch_output_to_verl_tensors
 
 
@@ -103,6 +104,22 @@ def fc_opd_post_rollout_hook(
     loss_mode = str(_config_get(fc_config, "loss_mode", "forward"))
     import numpy as np
     batch.non_tensor_batch["fc_opd_loss_mode"] = np.array([loss_mode] * B, dtype=object)
+    batch.non_tensor_batch["fc_prompt_ids"] = np.array(
+        [sample.sample_uid for sample in samples],
+        dtype=object,
+    )
+    if _is_va_opd:
+        if verl_tensors.teacher_sampled_log_probs is None:
+            raise ValueError("VA-OPD requires exact teacher sampled token log-probs")
+        full_idx = conditions.index(Condition.FULL)
+        degraded_idx = conditions.index(Condition.DEGRADED)
+        sampled_log_probs = verl_tensors.teacher_sampled_log_probs.to(responses.device)
+        va_pos = (sampled_log_probs[:, full_idx] - sampled_log_probs[:, degraded_idx]).clamp_min(0.0)
+        batch.batch["fc_rollout_weights"] = compute_rollout_va_weights(
+            va_pos,
+            response_mask=response_mask,
+            prompt_ids=[sample.sample_uid for sample in samples],
+        ).to(responses.device)
 
     # ── Formal pipeline verification log (VA-OPD reproducibility) ───
     _log_pipeline_verification(
@@ -425,10 +442,10 @@ def _log_pipeline_verification(
         f"  batch      = [B={B}, T={T}]",
         f"  top_k      = {top_k}",
         f"  exact_lp   = {sampled_lp_shape}  (None=tail-fallback)",
-        f"  Student    = raw image + question  (no XML, no choices)",
-        f"  Teacher    = raw image + question  (no XML, no format bias)",
+        f"  Student    = raw image + canonical question  (choices allowed, no XML)",
+        f"  Teacher    = raw image + same canonical question  (no format bias)",
         f"  KL         = {'reverse (mode-seeking) KL(P_S || P_T)' if loss_mode == 'va_opd' else 'forward'}",
-        f"  Formula §3.2: w^(k) = K·softmax(z_score(ā^(k)) / τ), sums to K",
+        f"  Formula §3.2: w^(k) = softmax(z_score(ā^(k)) / τ), sums to 1 per prompt",
         f"  Formula §3.3: L_group = 0.5·mean(KL_rev,HighVA) + 0.5·mean(KL_rev,LowVA)",
         f"  Total (formula 7): L = Σ_k w^(k)·L_group^(k)   (pure distillation, no GRPO)",
         "=" * 72,
