@@ -31,6 +31,9 @@ Patches:
   - Supports the faithful VA-OPD path (`loss_mode=va_opd`): full/degraded
     teacher scores, exact sampled-token VA, rollout softmax weights that sum
     to 1 per prompt, and grouped reverse KL.
+  - Treats `va_opd` as pure distillation in the actor update, replacing the
+    zero-advantage PPO loss instead of multiplying by an auxiliary coefficient
+    stored outside the actor config.
   - Adds `actor/fc_opd_loss`, `actor/fc_opd_coef`, denominator metrics, and
     VA diagnostics such as `actor/fc_opd_va/mean`.
   - Delegates tensor math to `dual_track_opd.fc_opd.verl_actor_loss` so the

@@ -135,12 +135,14 @@
          if self.use_prefix_grouper and "uid" in data.non_tensor_batch.keys():
              non_tensor_select_keys.append("uid")
  
-@@ -564,6 +637,13 @@
+@@ -564,6 +637,15 @@
                      )
                      micro_batches = mini_batch.split(self.config.ppo_micro_batch_size_per_gpu)
  
 +                mini_batch_fields = {**mini_batch.batch, **mini_batch.non_tensor_batch}
 +                fc_opd_denominator = None
++                fc_opd_mode = _fc_opd_loss_mode(mini_batch_fields)
++                pure_fc_opd = fc_opd_mode in ("vgg_opd", "va_opd")
 +                if has_fc_opd_tensors(mini_batch_fields):
 +                    fc_opd_denominator = fc_opd_batch_denominator(
 +                        mini_batch_fields, mini_batch.batch["response_mask"]
@@ -149,7 +151,7 @@
                  self.actor_optimizer.zero_grad()
  
                  for micro_batch in micro_batches:
-@@ -656,6 +736,27 @@
+@@ -656,6 +738,30 @@
                          metrics["actor/kl_loss"] += kl_loss.detach().item() * loss_scale_factor
                          micro_batch_metrics["actor/kl_coef"] = self.config.kl_loss_coef
  
@@ -159,15 +161,18 @@
 +                            raise RuntimeError("FC/VA-OPD denominator was not computed for this mini-batch")
 +                        denominator = fc_opd_denominator.to(fc_opd_loss_sum.device)
 +                        fc_opd_loss = fc_opd_loss_sum / denominator
-+                        fc_opd_coef = _fc_opd_config_float(self.config, "loss_coef", 0.0)
-+                        # The actor multiplies the whole policy loss by loss_scale_factor below.
-+                        # Divide here so the auxiliary loss is normalized once per mini-batch,
-+                        # not once per micro-batch.
-+                        policy_loss = policy_loss + (fc_opd_loss * fc_opd_coef / loss_scale_factor)
++                        # The actor multiplies policy_loss by loss_scale_factor below.
++                        # Pure VA/VGG-OPD should be the whole objective, so divide here
++                        # to keep the actor's later scaling from shrinking the gradient.
++                        if pure_fc_opd:
++                            policy_loss = fc_opd_loss / loss_scale_factor
++                        else:
++                            fc_opd_coef = _fc_opd_config_float(self.config, "loss_coef", 0.0)
++                            policy_loss = policy_loss + (fc_opd_loss * fc_opd_coef / loss_scale_factor)
++                            micro_batch_metrics["actor/fc_opd_coef"] = fc_opd_coef
 +                        metrics["actor/fc_opd_loss"] = metrics.get("actor/fc_opd_loss", 0.0) + (
 +                            fc_opd_loss.detach().item()
 +                        )
-+                        micro_batch_metrics["actor/fc_opd_coef"] = fc_opd_coef
 +                        micro_batch_metrics["actor/fc_opd_denominator"] = denominator.detach().item()
 +                        fc_opd_metrics = outputs.get("fc_opd_metrics")
 +                        if fc_opd_metrics is not None:
@@ -177,7 +182,7 @@
                      if self.config.use_dynamic_bsz:
                          # relative to the dynamic bsz
                          loss = policy_loss * loss_scale_factor
-@@ -674,3 +775,35 @@
+@@ -674,3 +780,44 @@
                  append_to_dict(metrics, mini_batch_metrics)
          self.actor_optimizer.zero_grad()
          return metrics
@@ -205,6 +210,15 @@
 +    if callable(fc_getter):
 +        return float(fc_getter(key, default))
 +    return float(getattr(fc_config, key, default))
++
++
++def _fc_opd_loss_mode(batch_fields):
++    raw = batch_fields.get("fc_opd_loss_mode", "forward")
++    if hasattr(raw, "flat"):
++        raw = raw.flat[0]
++    elif isinstance(raw, (list, tuple)):
++        raw = raw[0]
++    return str(raw)
 +
 +
 +def _fc_opd_metric_float(value):
