@@ -441,6 +441,9 @@ def _topk_to_device(score: TeacherTopK, device: torch.device) -> TeacherTopK:
         log_probs=score.log_probs.to(device),
         tail_log_prob=None if score.tail_log_prob is None else score.tail_log_prob.to(device),
         entropy=None if score.entropy is None else score.entropy.to(device),
+        sampled_log_probs=(
+            None if score.sampled_log_probs is None else score.sampled_log_probs.to(device)
+        ),
     )
 
 
