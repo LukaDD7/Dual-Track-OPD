@@ -29,13 +29,15 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 export PYTHONPATH="${REPO_ROOT}:${PYTHONPATH:-}"
 
 GPU_COUNT=4
-NUM_STEPS=1313  # 5 epochs × (2101 prompts / 8 batch), align VA-OPD
+NUM_STEPS=0  # 0 = auto: 5 epochs × 2101 prompts / TRAIN_BATCH_SIZE
 TOP_K=32
 TEACHER_PORT=18080
 RUN_BACKGROUND=false
 PARQUET_OVERRIDE=""
 KEEPALIVE_SEC=0
 RESUME_CKPT=""
+NUM_EPOCHS=5
+DATASET_SIZE=2101
 
 # ── parse args ──────────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
@@ -112,6 +114,10 @@ TRAIN_BATCH_SIZE=$(( (8 / TRAIN_GPUS) * TRAIN_GPUS ))
 if (( TRAIN_BATCH_SIZE < 1 )); then TRAIN_BATCH_SIZE=${TRAIN_GPUS}; fi
 PPO_MINI_BATCH_SIZE=$(( TRAIN_BATCH_SIZE * ROLLOUT_N ))
 MICRO_BATCH_PER_GPU=1
+# Auto-compute steps to cover NUM_EPOCHS full passes when --steps is not given.
+if (( NUM_STEPS <= 0 )); then
+    NUM_STEPS=$(( (NUM_EPOCHS * DATASET_SIZE + TRAIN_BATCH_SIZE - 1) / TRAIN_BATCH_SIZE ))
+fi
 
 if [[ -n "${RESUME_CKPT}" ]]; then
     CHECKPOINT_DIR="${RESUME_CKPT}"
@@ -124,7 +130,7 @@ fi
 echo "══════════════════════════════════════════════════════════════"
 echo "  FC-OPD Training — VA-OPD aligned"
 echo "  Run ID:       ${RUN_ID}"
-echo "  Steps:        ${NUM_STEPS} (5 epochs × 2101/${TRAIN_BATCH_SIZE} batch)"
+echo "  Steps:        ${NUM_STEPS} (${NUM_EPOCHS} epochs × ${DATASET_SIZE}/${TRAIN_BATCH_SIZE} batch)"
 echo "  Save freq:    ${SAVE_FREQ}"
 echo "  Loss mode:    va_opd (VA grouped reverse KL)"
 echo "  Top-K:        ${TOP_K}"
