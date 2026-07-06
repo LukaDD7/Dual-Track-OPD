@@ -35,6 +35,7 @@ TEACHER_PORT=18080
 RUN_BACKGROUND=false
 PARQUET_OVERRIDE=""
 KEEPALIVE_SEC=0
+RESUME_CKPT=""
 
 # ── parse args ──────────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
@@ -42,6 +43,7 @@ while [[ $# -gt 0 ]]; do
         --gpus)       GPU_COUNT="${2:?--gpus needs a value}"; shift 2 ;;
         --steps)      NUM_STEPS="${2:?--steps needs a value}"; shift 2 ;;
         --data)       PARQUET_OVERRIDE="${2:?--data needs a path}"; shift 2 ;;
+        --resume)     RESUME_CKPT="${2:?--resume needs a checkpoint dir}"; shift 2 ;;
         --keepalive) KEEPALIVE_SEC=86400; shift ;;
         --background) RUN_BACKGROUND=true; shift ;;
         *) echo "Unknown arg: $1"; exit 1 ;;
@@ -59,6 +61,12 @@ if ${RUN_BACKGROUND}; then
     done
     if [[ -n "${PARQUET_OVERRIDE}" ]]; then
         RELAUNCH_ARGS+=(--data "${PARQUET_OVERRIDE}")
+    fi
+    if [[ -n "${RESUME_CKPT}" ]]; then
+        RELAUNCH_ARGS+=(--resume "${RESUME_CKPT}")
+    fi
+    if [[ -n "${KEEPALIVE_SEC}" ]] && (( KEEPALIVE_SEC > 0 )); then
+        RELAUNCH_ARGS+=(--keepalive)
     fi
     NOHUP_LOG="${REPO_ROOT}/artifacts/fc_opd/nohup_$(date +%Y%m%d_%H%M%S).log"
     mkdir -p "$(dirname "${NOHUP_LOG}")"
@@ -97,12 +105,21 @@ VERL_GPU_LIST=$(seq -s, 1 $(( GPU_COUNT - 1 )))
 SAVE_FREQ=25
 
 # Aligned with VA-OPD: K=8 sibling rollouts, 5 epochs.
-TRAIN_BATCH_SIZE=8
 ROLLOUT_N=8
+# TRAIN_BATCH_SIZE must produce PPO_MINI_BATCH_SIZE that is divisible by TRAIN_GPUS.
+# Choose the largest multiple of TRAIN_GPUS that is ≤ 8.
+TRAIN_BATCH_SIZE=$(( (8 / TRAIN_GPUS) * TRAIN_GPUS ))
+if (( TRAIN_BATCH_SIZE < 1 )); then TRAIN_BATCH_SIZE=${TRAIN_GPUS}; fi
 PPO_MINI_BATCH_SIZE=$(( TRAIN_BATCH_SIZE * ROLLOUT_N ))
 MICRO_BATCH_PER_GPU=1
 
-CHECKPOINT_DIR="${REPO_ROOT_ABS}/checkpoints/verl_fc_opd_overnight/${RUN_ID}"
+if [[ -n "${RESUME_CKPT}" ]]; then
+    CHECKPOINT_DIR="${RESUME_CKPT}"
+    RESUME_MODE="auto"
+else
+    CHECKPOINT_DIR="${REPO_ROOT_ABS}/checkpoints/verl_fc_opd_overnight/${RUN_ID}"
+    RESUME_MODE="disable"
+fi
 
 echo "══════════════════════════════════════════════════════════════"
 echo "  FC-OPD Training — VA-OPD aligned"
@@ -228,6 +245,7 @@ ${CONDA_ENV}/bin/python -m verl.trainer.main_ppo \
     "trainer.save_freq=${SAVE_FREQ}" \
     "trainer.test_freq=-1" \
     "trainer.default_local_dir=${CHECKPOINT_DIR}" \
+    "trainer.resume_mode=${RESUME_MODE}" \
     "trainer.val_before_train=false" \
     2>&1 | tee "${TRAIN_LOG}"
 VERL_EXIT=$?
