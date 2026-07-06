@@ -210,13 +210,13 @@ ${CONDA_ENV}/bin/python -m verl.trainer.main_ppo \
     "actor_rollout_ref.actor.ppo_mini_batch_size=${PPO_MINI_BATCH_SIZE}" \
     "actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=${MICRO_BATCH_PER_GPU}" \
     "actor_rollout_ref.actor.use_dynamic_bsz=true" \
-    "actor_rollout_ref.actor.ppo_max_token_len_per_gpu=16384" \
+    "actor_rollout_ref.actor.ppo_max_token_len_per_gpu=12288" \
     "actor_rollout_ref.actor.use_kl_loss=false" \
     "actor_rollout_ref.actor.fsdp_config.param_offload=true" \
     "actor_rollout_ref.actor.fsdp_config.optimizer_offload=true" \
     "actor_rollout_ref.rollout.name=vllm" \
     "actor_rollout_ref.rollout.tensor_model_parallel_size=1" \
-    "actor_rollout_ref.rollout.gpu_memory_utilization=0.7" \
+    "actor_rollout_ref.rollout.gpu_memory_utilization=0.6" \
     "actor_rollout_ref.rollout.max_model_len=4096" \
     "actor_rollout_ref.rollout.n=${ROLLOUT_N}" \
     "actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=8" \
