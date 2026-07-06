@@ -383,6 +383,9 @@ def _slice_teacher_topk(score: TeacherTopK, target_len: int) -> TeacherTopK:
         log_probs=score.log_probs[:, :target_len, :],
         tail_log_prob=score.tail_log_prob[:, :target_len] if score.tail_log_prob is not None else None,
         entropy=score.entropy[:, :target_len] if score.entropy is not None else None,
+        sampled_log_probs=(
+            score.sampled_log_probs[:, :target_len] if score.sampled_log_probs is not None else None
+        ),
     )
 
 
@@ -406,11 +409,19 @@ def _pad_teacher_topk(score: TeacherTopK, target_len: int) -> TeacherTopK:
         torch.zeros(1, pad_len, dtype=score.entropy.dtype, device=device)
         if score.entropy is not None else None
     )
+    pad_slp = (
+        torch.full((1, pad_len), -30.0, dtype=score.sampled_log_probs.dtype, device=device)
+        if score.sampled_log_probs is not None else None
+    )
     return TeacherTopK(
         token_ids=torch.cat([score.token_ids, pad_ids], dim=1),
         log_probs=torch.cat([score.log_probs, pad_log], dim=1),
         tail_log_prob=torch.cat([score.tail_log_prob, pad_tail], dim=1) if pad_tail is not None else None,
         entropy=torch.cat([score.entropy, pad_ent], dim=1) if pad_ent is not None else None,
+        sampled_log_probs=(
+            torch.cat([score.sampled_log_probs, pad_slp], dim=1)
+            if score.sampled_log_probs is not None else None
+        ),
     )
 
 
