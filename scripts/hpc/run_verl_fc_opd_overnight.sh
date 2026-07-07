@@ -32,6 +32,7 @@ GPU_COUNT=4
 NUM_STEPS=0  # 0 = auto: 5 epochs × 2101 prompts / TRAIN_BATCH_SIZE
 TOP_K=32
 TEACHER_PORT=18080
+TEACHER_PORT_2=18081
 RUN_BACKGROUND=false
 PARQUET_OVERRIDE=""
 KEEPALIVE_SEC=0
@@ -94,16 +95,29 @@ REWARD_FN="file://${REPO_ROOT_ABS}/src/dual_track_opd/fc_opd/smoke_reward.py"
 mkdir -p "$(dirname "${TEACHER_LOG}")"
 
 # ── GPU math ────────────────────────────────────────────────────────────────
-# GPU 0: Teacher (32B, 66 GB)
-# GPU 1..N-1: verl PPO training (WorkerDict + vLLM)
+# GPU 0: Teacher #1 (32B, 66 GB)
+# GPU 1 (if >=5 total): Teacher #2 (32B, 66 GB)
+# Remaining GPUs: verl PPO training (WorkerDict + vLLM)
 if (( GPU_COUNT < 2 )); then
     echo "ERROR: need at least 2 GPUs (1=teacher, >=1=verl train)"
     exit 1
 fi
-TRAIN_GPUS=$(( GPU_COUNT - 1 ))
+if (( GPU_COUNT >= 5 )); then
+    NUM_TEACHERS=2
+    TEACHER_GPU=0
+    TEACHER_GPU_2=1
+    TRAIN_GPUS=$(( GPU_COUNT - 2 ))
+    VERL_GPU_LIST=$(seq -s, 2 $(( GPU_COUNT - 1 )))
+    TEACHER_URLS="http://127.0.0.1:${TEACHER_PORT},http://127.0.0.1:${TEACHER_PORT_2}"
+    TEACHER_LOG_2="${REPO_ROOT_ABS}/artifacts/fc_opd/teacher2_${RUN_ID}.log"
+else
+    NUM_TEACHERS=1
+    TEACHER_GPU=0
+    TRAIN_GPUS=$(( GPU_COUNT - 1 ))
+    VERL_GPU_LIST=$(seq -s, 1 $(( GPU_COUNT - 1 )))
+    TEACHER_URLS="http://127.0.0.1:${TEACHER_PORT}"
+fi
 VERL_GPUS=${TRAIN_GPUS}
-TEACHER_GPU=0
-VERL_GPU_LIST=$(seq -s, 1 $(( GPU_COUNT - 1 )))
 SAVE_FREQ=25
 
 # Aligned with VA-OPD: K=8 sibling rollouts, 5 epochs.
@@ -120,7 +134,15 @@ if (( NUM_STEPS <= 0 )); then
 fi
 
 if [[ -n "${RESUME_CKPT}" ]]; then
-    CHECKPOINT_DIR="${RESUME_CKPT}"
+    # RESUME_CKPT can be either a specific global_step_XXX dir or a run dir.
+    # verl's find_latest_ckpt_path scans default_local_dir for global_step_*,
+    # so default_local_dir must be the *parent* of the step directory.
+    RESUME_PARENT=$(dirname "${RESUME_CKPT}")
+    if [[ "$(basename "${RESUME_CKPT}")" == global_step_* ]]; then
+        CHECKPOINT_DIR="${RESUME_PARENT}"
+    else
+        CHECKPOINT_DIR="${RESUME_CKPT}"
+    fi
     RESUME_MODE="auto"
 else
     CHECKPOINT_DIR="${REPO_ROOT_ABS}/checkpoints/verl_fc_opd_overnight/${RUN_ID}"
@@ -137,7 +159,7 @@ echo "  Top-K:        ${TOP_K}"
 echo "  Rollout n:    ${ROLLOUT_N}"
 echo "  Train batch:  ${TRAIN_BATCH_SIZE} (VA-OPD: 16)"
 echo "  LR:           2e-6 (VA-OPD: 2e-6)"
-echo "  GPU layout:   teacher=${TEACHER_GPU}, train=${VERL_GPU_LIST}"
+echo "  GPU layout:   teachers=${NUM_TEACHERS}, train=${VERL_GPU_LIST}"
 echo "  Data:         ${PARQUET}"
 echo "  Train log:    ${TRAIN_LOG}"
 echo "  Checkpoint:   ${CHECKPOINT_DIR}"
@@ -160,11 +182,17 @@ EXISTING_TEACHER=$(lsof -ti:${TEACHER_PORT} 2>/dev/null || true)
 if [ -n "${EXISTING_TEACHER}" ]; then
     kill -9 ${EXISTING_TEACHER} 2>/dev/null || true; sleep 2
 fi
+if (( NUM_TEACHERS >= 2 )); then
+    EXISTING_TEACHER2=$(lsof -ti:${TEACHER_PORT_2} 2>/dev/null || true)
+    if [ -n "${EXISTING_TEACHER2}" ]; then
+        kill -9 ${EXISTING_TEACHER2} 2>/dev/null || true; sleep 2
+    fi
+fi
 rm -rf /dev/shm/*vllm* /dev/shm/*psm_* 2>/dev/null || true
 sleep 2
 
-# ── 1) Teacher ──────────────────────────────────────────────────────────────
-echo "=== Teacher (GPU ${TEACHER_GPU}) ==="
+# ── 1) Teacher(s) ───────────────────────────────────────────────────────────
+echo "=== Teacher #1 (GPU ${TEACHER_GPU}, port ${TEACHER_PORT}) ==="
 CUDA_VISIBLE_DEVICES=${TEACHER_GPU} \
     ${CONDA_ENV}/bin/python -m dual_track_opd.fc_opd.teacher_service \
     --backend transformers --model "${TEACHER_MODEL}" \
@@ -178,14 +206,37 @@ for i in $(seq 1 300); do
     echo -n "."; sleep 1
 done
 
+if (( NUM_TEACHERS >= 2 )); then
+    echo "=== Teacher #2 (GPU ${TEACHER_GPU_2}, port ${TEACHER_PORT_2}) ==="
+    CUDA_VISIBLE_DEVICES=${TEACHER_GPU_2} \
+        ${CONDA_ENV}/bin/python -m dual_track_opd.fc_opd.teacher_service \
+        --backend transformers --model "${TEACHER_MODEL}" \
+        --port "${TEACHER_PORT_2}" --top-k "${TOP_K}" --dtype bfloat16 --device "cuda:0" \
+        > "${TEACHER_LOG_2}" 2>&1 &
+    TEACHER_PID_2=$!
+    echo -n "  Waiting ."
+    for i in $(seq 1 300); do
+        if curl -s "http://127.0.0.1:${TEACHER_PORT_2}/health" >/dev/null 2>&1; then echo " OK"; break; fi
+        if ! kill -0 ${TEACHER_PID_2} 2>/dev/null; then echo " DIED"; tail -20 "${TEACHER_LOG_2}"; exit 1; fi
+        echo -n "."; sleep 1
+    done
+fi
+
 # ── 2) Ray ──────────────────────────────────────────────────────────────────
 echo "=== Ray (${VERL_GPUS} GPUs) ==="
+export RAY_memory_usage_threshold=0.95
 CUDA_VISIBLE_DEVICES=${VERL_GPU_LIST} ray start --head --num-gpus=${VERL_GPUS} --disable-usage-stats
 sleep 3
 
 # ── 3) PPO ──────────────────────────────────────────────────────────────────
 echo "=== Training (${NUM_STEPS} steps, VA-OPD, rollout n=${ROLLOUT_N}) ==="
 set +e
+# NCCL stability: NVLink support, disable IB extensions, larger buffers.
+export NCCL_NVLS_ENABLE=1
+export NCCL_IBEXT_DISABLE=1
+export NCCL_BUFFSIZE=4194304
+export NCCL_TIMEOUT=1800
+export TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC=1200
 CUDA_VISIBLE_DEVICES=${VERL_GPU_LIST} \
 ${CONDA_ENV}/bin/python -m verl.trainer.main_ppo \
     --config-path="${VERL_CONFIG_DIR}" \
@@ -202,6 +253,7 @@ ${CONDA_ENV}/bin/python -m verl.trainer.main_ppo \
     "data.custom_cls.path=file://${REPO_ROOT_ABS}/src/dual_track_opd/fc_opd/verl_dataset.py" \
     "data.custom_cls.name=FCOPDDataset" \
     "actor_rollout_ref.model.path=${MODEL_PATH}" \
+    "actor_rollout_ref.nccl_timeout=1800" \
     "actor_rollout_ref.model.use_remove_padding=false" \
     "actor_rollout_ref.model.use_fused_kernels=false" \
     "actor_rollout_ref.model.enable_gradient_checkpointing=true" \
@@ -210,18 +262,19 @@ ${CONDA_ENV}/bin/python -m verl.trainer.main_ppo \
     "actor_rollout_ref.actor.ppo_mini_batch_size=${PPO_MINI_BATCH_SIZE}" \
     "actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=${MICRO_BATCH_PER_GPU}" \
     "actor_rollout_ref.actor.use_dynamic_bsz=true" \
-    "actor_rollout_ref.actor.ppo_max_token_len_per_gpu=12288" \
+    "actor_rollout_ref.actor.ppo_max_token_len_per_gpu=10240" \
     "actor_rollout_ref.actor.use_kl_loss=false" \
-    "actor_rollout_ref.actor.fsdp_config.param_offload=true" \
-    "actor_rollout_ref.actor.fsdp_config.optimizer_offload=true" \
+    "actor_rollout_ref.actor.fsdp_config.param_offload=false" \
+    "actor_rollout_ref.actor.fsdp_config.optimizer_offload=false" \
+    "actor_rollout_ref.actor.fsdp_config.forward_prefetch=true" \
     "actor_rollout_ref.rollout.name=vllm" \
     "actor_rollout_ref.rollout.tensor_model_parallel_size=1" \
-    "actor_rollout_ref.rollout.gpu_memory_utilization=0.6" \
+    "actor_rollout_ref.rollout.gpu_memory_utilization=0.45" \
     "actor_rollout_ref.rollout.max_model_len=4096" \
     "actor_rollout_ref.rollout.n=${ROLLOUT_N}" \
     "actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=8" \
-    "actor_rollout_ref.rollout.agent.num_workers=8" \
-    "actor_rollout_ref.ref.fsdp_config.param_offload=true" \
+    "actor_rollout_ref.rollout.agent.num_workers=4" \
+    "actor_rollout_ref.ref.fsdp_config.param_offload=false" \
     "reward_model.enable=false" \
     "reward_model.num_workers=null" \
     "reward_model.reward_manager=null" \
@@ -235,7 +288,7 @@ ${CONDA_ENV}/bin/python -m verl.trainer.main_ppo \
     "algorithm.use_kl_in_reward=false" \
     "+algorithm.fc_opd.post_rollout_hook=dual_track_opd.fc_opd.verl_post_rollout_hook.fc_opd_post_rollout_hook" \
     "+algorithm.fc_opd.compute_hook_loss=false" \
-    "+algorithm.fc_opd.teacher_url=http://127.0.0.1:${TEACHER_PORT}" \
+    "+algorithm.fc_opd.teacher_urls=${TEACHER_URLS}" \
     "+algorithm.fc_opd.conditions=[full,degraded]" \
     "+algorithm.fc_opd.loss_coef=1.0" \
     "+algorithm.fc_opd.loss_mode=va_opd" \
@@ -249,6 +302,7 @@ ${CONDA_ENV}/bin/python -m verl.trainer.main_ppo \
     "trainer.project_name=fc_opd_overnight" \
     "trainer.experiment_name=${RUN_ID}" \
     "trainer.save_freq=${SAVE_FREQ}" \
+    "trainer.max_actor_ckpt_to_keep=5" \
     "trainer.test_freq=-1" \
     "trainer.default_local_dir=${CHECKPOINT_DIR}" \
     "trainer.resume_mode=${RESUME_MODE}" \
@@ -261,6 +315,9 @@ echo ""
 echo "=== Cleanup ==="
 ray stop -f 2>/dev/null || true
 kill ${TEACHER_PID} 2>/dev/null || true
+if (( NUM_TEACHERS >= 2 )); then
+    kill ${TEACHER_PID_2} 2>/dev/null || true
+fi
 sleep 2
 
 echo ""

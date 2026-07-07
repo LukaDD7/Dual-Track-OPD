@@ -160,35 +160,76 @@ def _build_teacher_scorer(
     injected = _optional_callable(fc_config, "teacher_scorer", "teacher_scorer_fqn")
     if injected is not None:
         return injected
-    teacher_url = _config_get(fc_config, "teacher_url", None)
-    if not teacher_url:
-        raise ValueError("algorithm.fc_opd.teacher_url or teacher_scorer_fqn is required")
+    # Support both legacy teacher_url (single) and teacher_urls (comma-separated list).
+    teacher_urls_str = _config_get(fc_config, "teacher_urls", None)
+    if teacher_urls_str is None:
+        teacher_url = _config_get(fc_config, "teacher_url", None)
+        if not teacher_url:
+            raise ValueError("algorithm.fc_opd.teacher_urls or teacher_url or teacher_scorer_fqn is required")
+        teacher_urls = [str(teacher_url)]
+    else:
+        teacher_urls = [u.strip() for u in str(teacher_urls_str).split(",") if u.strip()]
+
     expected_hash = _config_get(fc_config, "expected_tokenizer_hash", None)
     if expected_hash is None:
         expected_hash = tokenizer_fingerprint(tokenizer)
     timeout = float(_config_get(fc_config, "teacher_timeout_seconds", 120.0))
-    client = TeacherClient(str(teacher_url), expected_tokenizer_hash=str(expected_hash), timeout_seconds=timeout)
 
-    # Batch all B×C teacher requests into a single HTTP POST.
+    # Split samples evenly across teachers.  Each teacher handles a contiguous
+    # chunk so response_text indexing stays trivially aligned.
+    num_teachers = len(teacher_urls)
     sample_tuples = [
         (sample.rollout_token_ids, sample.question, sample.condition_inputs)
         for sample in samples
     ]
-    pre_scored = score_teacher_conditions_multi_sample(
-        sample_tuples,
-        conditions,
-        client,
-        response_texts=[sample.rollout_text for sample in samples],
-        request_prefix="verl_batch",
-    )
-    # Build a lookup: sample index → condition → TeacherTopK
-    lookup: list[dict[Condition, TeacherTopK]] = pre_scored
+    response_texts = [sample.rollout_text for sample in samples]
+
+    if num_teachers == 1:
+        client = TeacherClient(teacher_urls[0], expected_tokenizer_hash=str(expected_hash), timeout_seconds=timeout)
+        pre_scored = score_teacher_conditions_multi_sample(
+            sample_tuples, conditions, client,
+            response_texts=response_texts, request_prefix="verl_batch",
+        )
+        lookup: list[dict[Condition, TeacherTopK]] = pre_scored
+    else:
+        # Fan out to multiple teachers concurrently (HTTP I/O — threads are fine).
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        chunk_size = (len(samples) + num_teachers - 1) // num_teachers
+        futures: dict[Any, int] = {}  # future → teacher_idx
+        partial_results: dict[int, list[dict[Condition, TeacherTopK]]] = {}
+
+        def _score_chunk(teacher_idx: int, start: int, end: int):
+            client = TeacherClient(teacher_urls[teacher_idx], expected_tokenizer_hash=str(expected_hash), timeout_seconds=timeout)
+            return score_teacher_conditions_multi_sample(
+                sample_tuples[start:end], conditions, client,
+                response_texts=response_texts[start:end],
+                request_prefix=f"verl_batch_t{teacher_idx}",
+            )
+
+        with ThreadPoolExecutor(max_workers=num_teachers) as executor:
+            for t_idx in range(num_teachers):
+                start = t_idx * chunk_size
+                end = min(start + chunk_size, len(samples))
+                if start >= end:
+                    break
+                futures[executor.submit(_score_chunk, t_idx, start, end)] = t_idx
+
+            for future in as_completed(futures):
+                t_idx = futures[future]
+                partial_results[t_idx] = future.result()
+
+        # Reassemble in original sample order.
+        lookup = [{} for _ in samples]
+        for t_idx in sorted(partial_results):
+            start = t_idx * chunk_size
+            chunk = partial_results[t_idx]
+            for offset, result in enumerate(chunk):
+                lookup[start + offset] = result
 
     def _score(sample: OnlineFCOPDSample, conds: Sequence[Condition]):
-        # Find the pre-scored entry for this sample
         for idx, s in enumerate(samples):
             if s.sample_uid == sample.sample_uid:
-                # Return only the requested conditions
                 return {Condition(c): lookup[idx][Condition(c)] for c in conds}
         raise ValueError(f"sample {sample.sample_uid} not found in pre-scored batch")
 
