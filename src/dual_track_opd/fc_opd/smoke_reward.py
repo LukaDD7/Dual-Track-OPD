@@ -9,7 +9,7 @@ from __future__ import annotations
 import re
 from typing import Any, Sequence
 
-ANSWER_RE = re.compile(r"<answer>\s*(.*?)\s*</answer>", re.IGNORECASE | re.DOTALL)
+ANSWER_RE = re.compile(r"\\boxed\{([^}]*)\}", re.IGNORECASE)
 LETTER_RE = re.compile(r"\b([A-D])\b", re.IGNORECASE)
 NUMBER_RE = re.compile(r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)")
 

@@ -2,7 +2,7 @@
 
 ## Environment
 
-- **Hardware**: 4× NVIDIA H200 (141 GB), 8× H200 (queued)
+- **Hardware**: 8× NVIDIA H200 (141 GB), 6 GPU training + 2 GPU teacher serving
 - **Model**: Teacher Qwen3-VL-32B-Instruct, Student Qwen3-VL-4B-Instruct
 - **Framework**: verl (PyTorch 2.8.0+cu128, FSDP, Ray, vLLM)
 - **Dataset**: Geometry3K (2,101 prompts, 5 epochs → 1,751 steps)
@@ -25,7 +25,12 @@
 | 9 | **FSDP2 跨 world_size resume 失败** — 4 GPU (3 训练卡) 保存的 FSDP2 checkpoint 无法在 8 GPU (6 训练卡) 上加载，FileNotFound: `model_world_size_6_rank_*.pt`。 | FSDP2 使用 DTensor，checkpoint 文件名编码了 world_size（如 `model_world_size_3_rank_0.pt`）。加载时 verl 期望 world_size 匹配，当前实现不支持自动 reshard。理论上 PyTorch DTensor 支持跨 world_size 的 `distributed_state_dict` 加载，但 verl 的 checkpoint 加载路径未实现此功能。 | 同 world_size 启动训练或从零开始。当前 8 GPU 从零训练。 | ⚠️ 绕过（从零训练） | 低。1751 步完整训练不需要 resume。未来可修改 verl checkpoint 加载代码支持 `full_state_dict` 模式。 |
 | 10 | **Hydra 逗号解析冲突** — `teacher_urls=http://127.0.0.1:18080,http://127.0.0.1:18081` 被 Hydra 解释为列表而非字符串。 | Hydra override 语法中逗号是列表分隔符。双 Teacher 的 URL 列表需要用引号保护。 | 加单引号：`'+algorithm.fc_opd.teacher_urls=\\'${TEACHER_URLS}\\''` | ✅ 已修 | 低。Shell 引号转义需仔细。 |
 | 11 | **Checkpoint 保存过频** — save_freq=25 时每 ~17 分钟写一次 52 GB checkpoint，1751 步共 ~70 个 checkpoint，IO 压力大、磁盘碎片多。 | 原始设置未考虑 52 GB/checkpoint 的存储成本。 | `save_freq=100`（~70 min/checkpoint，全训练 ~17 个），配合 `max_actor_ckpt_to_keep=5`，峰值磁盘占用 ~260 GB。 | ✅ 已修 | 低。 |
-| 12 | **FSDP2 首次验证收敛异常** — 4 GPU FSDP2 从零训练 68 步时 entropy=0.008，但切换到 8 GPU 后从零训练的早期步（step 9-15）entropy=0.45-0.79，之后快速降至 0.005。 | 正常现象：训练初期模型输出分布波动大，entropy 在步间有噪声。8 GPU 的 TRAIN_BATCH_SIZE=6 与 4 GPU 一致，但 GPU 更多导致 FSDP shard 更小、allgather 更碎，可能影响早期梯度同步精度。但 30 步后 entropy 正常收敛，不影响最终结果。 | 无需处理，已自愈。 | ✅ 自愈 | 低。 |
+| 13 | **Score 始终为 0 — prompt 格式与模型不兼容** — Qwen3-VL 预训练用 `\boxed{}` 输出答案，但我们 prompt 要求 `<answer>` 标签，reward 函数也从 `<answer>` 提取。模型默认输出 `\boxed{A}`，reward 找不到 `<answer>`，所有响应 score=0。`val_before_train` 验证分数 0.0，训练无有效 reward 信号。 | Qwen3-VL 预训练数据使用 LaTeX `\boxed{}` 约定。`<answer>` 是与模型预训练行为对抗的格式。模型不愿意使用它——特别是与纯 KL 蒸馏损失（无 GRPO reward 信号）结合时，模型倾向于回归其预训练的输出格式。 | 将 prompt 和 reward 函数都改为业界标准格式：`<think>` 标签用于推理 + `\boxed{}` 用于答案。从 EasyR1、veRL、GAO_grpo、ARPO、MindSpeed-MM 和 Oumi 复制的 prompt 模板。Reward 正则改为 `\\boxed\\{([^}]*)\\}`。验证：`val_before_train` score 从 0.0 → **0.38**（run 051629）。文件：`verl_dataset.py`、`smoke_reward.py`、`verifier.py`。 | ✅ 已修 | 低。`\boxed{}` 是数学 RL 训练的通用标准，所有 Geometry3K 基准测试均使用。 |
+| 14 | **响应截断（1024 tokens）** — `max_response_length=1024` 时 67% 的响应被截断，在到达 `<answer>` 标签之前。Qwen3-VL 32B teacher 验证 `val_before_train` 分数 0.0。 | Geometry3K 数学题需要多步推理。1024 tokens 对于 `<think>` + `\boxed{}` 格式不够，响应在答案出现前被截断。业界标准为 2048 tokens（EasyR1、verl、rLLM）。 | `max_response_length=2048`，`ppo_max_token_len_per_gpu=10240`，`max_model_len=10240`。同样增加 NCCL `nccl_timeout=1800`。 | ✅ 已修 | 低。2048 是业界标准；即使在 2048 时截断也意味着无效响应（参见模式崩溃 #16）。 |
+| 15 | **FSDP2 NCCL allgather 死锁（502M 元素）** — 在 6 GPU 训练时，训练在进行到 step 8–13 时确定性崩溃，`NumelIn=83678470`，`NumelOut=502070820`。3 次独立运行中 bit-identical 崩溃，相同的 SeqNum（10392 或 13012）。4 GPU 训练从未崩溃。 | FSDP2 使用 `_no_split_modules`（Qwen3VLTextDecoderLayer、Qwen3VLVisionBlock）的 `transformer_auto_wrap_policy`。根 FSDP 单元包含 `embed_tokens`（389M 参数）+ `lm_head` + 视觉非块组件 → 502M 参数 allgather。6 个 rank 使 NCCL 选择了一个有 bug 的 allgather 算法路径，该路径在 83.7M 元素/rank 时死锁。 | 测试了两个缓解措施：(a) **NCCL_ALGO=Ring**：运行了 38 步后崩溃（虽未解决但延长了运行时间）。不同 run 间（step 8 vs step 38）行为不一致。(b) **reshard_after_forward=false**：**当前正在测试中**（run 051629，存活到 step 3+）。保持前向后的参数全部存在 GPU 上，减少了 allgather 频率。权衡：GPU 内存从 86GB → 105GB 预留（仍在 H200 141GB 范围内）。 | 🔄 测试中 (noshard) | 高。如果 noshard 修复了但以后 GPU 内存容量放缓需重新评估。长期根本修复可能需要 PyTorch/NCCL 补丁或在 `_no_split_modules` 中包含 `embed_tokens` 以防止巨型根 FSDP 单元。 |
+| 16 | **模式崩溃（纯 KL 蒸馏）** — 使用 `<answer>` prompt（run 034544）进行 ring 测试时，熵在 ~15 步内从 0.75 暴跌至 0.003。所有响应达到 max_length 2048（clip_ratio=1.0），score 回到 0.0。VA 信号降至 ~0.002。梯度范数飙升至 16.8。 | 没有有效的 reward 信号（因为 prompt 不匹配 + 截断），纯 teacher KL 蒸馏使模型崩溃到确定性输出——它学习生成保证与 teacher 一致的 2048 个相同 tokens，而不是生成正确答案。这是仅使用蒸馏损失时已知的 failure mode：模式寻求的 reverse KL 在没有 ground-truth reward 锚点的情况下会使分布崩溃。 | Prompt 修复（#13）+ `\boxed{}` 提取应能通过有效的 reward 信号防止崩溃。`reshard_after_forward=false` 的 run 显示早期熵值健康（0.47-0.54），val score=0.38。 | 🔄 验证中 | 高。核心风险：仅有 KL 损失（VA-OPD 是纯蒸馏）在 reward 信号较弱时可能不稳定。在以后的运行中监控 entropy 趋势并设置早期止停。 |
+| 17 | **Teacher 分数修剪/填充对齐** — 每个样本出现 "trimming teacher scores (N₁ → N₂ tokens)" 警告，通常丢弃 40-60% 的 token。在大量 teacher token 无法匹配的短学生序列上也出现 "padding teacher scores" 警告。 | vLLM 学生 decode → 文本 → teacher re-encode 会产生不同的 token 计数（BPE 往返问题），即使是相同的 tokenizer。当前代码保留 **FIRST N** 个 token（`_slice_teacher_topk` 的 `[:, :target_len, :]`），在末尾丢弃答案。学生生成 2048 tokens，但 teacher 为同一段文本编码了 2048+ tokens → 修剪丢弃末尾 → 答案丢失，tail padding 质量为零。 | 未修复。业界标准是 "keep last N"（保留答案）或基于对齐的方法（teacher forcing 将学生 token 与 teacher token 对齐）。推迟至训练稳定后处理。 | ⚠️ 推迟 | 高。修剪正在移除答案 section——与 #14 截断问题直接叠加。 |
+| 18 | **GPU 1 触发 Xid 63（杂散）** — 在 ring test 运行期间观察到，`nvidia-smi` 在 GPU 1 显示 "Xid 63" 但没有明显影响。GPU 保持全功能，训练继续。 | Xid 63 = 页表溢出（GPU 页表无法容纳所有映射）。在 ~76GB/143GB GPU 内存使用量时发生，远低于容量。可能是碎片化或罕见的 H200 问题。未重现。 | 无需操作。不会导致崩溃或性能下降。 | ℹ️ 监控 | 低。如果频率增加，调查 GPU 内存碎片化。 | — 4 GPU FSDP2 从零训练 68 步时 entropy=0.008，但切换到 8 GPU 后从零训练的早期步（step 9-15）entropy=0.45-0.79，之后快速降至 0.005。 | 正常现象：训练初期模型输出分布波动大，entropy 在步间有噪声。8 GPU 的 TRAIN_BATCH_SIZE=6 与 4 GPU 一致，但 GPU 更多导致 FSDP shard 更小、allgather 更碎，可能影响早期梯度同步精度。但 30 步后 entropy 正常收敛，不影响最终结果。 | 无需处理，已自愈。 | ✅ 自愈 | 低。 |
 
 ---
 
@@ -46,38 +51,60 @@
             4 GPU FSDP2 验证通过（68 步无 crash）
             修复 Hydra 逗号解析、teacher_urls 引号
             8 GPU 双 Teacher + FSDP2 1751 步训练中
+
+2026-07-08  🔑 Prompt 格式修复：<answer> → <think> + \boxed{} (业界标准)
+            val_before_train score: 0.0 → 0.38
+            max_response_length: 1024 → 2048
+            
+            FSDP2 NCCL allgather 死锁 (NumelIn=83678470, NumelOut=502070820)
+            测试 NCCL_ALGO=Ring: 运行 38 步后模式崩溃 (entropy 0.75→0.003)
+            测试 reshard_after_forward=false: 正在运行中 (step 3+, score=0.48)
+            
+            添加 --name 和 --test-fix 标志以区分运行和测试死锁修复
+            模式崩溃根因：无 reward 信号的纯 KL 蒸馏 → 确定性输出
+            Trim/pad 对齐问题已识别但推迟 (业界使用 "keep last N")
 ```
 
 ---
 
-## Current Config (Final — FSDP2)
+## Current Config (Final — FSDP2 + noreshard + \boxed{})
 
 ```bash
-# Strategy: FSDP2 (per-parameter sharding, no flat-parameter deadlock)
+# Strategy: FSDP2 (per-parameter sharding)
 actor_rollout_ref.actor.strategy=fsdp2
 actor_rollout_ref.ref.strategy=fsdp2
 
-# FSDP (match verl defaults — no CPU offload for 4B model on H200)
+# FSDP (no CPU offload — 4B model fits H200 141 GB)
 actor_rollout_ref.actor.fsdp_config.param_offload=false
 actor_rollout_ref.actor.fsdp_config.optimizer_offload=false
 actor_rollout_ref.actor.fsdp_config.forward_prefetch=true
 
+# Deadlock workaround: reduce allgather frequency
+actor_rollout_ref.actor.fsdp_config.reshard_after_forward=false
+actor_rollout_ref.ref.fsdp_config.reshard_after_forward=false
+
 # GPU memory
 actor_rollout_ref.rollout.gpu_memory_utilization=0.45
 actor_rollout_ref.actor.ppo_max_token_len_per_gpu=10240
+actor_rollout_ref.rollout.max_model_len=10240
 
-# NCCL stability (defense in depth, though FSDP2 avoids the root cause)
+# Response (industry standard for Geometry3K)
+data.max_response_length=2048
+
+# NCCL
 actor_rollout_ref.nccl_timeout=1800
-export NCCL_NVLS_ENABLE=1
-export NCCL_IBEXT_DISABLE=1
-export NCCL_BUFFSIZE=4194304
+export NCCL_ALGO=Ring          # testing; may be unnecessary with noreshard
 
 # Checkpoint
 trainer.save_freq=100
 trainer.max_actor_ckpt_to_keep=5
 
-# Multi-teacher (when >=5 GPUs)
+# Multi-teacher (2× Qwen3-VL-32B on GPUs 0-1)
 +algorithm.fc_opd.teacher_urls='http://127.0.0.1:18080,http://127.0.0.1:18081'
+
+# Prompt: industry-standard <think> + \boxed{} (in verl_dataset.py)
+# You FIRST think about the reasoning process as an internal monologue...
+# The final answer MUST BE put in \boxed{}.
 ```
 
 ## Key Decisions
@@ -87,3 +114,9 @@ trainer.max_actor_ckpt_to_keep=5
 2. **resume 时 default_local_dir 必须用父目录**：verl 的 `find_latest_ckpt_path` 在 `default_local_dir` 内扫描 `global_step_*` 子目录，不能把 step 目录本身设为目标。
 
 3. **不追求 30min NCCL 超时作为合理解释**：死锁是真正的问题，不是偶发延迟。forward_prefetch + NCCL_NVLS 才是修复，超时只是安全网。
+
+4. **使用业界标准 `\boxed{}` 格式，不自定义 `<answer>`**：Qwen3-VL 预训练时就学会了 `\boxed{}` 输出，自定义 `<answer>` 标签是在跟模型预训练习惯对抗。所有数学 RL benchmark (Geometry3K, MATH, GSM8K, AIME) 都使用 `\boxed{}`。跟着惯例走，不发明新格式。
+
+5. **`reshard_after_forward=false` 是 FSDP2 死锁的务实缓解方案**：根 FSDP 单元 502M 参数的 allgather 触发了 NCCL bug。减少 allgather 频率（forward 后保持参数在 GPU 上）以 GPU 内存换取稳定性。4B 模型 8GB 加上 Adam 状态 32GB，在 105GB 时就达到峰值 GPU 内存——仍在 141GB H200 安全范围内。
+
+6. **修剪（trimming）是悬而未决的问题**：保留 "first N" 丢弃了答案。当 score 信号足够强时（`\boxed{}` 修复后），模型可能会学会将答案放在响应早期。如果之后 score 仍然被截断，就实施 "keep last N"。

@@ -48,15 +48,29 @@ class FCOPDDataset(RLHFDataset):
 
     @staticmethod
     def _clean_prompts(dataframe):
-        """Replace prompts with clean ``<image> + question`` format.
+        """Replace prompts with industry-standard Geometry3K format.
 
-        Strips XML format instructions and answer choices — VA-OPD requires
-        the student to see only the raw image and question, no formatting bias.
+        Uses the canonical math-RL prompt template (EasyR1, veRL, GAO_grpo,
+        ARPO, MindSpeed-MM, Oumi all converge on this format):
+          - ``<think>`` tags for chain-of-thought reasoning
+          - ``\\boxed{}`` for the final answer (Qwen3 pre-training convention)
+
+        VA-OPD: student sees only the raw image + question, no answer choices.
         """
         def _clean(row: dict) -> dict:
             question = str(row.get("question", "")).strip()
             if question:
-                row["prompt"] = [{"role": "user", "content": f"<image>\n{question}"}]
+                row["prompt"] = [{
+                    "role": "user",
+                    "content": (
+                        f"<image>\n{question}\n\n"
+                        "You FIRST think about the reasoning process as an "
+                        "internal monologue and then provide the final answer. "
+                        "The reasoning process MUST BE enclosed within "
+                        "<think> </think> tags. "
+                        "The final answer MUST BE put in \\boxed{}."
+                    ),
+                }]
             return row
         return dataframe.map(_clean)
 

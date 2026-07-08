@@ -39,6 +39,8 @@ KEEPALIVE_SEC=0
 RESUME_CKPT=""
 NUM_EPOCHS=5
 DATASET_SIZE=2101
+NAME_TAG=""
+TEST_FIX=""  # ring | noreshard | none
 
 # ── parse args ──────────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
@@ -46,6 +48,8 @@ while [[ $# -gt 0 ]]; do
         --gpus)       GPU_COUNT="${2:?--gpus needs a value}"; shift 2 ;;
         --steps)      NUM_STEPS="${2:?--steps needs a value}"; shift 2 ;;
         --data)       PARQUET_OVERRIDE="${2:?--data needs a path}"; shift 2 ;;
+        --name)       NAME_TAG="_${2:?--name needs a value}"; shift 2 ;;
+        --test-fix)   TEST_FIX="${2:?--test-fix needs ring|noreshard}"; NAME_TAG="${NAME_TAG}_${2}"; shift 2 ;;
         --resume)     RESUME_CKPT="${2:?--resume needs a checkpoint dir}"; shift 2 ;;
         --keepalive) KEEPALIVE_SEC=86400; shift ;;
         --background) RUN_BACKGROUND=true; shift ;;
@@ -68,6 +72,12 @@ if ${RUN_BACKGROUND}; then
     if [[ -n "${RESUME_CKPT}" ]]; then
         RELAUNCH_ARGS+=(--resume "${RESUME_CKPT}")
     fi
+    if [[ -n "${NAME_TAG}" ]]; then
+        RELAUNCH_ARGS+=(--name "${NAME_TAG#_}")
+    fi
+    if [[ -n "${TEST_FIX}" ]]; then
+        RELAUNCH_ARGS+=(--test-fix "${TEST_FIX}")
+    fi
     if [[ -n "${KEEPALIVE_SEC}" ]] && (( KEEPALIVE_SEC > 0 )); then
         RELAUNCH_ARGS+=(--keepalive)
     fi
@@ -87,12 +97,32 @@ TEACHER_MODEL="/inspire/hdd/global_user/mengweicheng-240108120092/lzy/models/Qwe
 PARQUET="${PARQUET_OVERRIDE:-/inspire/hdd/global_user/mengweicheng-240108120092/lzy/fc-opd-storage/outputs/fc_opd/geometry3k_full/train.parquet}"
 CONDA_ENV="/inspire/hdd/global_user/mengweicheng-240108120092/lzy/fc-opd-storage/envs/fc-opd-verl071-cu128"
 REPO_ROOT_ABS="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-RUN_ID="fc_opd_overnight_$(date +%Y%m%d_%H%M%S)"
+RUN_ID="fc_opd_overnight${NAME_TAG}_$(date +%Y%m%d_%H%M%S)"
 TEACHER_LOG="${REPO_ROOT_ABS}/artifacts/fc_opd/teacher_${RUN_ID}.log"
 TRAIN_LOG="${REPO_ROOT_ABS}/artifacts/fc_opd/train_${RUN_ID}.log"
 VERL_CONFIG_DIR="${REPO_ROOT_ABS}/third_party/verl/verl/trainer/config"
 REWARD_FN="file://${REPO_ROOT_ABS}/src/dual_track_opd/fc_opd/smoke_reward.py"
 mkdir -p "$(dirname "${TEACHER_LOG}")"
+
+# ── validation split ─────────────────────────────────────────────────────────
+# Auto-create a held-out validation set from the training parquet (one-time).
+# Geometry3K has 2101 prompts; we hold out ~10% (200) for periodic evaluation.
+VAL_PARQUET="${PARQUET%.parquet}_val200.parquet"
+ROLLOUT_DIR="${REPO_ROOT_ABS}/outputs/${RUN_ID}/rollouts"
+VAL_DIR="${REPO_ROOT_ABS}/outputs/${RUN_ID}/validation"
+if [ ! -f "${VAL_PARQUET}" ]; then
+    echo "=== Creating validation split: ${VAL_PARQUET} ==="
+    ${CONDA_ENV}/bin/python -c "
+import pandas as pd
+df = pd.read_parquet('${PARQUET}')
+n_val = min(200, len(df) // 10)
+val = df.tail(n_val)
+val.to_parquet('${VAL_PARQUET}', index=False)
+print(f'Val split created: {len(val)} rows (last {n_val} of {len(df)})')
+"
+fi
+mkdir -p "${ROLLOUT_DIR}" "${VAL_DIR}"
+# ──────────────────────────────────────────────────────────────────────────────
 
 # ── GPU math ────────────────────────────────────────────────────────────────
 # GPU 0: Teacher #1 (32B, 66 GB)
@@ -118,7 +148,7 @@ else
     TEACHER_URLS="http://127.0.0.1:${TEACHER_PORT}"
 fi
 VERL_GPUS=${TRAIN_GPUS}
-SAVE_FREQ=25
+SAVE_FREQ=100
 
 # Aligned with VA-OPD: K=8 sibling rollouts, 5 epochs.
 ROLLOUT_N=8
@@ -161,6 +191,10 @@ echo "  Train batch:  ${TRAIN_BATCH_SIZE} (VA-OPD: 16)"
 echo "  LR:           2e-6 (VA-OPD: 2e-6)"
 echo "  GPU layout:   teachers=${NUM_TEACHERS}, train=${VERL_GPU_LIST}"
 echo "  Data:         ${PARQUET}"
+echo "  Val  data:    ${VAL_PARQUET}"
+echo "  Eval freq:    every ${SAVE_FREQ} steps"
+echo "  Rollout dir:  ${ROLLOUT_DIR}"
+echo "  Val dir:      ${VAL_DIR}"
 echo "  Train log:    ${TRAIN_LOG}"
 echo "  Checkpoint:   ${CHECKPOINT_DIR}"
 echo "══════════════════════════════════════════════════════════════"
@@ -237,15 +271,30 @@ export NCCL_IBEXT_DISABLE=1
 export NCCL_BUFFSIZE=4194304
 export NCCL_TIMEOUT=1800
 export TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC=1200
+# ── test-fix overrides ──────────────────────────────────────────────────────
+VERL_EXTRA_ARGS=()
+case "${TEST_FIX}" in
+    ring)
+        echo "=== Test fix: NCCL_ALGO=Ring ==="
+        export NCCL_ALGO=Ring
+        ;;
+    noreshard)
+        echo "=== Test fix: reshard_after_forward=false ==="
+        VERL_EXTRA_ARGS+=(
+            "actor_rollout_ref.actor.fsdp_config.reshard_after_forward=false"
+            "actor_rollout_ref.ref.fsdp_config.reshard_after_forward=false"
+        )
+        ;;
+esac
 CUDA_VISIBLE_DEVICES=${VERL_GPU_LIST} \
 ${CONDA_ENV}/bin/python -m verl.trainer.main_ppo \
     --config-path="${VERL_CONFIG_DIR}" \
     --config-name=ppo_trainer \
     "data.train_files=${PARQUET}" \
-    "data.val_files=${PARQUET}" \
+    "data.val_files=${VAL_PARQUET}" \
     "data.train_batch_size=${TRAIN_BATCH_SIZE}" \
-    "data.max_prompt_length=2048" \
-    "data.max_response_length=1024" \
+    "data.max_prompt_length=8192" \
+    "data.max_response_length=2048" \
     "data.filter_overlong_prompts=false" \
     "data.truncation=error" \
     "data.image_key=images" \
@@ -267,10 +316,12 @@ ${CONDA_ENV}/bin/python -m verl.trainer.main_ppo \
     "actor_rollout_ref.actor.fsdp_config.param_offload=false" \
     "actor_rollout_ref.actor.fsdp_config.optimizer_offload=false" \
     "actor_rollout_ref.actor.fsdp_config.forward_prefetch=true" \
+    "actor_rollout_ref.actor.strategy=fsdp2" \
+    "actor_rollout_ref.ref.strategy=fsdp2" \
     "actor_rollout_ref.rollout.name=vllm" \
     "actor_rollout_ref.rollout.tensor_model_parallel_size=1" \
     "actor_rollout_ref.rollout.gpu_memory_utilization=0.45" \
-    "actor_rollout_ref.rollout.max_model_len=4096" \
+    "actor_rollout_ref.rollout.max_model_len=10240" \
     "actor_rollout_ref.rollout.n=${ROLLOUT_N}" \
     "actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=8" \
     "actor_rollout_ref.rollout.agent.num_workers=4" \
@@ -288,7 +339,7 @@ ${CONDA_ENV}/bin/python -m verl.trainer.main_ppo \
     "algorithm.use_kl_in_reward=false" \
     "+algorithm.fc_opd.post_rollout_hook=dual_track_opd.fc_opd.verl_post_rollout_hook.fc_opd_post_rollout_hook" \
     "+algorithm.fc_opd.compute_hook_loss=false" \
-    "+algorithm.fc_opd.teacher_urls=${TEACHER_URLS}" \
+    "+algorithm.fc_opd.teacher_urls='${TEACHER_URLS}'" \
     "+algorithm.fc_opd.conditions=[full,degraded]" \
     "+algorithm.fc_opd.loss_coef=1.0" \
     "+algorithm.fc_opd.loss_mode=va_opd" \
@@ -303,10 +354,17 @@ ${CONDA_ENV}/bin/python -m verl.trainer.main_ppo \
     "trainer.experiment_name=${RUN_ID}" \
     "trainer.save_freq=${SAVE_FREQ}" \
     "trainer.max_actor_ckpt_to_keep=5" \
-    "trainer.test_freq=-1" \
+    "trainer.test_freq=${SAVE_FREQ}" \
+    "trainer.val_before_train=true" \
+    "trainer.log_val_generations=10" \
+    "trainer.rollout_data_dir=${ROLLOUT_DIR}" \
+    "trainer.validation_data_dir=${VAL_DIR}" \
     "trainer.default_local_dir=${CHECKPOINT_DIR}" \
     "trainer.resume_mode=${RESUME_MODE}" \
-    "trainer.val_before_train=false" \
+    "++actor_rollout_ref.rollout.val_kwargs.n=1" \
+    "++actor_rollout_ref.rollout.val_kwargs.do_sample=false" \
+    "++actor_rollout_ref.rollout.val_kwargs.temperature=0" \
+    "${VERL_EXTRA_ARGS[@]}" \
     2>&1 | tee "${TRAIN_LOG}"
 VERL_EXIT=$?
 
