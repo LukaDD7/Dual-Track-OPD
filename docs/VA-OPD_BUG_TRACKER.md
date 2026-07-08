@@ -27,7 +27,7 @@
 | 11 | **Checkpoint 保存过频** — save_freq=25 时每 ~17 分钟写一次 52 GB checkpoint，1751 步共 ~70 个 checkpoint，IO 压力大、磁盘碎片多。 | 原始设置未考虑 52 GB/checkpoint 的存储成本。 | `save_freq=100`（~70 min/checkpoint，全训练 ~17 个），配合 `max_actor_ckpt_to_keep=5`，峰值磁盘占用 ~260 GB。 | ✅ 已修 | 低。 |
 | 13 | **Score 始终为 0 — prompt 格式与模型不兼容** — Qwen3-VL 预训练用 `\boxed{}` 输出答案，但我们 prompt 要求 `<answer>` 标签，reward 函数也从 `<answer>` 提取。模型默认输出 `\boxed{A}`，reward 找不到 `<answer>`，所有响应 score=0。`val_before_train` 验证分数 0.0，训练无有效 reward 信号。 | Qwen3-VL 预训练数据使用 LaTeX `\boxed{}` 约定。`<answer>` 是与模型预训练行为对抗的格式。模型不愿意使用它——特别是与纯 KL 蒸馏损失（无 GRPO reward 信号）结合时，模型倾向于回归其预训练的输出格式。 | 将 prompt 和 reward 函数都改为业界标准格式：`<think>` 标签用于推理 + `\boxed{}` 用于答案。从 EasyR1、veRL、GAO_grpo、ARPO、MindSpeed-MM 和 Oumi 复制的 prompt 模板。Reward 正则改为 `\\boxed\\{([^}]*)\\}`。验证：`val_before_train` score 从 0.0 → **0.38**（run 051629）。文件：`verl_dataset.py`、`smoke_reward.py`、`verifier.py`。 | ✅ 已修 | 低。`\boxed{}` 是数学 RL 训练的通用标准，所有 Geometry3K 基准测试均使用。 |
 | 14 | **响应截断（1024 tokens）** — `max_response_length=1024` 时 67% 的响应被截断，在到达 `<answer>` 标签之前。Qwen3-VL 32B teacher 验证 `val_before_train` 分数 0.0。 | Geometry3K 数学题需要多步推理。1024 tokens 对于 `<think>` + `\boxed{}` 格式不够，响应在答案出现前被截断。业界标准为 2048 tokens（EasyR1、verl、rLLM）。 | `max_response_length=2048`，`ppo_max_token_len_per_gpu=10240`，`max_model_len=10240`。同样增加 NCCL `nccl_timeout=1800`。 | ✅ 已修 | 低。2048 是业界标准；即使在 2048 时截断也意味着无效响应（参见模式崩溃 #16）。 |
-| 15 | **FSDP2 NCCL allgather 死锁（502M 元素）** — 在 6 GPU 训练时，训练在进行到 step 8–13 时确定性崩溃，`NumelIn=83678470`，`NumelOut=502070820`。3 次独立运行中 bit-identical 崩溃，相同的 SeqNum（10392 或 13012）。4 GPU 训练从未崩溃。**经多次运行验证，该 bug 为概率性触发**：同一配置下旧 run (055809) 存活 29 步，新 run (073445) 仅 2 步即死锁。内存模式完全一致（step1: 59→69GB, step2: 89→105GB），Codex 的 valid_mask 改动未引入新问题。 | FSDP2 使用 `_no_split_modules`（Qwen3VLTextDecoderLayer、Qwen3VLVisionBlock）的 `transformer_auto_wrap_policy`。根 FSDP 单元包含 `embed_tokens`（389M 参数）+ `lm_head` + 视觉非块组件 → 502M 参数 allgather。`reshard_after_forward=false` 不减��初始 allgather 频率（每次 forward 仍需 gather 参数）。NCCL 算法选择在 6-rank 拓扑下对该特定 allgather 规模存在竞态条件。 | 测试了两个缓解措施：(a) **NCCL_ALGO=Ring**：运行了 38 步后模式崩溃（未解决但延长了）。(b) **reshard_after_forward=false**：多次运行存活 2-29 步不等。**当前最优策略：反复重跑直到通过初始死锁窗口**（前 ~30 步），之后概率显著降低。根本修复需 PyTorch/NCCL 补丁或在 `_no_split_modules` 中包含 `embed_tokens`。 | 🔄 重试中 | 高。概率性死锁使每次启动都有风险，但一旦通过早期窗口即可稳定训练。 |
+| 15 | **FSDP2 NCCL allgather 死锁（概率性，非特定大小）** — 6 GPU FSDP 训练中 NCCL allgather 概率性死锁，不同 FSDP 配置下死锁不同规模的 collective。**noreshard**（1×6, fsdp_size=6）：`NumelIn=83678470, NumelOut=502070820`，2-29 步间概率触发。**HSDP3**（2×3, fsdp_size=3，run 102313）：`NumelIn=33659650, NumelOut=100978950`，step 22 触发（1800s 超时后 SIGABRT）。HSDP3 将 allgather 缩到 1/5，推迟了死锁但未根除——证明 bug 不在特定 allgather 大小，而在 NCCL 2.27.3 + CUDA 12.8 + 6-GPU（非 2 的幂）拓扑的更底层交互。4 GPU 训练从未崩溃。HSDP3 run 指标：entropy=1.60 peak（step 17），score=0.69 peak（step 14），clip_ratio=4-17%，VA mean=0.11-0.45。 | 根因不在特定 allgather 规模，而是 NCCL 2.27.3 + CUDA 12.8 在 6-GPU (非 2 的幂) 拓扑下的底层竞态条件。所有缓解措施（Ring、noreshard、HSDP3）均为概率性推迟而非根除。 | 三种缓解措施测试完成：(a) **NCCL_ALGO=Ring**：38 步后模式崩溃。(b) **reshard_after_forward=false**：2-29 步概率死锁。(c) **HSDP3 (fsdp_size=3)**：22 步后死锁于 101M allgather。HSDP3 提供最小 allgather 和最长存活时间，但所有方案均概率性。根本修复需 PyTorch/NCCL 补丁、修改 `_no_split_modules` 包含 `embed_tokens`、或升级 NCCL/CUDA 版本。**建议：多次重试 HSDP3 以通过早期窗口，或降级到 4 GPU 训练。** | 🔄 需决策 | 高。概率性死锁是 FSDP2 + 6 GPU + NCCL 2.27.3 的根本限制。4 GPU 从未崩溃。 |训练在进行到 step 8–13 时确定性崩溃，`NumelIn=83678470`，`NumelOut=502070820`。3 次独立运行中 bit-identical 崩溃，相同的 SeqNum（10392 或 13012）。4 GPU 训练从未崩溃。**经多次运行验证，该 bug 为概率性触发**：同一配置下旧 run (055809) 存活 29 步，新 run (073445) 仅 2 步即死锁。内存模式完全一致（step1: 59→69GB, step2: 89→105GB），Codex 的 valid_mask 改动未引入新问题。 | FSDP2 使用 `_no_split_modules`（Qwen3VLTextDecoderLayer、Qwen3VLVisionBlock）的 `transformer_auto_wrap_policy`。根 FSDP 单元包含 `embed_tokens`（389M 参数）+ `lm_head` + 视觉非块组件 → 502M 参数 allgather。`reshard_after_forward=false` 不减��初始 allgather 频率（每次 forward 仍需 gather 参数）。NCCL 算法选择在 6-rank 拓扑下对该特定 allgather 规模存在竞态条件。 | 测试了两个缓解措施：(a) **NCCL_ALGO=Ring**：运行了 38 步后模式崩溃（未解决但延长了）。(b) **reshard_after_forward=false**：多次运行存活 2-29 步不等。**当前最优策略：反复重跑直到通过初始死锁窗口**（前 ~30 步），之后概率显著降低。根本修复需 PyTorch/NCCL 补丁或在 `_no_split_modules` 中包含 `embed_tokens`。 | 🔄 重试中 | 高。概率性死锁使每次启动都有风险，但一旦通过早期窗口即可稳定训练。 |
 | 16 | **模式崩溃（纯 KL 蒸馏）** — 使用 `<answer>` prompt（run 034544）进行 ring 测试时，熵在 ~15 步内从 0.75 暴跌至 0.003。所有响应达到 max_length 2048（clip_ratio=1.0），score 回到 0.0。VA 信号降至 ~0.002。梯度范数飙升至 16.8。 | 没有有效的 reward 信号（因为 prompt 不匹配 + 截断），纯 teacher KL 蒸馏使模型崩溃到确定性输出——它学习生成保证与 teacher 一致的 2048 个相同 tokens，而不是生成正确答案。这是仅使用蒸馏损失时已知的 failure mode：模式寻求的 reverse KL 在没有 ground-truth reward 锚点的情况下会使分布崩溃。 | Prompt 修复（#13）+ `\boxed{}` 提取应能通过有效的 reward 信号防止崩溃。`reshard_after_forward=false` 的 run 显示早期熵值健康（0.47-0.54），val score=0.38。 | 🔄 验证中 | 高。核心风险：仅有 KL 损失（VA-OPD 是纯蒸馏）在 reward 信号较弱时可能不稳定。在以后的运行中监控 entropy 趋势并设置早期止停。 |
 | 17 | **Teacher 分数修剪/填充对齐** — 每个样本出现 "trimming teacher scores (N₁ → N₂ tokens)" 警告，中位数丢失 33%，极端情况下 2048→220（丢失 89%）。填充警告中位数膨胀 68%，最严重的 27→501（膨胀 1756%）。246 次修剪，236 次填充。 | vLLM 学生 decode → 文本 → teacher re-encode 产生不同 token 计数（BPE 往返问题）。verl 对 response 的截断/填充进一步错位。原来的 `_slice_teacher_topk` 保留 **FIRST N** 个 token（`[:, :target_len, :]`），系统性地丢弃了位于末尾的 `\boxed{}` 答案。 | **改为 "keep last N"**：`[:, -target_len:, :]`。推理：答案 `\boxed{}` 始终在响应末尾。截断时保留 last N 个 token 最大化捕获答案段的概率。仅修改 `_slice_teacher_topk`；`_pad_teacher_topk` 保持末尾填充（因为 verl 做 right-padding，teacher 分数在开头对齐实际 token）。 | ✅ 已修 | 中。短期有效；长期需要 token-level 对齐（teacher forcing alignment）来彻底解决 32B/4B BPE 差异。 | |
 | 19 | **Codex: teacher_valid_mask 修复** — 引入 `valid_mask: [B,T] bool` 到 `TeacherTopK`，标记 teacher-token 对齐可靠的位置。Trim/pad 位置被屏蔽出 loss 计算。验证：run 073445 step1 输出 `teacher_valid_ratio=0.72`（72% 位置有效），GPU 内存未受影响（59/69GB 与旧 run 一致）。NCCL 死锁仍发生在 step2（同一 502M ALLGATHER），确认非 Codex 改动引入。 | 新增字段贯穿全链路：`signal_decomposer.py`(dataclass) → `teacher_transformers.py`(set mask) → `teacher_client.py`(propagate) → `online_batch.py`(_slice/_pad 同步处理 mask) → `verl_integration.py`(condition_weights *= valid_mask) → `va_opd_loss.py`(training_mask = response_mask & teacher_mask)。所有 KL/VA/weight 计算统一使用 `training_mask`。 | 已验证：teacher_valid_ratio 指标正常（0.72），loss 降低（5.75 vs 6.44），GPU 内存无变化。该修复不引入 NCCL 问题。 | ✅ 已验证 | 低。逻辑简单：不可靠对齐位置直接排除出 loss。 | — 在 ring test 运行期间观察到，`nvidia-smi` 在 GPU 1 显示 "Xid 63" 但没有明显影响。GPU 保持全功能，训练继续。 | Xid 63 = 页表溢出（GPU 页表无法容纳所有映射）。在 ~76GB/143GB GPU 内存使用量时发生，远低于容量。可能是碎片化或罕见的 H200 问题。未重现。 | 无需操作。不会导致崩溃或性能下降。 | ℹ️ 监控 | 低。如果频率增加，调查 GPU 内存碎片化。 | — 4 GPU FSDP2 从零训练 68 步时 entropy=0.008，但切换到 8 GPU 后从零训练的早期步（step 9-15）entropy=0.45-0.79，之后快速降至 0.005。 | 正常现象：训练初期模型输出分布波动大，entropy 在步间有噪声。8 GPU 的 TRAIN_BATCH_SIZE=6 与 4 GPU 一致，但 GPU 更多导致 FSDP shard 更小、allgather 更碎，可能影响早期梯度同步精度。但 30 步后 entropy 正常收敛，不影响最终结果。 | 无需处理，已自愈。 | ✅ 自愈 | 低。 |
@@ -58,7 +58,9 @@
             
             FSDP2 NCCL allgather 死锁 (NumelIn=83678470, NumelOut=502070820)
             测试 NCCL_ALGO=Ring: 运行 38 步后模式崩溃 (entropy 0.75→0.003)
-            测试 reshard_after_forward=false: 正在运行中 (step 3+, score=0.48)
+            测试 reshard_after_forward=false: 多次运行 2-29 步概率死锁
+            测试 HSDP3 (fsdp_size=3): allgather 502M→101M, 22 步后仍死锁 (NumelIn=33659650)
+            确认：NCCL 2.27.3 + CUDA 12.8 + 6-GPU 拓扑概率性死锁，所有缓解措施均推迟而非根除
             
             添加 --name 和 --test-fix 标志以区分运行和测试死锁修复
             模式崩溃根因：无 reward 信号的纯 KL 蒸馏 → 确定性输出
@@ -72,7 +74,7 @@
 
 ---
 
-## Current Config (Final — FSDP2 + noreshard + \boxed{})
+## Current Config (FSDP2 + HSDP3 recommended + \boxed{})
 
 ```bash
 # Strategy: FSDP2 (per-parameter sharding)
@@ -84,9 +86,14 @@ actor_rollout_ref.actor.fsdp_config.param_offload=false
 actor_rollout_ref.actor.fsdp_config.optimizer_offload=false
 actor_rollout_ref.actor.fsdp_config.forward_prefetch=true
 
-# Deadlock workaround: reduce allgather frequency
-actor_rollout_ref.actor.fsdp_config.reshard_after_forward=false
-actor_rollout_ref.ref.fsdp_config.reshard_after_forward=false
+# Deadlock workaround: HSDP3 (2 FSDP groups × 3 GPUs, allgather 502M→101M)
+# Use: --test-fix hsdp3
+actor_rollout_ref.actor.fsdp_config.fsdp_size=3
+actor_rollout_ref.ref.fsdp_config.fsdp_size=3
+
+# Fallback: noreshard (1×6, 502M allgather, more memory)
+# actor_rollout_ref.actor.fsdp_config.reshard_after_forward=false
+# actor_rollout_ref.ref.fsdp_config.reshard_after_forward=false
 
 # GPU memory
 actor_rollout_ref.rollout.gpu_memory_utilization=0.45
