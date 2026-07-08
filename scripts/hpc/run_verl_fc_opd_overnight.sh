@@ -40,7 +40,7 @@ RESUME_CKPT=""
 NUM_EPOCHS=5
 DATASET_SIZE=2101
 NAME_TAG=""
-TEST_FIX=""  # ring | noreshard | none
+TEST_FIX=""  # ring | noreshard | hsdp3 | none
 
 # ── parse args ──────────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
@@ -49,7 +49,7 @@ while [[ $# -gt 0 ]]; do
         --steps)      NUM_STEPS="${2:?--steps needs a value}"; shift 2 ;;
         --data)       PARQUET_OVERRIDE="${2:?--data needs a path}"; shift 2 ;;
         --name)       NAME_TAG="_${2:?--name needs a value}"; shift 2 ;;
-        --test-fix)   TEST_FIX="${2:?--test-fix needs ring|noreshard}"; NAME_TAG="${NAME_TAG}_${2}"; shift 2 ;;
+        --test-fix)   TEST_FIX="${2:?--test-fix needs ring|noreshard|hsdp3}"; NAME_TAG="${NAME_TAG}_${2}"; shift 2 ;;
         --resume)     RESUME_CKPT="${2:?--resume needs a checkpoint dir}"; shift 2 ;;
         --keepalive) KEEPALIVE_SEC=86400; shift ;;
         --background) RUN_BACKGROUND=true; shift ;;
@@ -283,6 +283,17 @@ case "${TEST_FIX}" in
         VERL_EXTRA_ARGS+=(
             "actor_rollout_ref.actor.fsdp_config.reshard_after_forward=false"
             "actor_rollout_ref.ref.fsdp_config.reshard_after_forward=false"
+        )
+        ;;
+    hsdp3)
+        echo "=== Test fix: HSDP with fsdp_size=3 (3-rank FSDP groups) ==="
+        if (( VERL_GPUS % 3 != 0 )); then
+            echo "FATAL: --test-fix hsdp3 requires the number of training GPUs to be divisible by 3; got ${VERL_GPUS}"
+            exit 1
+        fi
+        VERL_EXTRA_ARGS+=(
+            "actor_rollout_ref.actor.fsdp_config.fsdp_size=3"
+            "actor_rollout_ref.ref.fsdp_config.fsdp_size=3"
         )
         ;;
 esac
