@@ -377,14 +377,25 @@ def _validate_teacher_scores(
 
 
 def _slice_teacher_topk(score: TeacherTopK, target_len: int) -> TeacherTopK:
-    """Trim teacher scores to exactly *target_len* response positions."""
+    """Trim teacher scores to exactly *target_len* response positions.
+
+    **Keep last N tokens** (``[:, -target_len:, :]``), not first N.
+
+    Reasoning: the answer (``\\boxed{...}``) is always at the **end** of the
+    response. When the teacher scored more positions than the sample's
+    ``response_token_ids`` (BPE round-trip mismatch or verl truncation),
+    discarding the *first* tokens preserves the answer section and its
+    teacher quality signal.  The previous "keep first N" behaviour
+    systematically discarded ``\\boxed{}`` answers for long responses,
+    causing 89% score loss in extreme cases (teacher 2048 → sample 220).
+    """
     return TeacherTopK(
-        token_ids=score.token_ids[:, :target_len, :],
-        log_probs=score.log_probs[:, :target_len, :],
-        tail_log_prob=score.tail_log_prob[:, :target_len] if score.tail_log_prob is not None else None,
-        entropy=score.entropy[:, :target_len] if score.entropy is not None else None,
+        token_ids=score.token_ids[:, -target_len:, :],
+        log_probs=score.log_probs[:, -target_len:, :],
+        tail_log_prob=score.tail_log_prob[:, -target_len:] if score.tail_log_prob is not None else None,
+        entropy=score.entropy[:, -target_len:] if score.entropy is not None else None,
         sampled_log_probs=(
-            score.sampled_log_probs[:, :target_len] if score.sampled_log_probs is not None else None
+            score.sampled_log_probs[:, -target_len:] if score.sampled_log_probs is not None else None
         ),
     )
 

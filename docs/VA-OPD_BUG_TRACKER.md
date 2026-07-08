@@ -29,7 +29,7 @@
 | 14 | **响应截断（1024 tokens）** — `max_response_length=1024` 时 67% 的响应被截断，在到达 `<answer>` 标签之前。Qwen3-VL 32B teacher 验证 `val_before_train` 分数 0.0。 | Geometry3K 数学题需要多步推理。1024 tokens 对于 `<think>` + `\boxed{}` 格式不够，响应在答案出现前被截断。业界标准为 2048 tokens（EasyR1、verl、rLLM）。 | `max_response_length=2048`，`ppo_max_token_len_per_gpu=10240`，`max_model_len=10240`。同样增加 NCCL `nccl_timeout=1800`。 | ✅ 已修 | 低。2048 是业界标准；即使在 2048 时截断也意味着无效响应（参见模式崩溃 #16）。 |
 | 15 | **FSDP2 NCCL allgather 死锁（502M 元素）** — 在 6 GPU 训练时，训练在进行到 step 8–13 时确定性崩溃，`NumelIn=83678470`，`NumelOut=502070820`。3 次独立运行中 bit-identical 崩溃，相同的 SeqNum（10392 或 13012）。4 GPU 训练从未崩溃。 | FSDP2 使用 `_no_split_modules`（Qwen3VLTextDecoderLayer、Qwen3VLVisionBlock）的 `transformer_auto_wrap_policy`。根 FSDP 单元包含 `embed_tokens`（389M 参数）+ `lm_head` + 视觉非块组件 → 502M 参数 allgather。6 个 rank 使 NCCL 选择了一个有 bug 的 allgather 算法路径，该路径在 83.7M 元素/rank 时死锁。 | 测试了两个缓解措施：(a) **NCCL_ALGO=Ring**：运行了 38 步后崩溃（虽未解决但延长了运行时间）。不同 run 间（step 8 vs step 38）行为不一致。(b) **reshard_after_forward=false**：**当前正在测试中**（run 051629，存活到 step 3+）。保持前向后的参数全部存在 GPU 上，减少了 allgather 频率。权衡：GPU 内存从 86GB → 105GB 预留（仍在 H200 141GB 范围内）。 | 🔄 测试中 (noshard) | 高。如果 noshard 修复了但以后 GPU 内存容量放缓需重新评估。长期根本修复可能需要 PyTorch/NCCL 补丁或在 `_no_split_modules` 中包含 `embed_tokens` 以防止巨型根 FSDP 单元。 |
 | 16 | **模式崩溃（纯 KL 蒸馏）** — 使用 `<answer>` prompt（run 034544）进行 ring 测试时，熵在 ~15 步内从 0.75 暴跌至 0.003。所有响应达到 max_length 2048（clip_ratio=1.0），score 回到 0.0。VA 信号降至 ~0.002。梯度范数飙升至 16.8。 | 没有有效的 reward 信号（因为 prompt 不匹配 + 截断），纯 teacher KL 蒸馏使模型崩溃到确定性输出——它学习生成保证与 teacher 一致的 2048 个相同 tokens，而不是生成正确答案。这是仅使用蒸馏损失时已知的 failure mode：模式寻求的 reverse KL 在没有 ground-truth reward 锚点的情况下会使分布崩溃。 | Prompt 修复（#13）+ `\boxed{}` 提取应能通过有效的 reward 信号防止崩溃。`reshard_after_forward=false` 的 run 显示早期熵值健康（0.47-0.54），val score=0.38。 | 🔄 验证中 | 高。核心风险：仅有 KL 损失（VA-OPD 是纯蒸馏）在 reward 信号较弱时可能不稳定。在以后的运行中监控 entropy 趋势并设置早期止停。 |
-| 17 | **Teacher 分数修剪/填充对齐** — 每个样本出现 "trimming teacher scores (N₁ → N₂ tokens)" 警告，通常丢弃 40-60% 的 token。在大量 teacher token 无法匹配的短学生序列上也出现 "padding teacher scores" 警告。 | vLLM 学生 decode → 文本 → teacher re-encode 会产生不同的 token 计数（BPE 往返问题），即使是相同的 tokenizer。当前代码保留 **FIRST N** 个 token（`_slice_teacher_topk` 的 `[:, :target_len, :]`），在末尾丢弃答案。学生生成 2048 tokens，但 teacher 为同一段文本编码了 2048+ tokens → 修剪丢弃末尾 → 答案丢失，tail padding 质量为零。 | 未修复。业界标准是 "keep last N"（保留答案）或基于对齐的方法（teacher forcing 将学生 token 与 teacher token 对齐）。推迟至训练稳定后处理。 | ⚠️ 推迟 | 高。修剪正在移除答案 section——与 #14 截断问题直接叠加。 |
+| 17 | **Teacher 分数修剪/填充对齐** — 每个样本出现 "trimming teacher scores (N₁ → N₂ tokens)" 警告，中位数丢失 33%，极端情况下 2048→220（丢失 89%）。填充警告中位数膨胀 68%，最严重的 27→501（膨胀 1756%）。246 次修剪，236 次填充。 | vLLM 学生 decode → 文本 → teacher re-encode 产生不同 token 计数（BPE 往返问题）。verl 对 response 的截断/填充进一步错位。原来的 `_slice_teacher_topk` 保留 **FIRST N** 个 token（`[:, :target_len, :]`），系统性地丢弃了位于末尾的 `\boxed{}` 答案。 | **改为 "keep last N"**：`[:, -target_len:, :]`。推理：答案 `\boxed{}` 始终在响应末尾。截断时保留 last N 个 token 最大化捕获答案段的概率。仅修改 `_slice_teacher_topk`；`_pad_teacher_topk` 保持末尾填充（因为 verl 做 right-padding，teacher 分数在开头对齐实际 token）。 | ✅ 已修 | 中。短期有效；长期需要 token-level 对齐（teacher forcing alignment）来彻底解决 32B/4B BPE 差异。 | |
 | 18 | **GPU 1 触发 Xid 63（杂散）** — 在 ring test 运行期间观察到，`nvidia-smi` 在 GPU 1 显示 "Xid 63" 但没有明显影响。GPU 保持全功能，训练继续。 | Xid 63 = 页表溢出（GPU 页表无法容纳所有映射）。在 ~76GB/143GB GPU 内存使用量时发生，远低于容量。可能是碎片化或罕见的 H200 问题。未重现。 | 无需操作。不会导致崩溃或性能下降。 | ℹ️ 监控 | 低。如果频率增加，调查 GPU 内存碎片化。 | — 4 GPU FSDP2 从零训练 68 步时 entropy=0.008，但切换到 8 GPU 后从零训练的早期步（step 9-15）entropy=0.45-0.79，之后快速降至 0.005。 | 正常现象：训练初期模型输出分布波动大，entropy 在步间有噪声。8 GPU 的 TRAIN_BATCH_SIZE=6 与 4 GPU 一致，但 GPU 更多导致 FSDP shard 更小、allgather 更碎，可能影响早期梯度同步精度。但 30 步后 entropy 正常收敛，不影响最终结果。 | 无需处理，已自愈。 | ✅ 自愈 | 低。 |
 
 ---
@@ -62,7 +62,8 @@
             
             添加 --name 和 --test-fix 标志以区分运行和测试死锁修复
             模式崩溃根因：无 reward 信号的纯 KL 蒸馏 → 确定性输出
-            Trim/pad 对齐问题已识别但推迟 (业界使用 "keep last N")
+            Trim/pad 对齐问题：_slice_teacher_topk "keep first N" → "keep last N"
+            根本原因：答案 \boxed{} 在末尾，"keep first" 系统性丢弃答案
 ```
 
 ---
@@ -119,4 +120,4 @@ trainer.max_actor_ckpt_to_keep=5
 
 5. **`reshard_after_forward=false` 是 FSDP2 死锁的务实缓解方案**：根 FSDP 单元 502M 参数的 allgather 触发了 NCCL bug。减少 allgather 频率（forward 后保持参数在 GPU 上）以 GPU 内存换取稳定性。4B 模型 8GB 加上 Adam 状态 32GB，在 105GB 时就达到峰值 GPU 内存——仍在 141GB H200 安全范围内。
 
-6. **修剪（trimming）是悬而未决的问题**：保留 "first N" 丢弃了答案。当 score 信号足够强时（`\boxed{}` 修复后），模型可能会学会将答案放在响应早期。如果之后 score 仍然被截断，就实施 "keep last N"。
+6. **修剪（trimming）已修复**：将 `_slice_teacher_topk` 从 "keep first N" 改为 "keep last N"。因为答案是 `\boxed{}` 始终在响应末尾，保留 last N 最大化捕获答案段。填充（pad）保持末尾追加（verl 做 right-padding，teacher 分数已对齐到开头 token）。
