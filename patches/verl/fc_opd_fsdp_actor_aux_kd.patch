@@ -110,6 +110,7 @@
 +                "fc_teacher_topk_log_probs",
 +                "fc_teacher_tail_log_prob",
 +                "fc_teacher_sampled_log_probs",
++                "fc_teacher_valid_mask",
 +                "fc_condition_weights",
 +                "fc_rollout_weights",
 +                "fc_opd_coef",

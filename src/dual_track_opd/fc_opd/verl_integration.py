@@ -14,6 +14,7 @@ import torch
 
 from .conditions import Condition
 from .online_batch import OnlineFCOPDBatchOutput, OnlineFCOPDSampleOutput
+from .signal_decomposer import TeacherTopK
 
 
 DEFAULT_VERL_CONDITION_ORDER: tuple[Condition, ...] = (
@@ -37,6 +38,7 @@ class VerlFCOPDTensors:
     condition_ids: torch.Tensor
     teacher_tail_log_prob: torch.Tensor | None = None
     teacher_sampled_log_probs: torch.Tensor | None = None  # [B,C,T] exact log P_T(y_t|cond)
+    teacher_valid_mask: torch.Tensor | None = None  # [B,C,T] reliable teacher-token positions
 
     def as_batch_dict(self) -> dict[str, torch.Tensor]:
         tensors = {
@@ -49,6 +51,8 @@ class VerlFCOPDTensors:
             tensors["fc_teacher_tail_log_prob"] = self.teacher_tail_log_prob
         if self.teacher_sampled_log_probs is not None:
             tensors["fc_teacher_sampled_log_probs"] = self.teacher_sampled_log_probs
+        if self.teacher_valid_mask is not None:
+            tensors["fc_teacher_valid_mask"] = self.teacher_valid_mask
         return tensors
 
 
@@ -98,6 +102,7 @@ def online_sample_outputs_to_verl_tensors(
     condition_weights = []
     tail_blocks = []
     sampled_lp_blocks = []
+    valid_mask_blocks = []
     has_any_tail = False
     for sample in samples:
         sample_seq_len = sample.response_token_ids.shape[-1]
@@ -108,6 +113,7 @@ def online_sample_outputs_to_verl_tensors(
         sample_weights = []
         sample_tails = []
         sample_sampled_lp = []
+        sample_valid_masks = []
         for condition in normalized_order:
             if condition not in sample.teacher_scores:
                 raise ValueError(f"{sample.sample_uid}: missing teacher scores for {condition.value}")
@@ -140,11 +146,16 @@ def online_sample_outputs_to_verl_tensors(
                 sample_sampled_lp.append(sample_slp.to(device=device, dtype=torch.float32))
             else:
                 sample_sampled_lp.append(torch.full((seq_len,), -30.0, dtype=torch.float32, device=device))
+            valid_mask = _teacher_valid_mask(teacher).squeeze(0)
+            valid_mask = _pad_bool_vector(valid_mask, seq_len, pad_value=False).to(device=device)
+            sample_valid_masks.append(valid_mask)
         topk_ids.append(torch.stack(sample_ids, dim=0))
         topk_log_probs.append(torch.stack(sample_log_probs, dim=0))
-        condition_weights.append(torch.stack(sample_weights, dim=0))
+        stacked_sample_valid = torch.stack(sample_valid_masks, dim=0).float()
+        condition_weights.append(torch.stack(sample_weights, dim=0) * stacked_sample_valid)
         tail_blocks.append(torch.stack(sample_tails, dim=0))
         sampled_lp_blocks.append(torch.stack(sample_sampled_lp, dim=0))
+        valid_mask_blocks.append(torch.stack(sample_valid_masks, dim=0))
 
     condition_ids = torch.tensor(
         [VERL_CONDITION_IDS.get(condition, -1) for condition in normalized_order],
@@ -166,6 +177,7 @@ def online_sample_outputs_to_verl_tensors(
         condition_ids=condition_ids,
         teacher_tail_log_prob=torch.stack(tail_blocks, dim=0) if has_any_tail else None,
         teacher_sampled_log_probs=torch.stack(sampled_lp_blocks, dim=0),  # [B,C,T]
+        teacher_valid_mask=torch.stack(valid_mask_blocks, dim=0),
     )
 
 
@@ -194,3 +206,17 @@ def _pad_vector(values: torch.Tensor, seq_len: int, *, pad_value: float = 0.0) -
         return values
     pad = torch.full((seq_len - values.shape[0],), pad_value, dtype=values.dtype, device=values.device)
     return torch.cat([values, pad], dim=0)
+
+
+def _pad_bool_vector(values: torch.Tensor, seq_len: int, *, pad_value: bool) -> torch.Tensor:
+    values = values.bool()
+    if values.shape[0] == seq_len:
+        return values
+    pad = torch.full((seq_len - values.shape[0],), pad_value, dtype=torch.bool, device=values.device)
+    return torch.cat([values, pad], dim=0)
+
+
+def _teacher_valid_mask(teacher: TeacherTopK) -> torch.Tensor:
+    if teacher.valid_mask is not None:
+        return teacher.valid_mask.bool()
+    return torch.ones(teacher.token_ids.shape[:2], dtype=torch.bool, device=teacher.token_ids.device)

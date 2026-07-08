@@ -188,4 +188,5 @@ def _topk_from_response(response: TeacherScoreResponse) -> TeacherTopK:
         ),
         entropy=torch.tensor([response.teacher_entropy], dtype=torch.float32),
         sampled_log_probs=torch.tensor([response.sampled_token_log_probs], dtype=torch.float32),
+        valid_mask=torch.ones((1, len(response.token_ids)), dtype=torch.bool),
     )

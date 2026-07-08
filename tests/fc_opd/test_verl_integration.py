@@ -55,9 +55,46 @@ def test_online_outputs_stack_to_verl_tensor_schema():
     assert tensors.teacher_topk_indices.shape == (1, 2, 2, 2)
     assert tensors.teacher_topk_log_probs.shape == (1, 2, 2, 2)
     assert tensors.condition_weights.shape == (1, 2, 2)
+    assert tensors.teacher_valid_mask is not None
+    assert tensors.teacher_valid_mask.shape == (1, 2, 2)
     assert tensors.teacher_tail_log_prob is not None
     assert tensors.teacher_tail_log_prob.shape == (1, 2, 2)
     assert tensors.as_batch_dict()["fc_condition_ids"].tolist() == [0, 1]
+
+
+def test_teacher_valid_mask_zeroes_condition_weights():
+    sample = _sample_output()
+    teacher = dict(sample.teacher_scores)
+    teacher[Condition.FULL] = TeacherTopK(
+        token_ids=teacher[Condition.FULL].token_ids,
+        log_probs=teacher[Condition.FULL].log_probs,
+        tail_log_prob=teacher[Condition.FULL].tail_log_prob,
+        valid_mask=torch.tensor([[True, False]]),
+    )
+    sample = OnlineFCOPDSampleOutput(
+        sample_uid=sample.sample_uid,
+        response_token_ids=sample.response_token_ids,
+        teacher_scores=teacher,
+        student_scores=sample.student_scores,
+        capability_scores=sample.capability_scores,
+        verifier=sample.verifier,
+        verifier_learning_value_gate=sample.verifier_learning_value_gate,
+        condition_weights=sample.condition_weights,
+        chunk_masks=sample.chunk_masks,
+        grouped_loss_tensors=sample.grouped_loss_tensors,
+        loss=sample.loss,
+        metrics=sample.metrics,
+    )
+    batch = OnlineFCOPDBatchOutput(samples=(sample,), loss=torch.tensor(0.0), metrics={})
+
+    tensors = online_batch_output_to_verl_tensors(
+        batch,
+        condition_order=(Condition.FULL, Condition.DEGRADED),
+    )
+
+    assert tensors.teacher_valid_mask is not None
+    assert tensors.teacher_valid_mask[0, 0].tolist() == [True, False]
+    assert tensors.condition_weights[0, 0].tolist() == [1.0, 0.0]
 
 
 def test_verl_sparse_kd_is_zero_for_matching_topk_distribution():

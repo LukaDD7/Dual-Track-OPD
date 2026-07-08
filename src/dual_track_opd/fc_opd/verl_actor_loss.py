@@ -92,26 +92,30 @@ def _compute_va_opd_actor_loss(
     degraded_idx = _condition_position(batch, Condition.DEGRADED)
 
     tail = batch.get("fc_teacher_tail_log_prob", None)
+    teacher_valid = batch.get("fc_teacher_valid_mask", None)
     teacher_full = TeacherTopK(
         token_ids=batch["fc_teacher_topk_indices"][:, full_idx],
         log_probs=batch["fc_teacher_topk_log_probs"][:, full_idx],
         tail_log_prob=None if tail is None else tail[:, full_idx],
         sampled_log_probs=sampled_log_probs[:, full_idx],
+        valid_mask=None if teacher_valid is None else teacher_valid[:, full_idx],
     )
     teacher_degraded = TeacherTopK(
         token_ids=batch["fc_teacher_topk_indices"][:, degraded_idx],
         log_probs=batch["fc_teacher_topk_log_probs"][:, degraded_idx],
         tail_log_prob=None if tail is None else tail[:, degraded_idx],
         sampled_log_probs=sampled_log_probs[:, degraded_idx],
+        valid_mask=None if teacher_valid is None else teacher_valid[:, degraded_idx],
     )
 
     rollout_weights = batch.get("fc_rollout_weights", None)
     prompt_ids = _prompt_ids(batch) if rollout_weights is None else None
     if rollout_weights is None:
         va_pos = (sampled_log_probs[:, full_idx] - sampled_log_probs[:, degraded_idx]).clamp_min(0.0)
+        teacher_mask = _teacher_pair_valid_mask(teacher_full, teacher_degraded, response_mask)
         rollout_weights = compute_rollout_va_weights(
             va_pos,
-            response_mask=response_mask,
+            response_mask=response_mask.bool() & teacher_mask,
             prompt_ids=prompt_ids,
             tau=float(fc_config.get("tau_rollout", 1.0)),
         )
@@ -148,6 +152,19 @@ def _put_row_values_on_first_valid_token(values: torch.Tensor, response_mask: to
     has_valid = valid.any(dim=1)
     carrier[rows[has_valid], first[has_valid]] = values.to(carrier.device, dtype=torch.float32)[has_valid]
     return carrier
+
+
+def _teacher_pair_valid_mask(
+    teacher_full: TeacherTopK,
+    teacher_degraded: TeacherTopK,
+    response_mask: torch.Tensor,
+) -> torch.Tensor:
+    mask = torch.ones_like(response_mask, dtype=torch.bool)
+    if teacher_full.valid_mask is not None:
+        mask = mask & teacher_full.valid_mask.to(device=response_mask.device, dtype=torch.bool)
+    if teacher_degraded.valid_mask is not None:
+        mask = mask & teacher_degraded.valid_mask.to(device=response_mask.device, dtype=torch.bool)
+    return mask
 
 
 def _condition_position(batch: Mapping[str, Any], condition: Condition) -> int:

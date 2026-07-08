@@ -221,9 +221,8 @@ def _compute_online_sample(
         response_ids_device = response_token_ids.to(target_device)
         response_mask = response_mask.to(target_device)
         # Uniform condition weights: all response tokens weighted equally
-        C = len(config.conditions)
         condition_weights = {
-            Condition(c): torch.ones(1, T, device=target_device)
+            Condition(c): _teacher_valid_mask(teacher_scores[Condition(c)]).to(target_device, dtype=torch.float32)
             for c in config.conditions
         }
         loss = torch.zeros((), dtype=torch.float32, device=target_device)
@@ -397,6 +396,9 @@ def _slice_teacher_topk(score: TeacherTopK, target_len: int) -> TeacherTopK:
         sampled_log_probs=(
             score.sampled_log_probs[:, -target_len:] if score.sampled_log_probs is not None else None
         ),
+        valid_mask=(
+            _teacher_valid_mask(score)[:, -target_len:]
+        ),
     )
 
 
@@ -424,6 +426,8 @@ def _pad_teacher_topk(score: TeacherTopK, target_len: int) -> TeacherTopK:
         torch.full((1, pad_len), -30.0, dtype=score.sampled_log_probs.dtype, device=device)
         if score.sampled_log_probs is not None else None
     )
+    valid = _teacher_valid_mask(score).to(device=device)
+    pad_valid = torch.zeros(1, pad_len, dtype=torch.bool, device=device)
     return TeacherTopK(
         token_ids=torch.cat([score.token_ids, pad_ids], dim=1),
         log_probs=torch.cat([score.log_probs, pad_log], dim=1),
@@ -433,6 +437,7 @@ def _pad_teacher_topk(score: TeacherTopK, target_len: int) -> TeacherTopK:
             torch.cat([score.sampled_log_probs, pad_slp], dim=1)
             if score.sampled_log_probs is not None else None
         ),
+        valid_mask=torch.cat([valid, pad_valid], dim=1),
     )
 
 
@@ -455,7 +460,14 @@ def _topk_to_device(score: TeacherTopK, device: torch.device) -> TeacherTopK:
         sampled_log_probs=(
             None if score.sampled_log_probs is None else score.sampled_log_probs.to(device)
         ),
+        valid_mask=None if score.valid_mask is None else score.valid_mask.to(device),
     )
+
+
+def _teacher_valid_mask(score: TeacherTopK) -> torch.Tensor:
+    if score.valid_mask is not None:
+        return score.valid_mask.bool()
+    return torch.ones(score.token_ids.shape[:2], dtype=torch.bool, device=score.token_ids.device)
 
 
 def _actual_logprob_blocks_from_teacher(

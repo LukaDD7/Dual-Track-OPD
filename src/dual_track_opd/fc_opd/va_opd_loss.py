@@ -166,6 +166,13 @@ def compute_va_opd_loss(
         )
     response_mask = response_mask.bool()
     B, T = response_mask.shape
+    teacher_mask = _teacher_pair_valid_mask(
+        teacher_full,
+        teacher_degraded,
+        shape=(B, T),
+        device=student_logits.device,
+    )
+    training_mask = response_mask & teacher_mask
 
     # ── 1. Per-token REVERSE KL (P_S || P_T) — mode-seeking, §3.3 ────────
     # Reverse KL = KL(P_student || P_teacher), preferred for distillation.
@@ -174,7 +181,7 @@ def compute_va_opd_loss(
         teacher_topk_indices=teacher_full.token_ids.unsqueeze(1),   # [B, 1, T, K]
         teacher_topk_log_probs=teacher_full.log_probs.unsqueeze(1), # [B, 1, T, K]
         condition_weights=torch.ones(B, 1, T, device=student_logits.device),
-        response_mask=response_mask,
+        response_mask=training_mask,
         teacher_tail_log_prob=(
             teacher_full.tail_log_prob.unsqueeze(1)                 # [B, 1, T]
             if teacher_full.tail_log_prob is not None else None
@@ -195,7 +202,7 @@ def compute_va_opd_loss(
     # ── 3. Rollout weights: ā → ẑ → w = softmax(ẑ/τ) §3.2 ───────────────
     if rollout_weights is None:
         rollout_weights = compute_rollout_va_weights(
-            va_pos, response_mask=response_mask, prompt_ids=prompt_ids, tau=tau_rollout,
+            va_pos, response_mask=training_mask, prompt_ids=prompt_ids, tau=tau_rollout,
         )  # [B]
     else:
         rollout_weights = rollout_weights.to(device=student_logits.device, dtype=torch.float32)
@@ -203,7 +210,7 @@ def compute_va_opd_loss(
             raise ValueError("rollout_weights must have shape [B]")
 
     # ── 4. HighVA / LowVA grouped reverse KL §3.3 ────────────────────────
-    high, low = split_high_low_va(va_pos, mask=response_mask, top_q=top_q,
+    high, low = split_high_low_va(va_pos, mask=training_mask, top_q=top_q,
                                    min_high_tokens=min_high_tokens)
 
     numerator = torch.zeros((), dtype=torch.float32, device=student_logits.device)
@@ -240,9 +247,13 @@ def compute_va_opd_loss(
         "va_opd/loss": loss.detach(),
         "va_opd/token_mean_loss": token_mean.detach(),
         "va_opd/rollout_weight_sum": rollout_weights.sum().detach().item(),
-        "va/mean": _masked_mean(va_pos, response_mask).detach(),
-        "va/sparsity": ((va_pos <= 0) & response_mask).float().sum() /
-                       response_mask.float().sum().clamp_min(1.0),
+        "va/mean": _masked_mean(va_pos, training_mask).detach(),
+        "va/sparsity": ((va_pos <= 0) & training_mask).float().sum() /
+                       training_mask.float().sum().clamp_min(1.0),
+        "teacher_valid_ratio": (
+            (teacher_mask & response_mask).float().sum() /
+            response_mask.float().sum().clamp_min(1.0)
+        ).detach(),
     }
 
     return VAOPDLossResult(
@@ -271,6 +282,21 @@ def _masked_mean(values: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     if selected.numel() == 0:
         return torch.zeros((), dtype=torch.float32, device=values.device)
     return selected.float().mean()
+
+
+def _teacher_pair_valid_mask(
+    teacher_full: TeacherTopK,
+    teacher_degraded: TeacherTopK,
+    *,
+    shape: tuple[int, int],
+    device: torch.device,
+) -> torch.Tensor:
+    mask = torch.ones(shape, dtype=torch.bool, device=device)
+    if teacher_full.valid_mask is not None:
+        mask = mask & teacher_full.valid_mask.to(device=device, dtype=torch.bool)
+    if teacher_degraded.valid_mask is not None:
+        mask = mask & teacher_degraded.valid_mask.to(device=device, dtype=torch.bool)
+    return mask
 
 
 def _prompt_groups(

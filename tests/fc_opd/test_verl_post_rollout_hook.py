@@ -54,6 +54,12 @@ class RecordingTeacher:
         return {Condition(condition): _teacher_topk(sample.rollout_token_ids, 0.8) for condition in conditions}
 
 
+class ShortTeacher:
+    def __call__(self, sample, conditions):
+        shortened = sample.rollout_token_ids[:-1]
+        return {Condition(condition): _teacher_topk(shortened, 0.8) for condition in conditions}
+
+
 class RecordingStudent:
     def __init__(self):
         self.calls = []
@@ -184,3 +190,40 @@ def test_post_rollout_hook_va_path_skips_student_scorer_and_records_prompt_ids()
     assert batch.non_tensor_batch["fc_opd_loss_mode"].tolist() == ["va_opd"]
     assert batch.non_tensor_batch["fc_prompt_ids"].tolist() == ["prompt-1"]
     assert metrics["fc_opd/hook_num_samples"] == 1.0
+
+
+def test_post_rollout_hook_masks_teacher_padding_in_va_path():
+    tokenizer = ByteTokenizer()
+    valid_ids = tuple(tokenizer.encode("A B C"))
+    responses = torch.tensor([valid_ids], dtype=torch.long)
+    response_mask = torch.ones_like(responses, dtype=torch.bool)
+    batch = SimpleNamespace(
+        batch={"responses": responses, "response_mask": response_mask},
+        non_tensor_batch={
+            "uid": ["prompt-1"],
+            "question": ["Find the angle.\n\nChoices: A. 30 B. 40"],
+            "condition_inputs": [_condition_inputs().to_dict()],
+        },
+    )
+
+    updated, metrics = fc_opd_post_rollout_hook(
+        batch=batch,
+        tokenizer=tokenizer,
+        processor=None,
+        config={
+            "algorithm": {
+                "fc_opd": {
+                    "teacher_scorer": ShortTeacher(),
+                    "conditions": ["full", "degraded"],
+                    "loss_mode": "va_opd",
+                }
+            }
+        },
+        global_steps=7,
+    )
+
+    assert updated is batch
+    assert batch.batch["fc_teacher_valid_mask"].shape == (1, 2, len(valid_ids))
+    assert batch.batch["fc_teacher_valid_mask"][0, :, -1].sum().item() == 0
+    assert batch.batch["fc_condition_weights"][0, :, -1].sum().item() == 0.0
+    assert metrics["fc_opd/teacher_valid_ratio"] < 1.0

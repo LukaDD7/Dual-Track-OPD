@@ -46,6 +46,7 @@ fc_teacher_topk_indices    [B, C, T, K] int64
 fc_teacher_topk_log_probs  [B, C, T, K] float32
 fc_teacher_tail_log_prob   [B, C, T]    float32, optional
 fc_teacher_sampled_log_probs [B, C, T]  float32, required for VA-OPD
+fc_teacher_valid_mask      [B, C, T]    bool, masks teacher padding/misalignment
 fc_condition_weights       [B, C, T]    float32
 fc_rollout_weights         [B]          float32, required for VA-OPD actor path
 fc_condition_ids           [B, C]       int64, non-tensor batch

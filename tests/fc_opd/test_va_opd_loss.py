@@ -1,4 +1,5 @@
 import math
+from dataclasses import replace
 
 import pytest
 import torch
@@ -80,3 +81,19 @@ def test_va_opd_loss_is_grouped_by_prompt_and_finite():
     assert result.rollout_weights.sum().item() == pytest.approx(1.0)
     assert result.rollout_weights[0].item() > result.rollout_weights[1].item()
     assert result.va_pos.shape == sampled.shape
+
+
+def test_va_opd_masks_teacher_invalid_positions():
+    sampled = torch.tensor([[1, 2]])
+    full = _teacher(sampled, torch.tensor([[0.8, 0.99]]))
+    degraded = _teacher(sampled, torch.tensor([[0.4, 0.01]]))
+    valid_mask = torch.tensor([[True, False]])
+    full = replace(full, valid_mask=valid_mask)
+    degraded = replace(degraded, valid_mask=valid_mask)
+    student_logits = torch.zeros((1, 2, 8), dtype=torch.float32)
+
+    result = compute_va_opd_loss(student_logits, full, degraded, sampled)
+
+    assert result.metrics["teacher_valid_ratio"].item() == pytest.approx(0.5)
+    assert result.metrics["va/mean"].item() == pytest.approx(math.log(0.8) - math.log(0.4))
+    assert result.per_token_kl[0, 1].item() == pytest.approx(0.0)

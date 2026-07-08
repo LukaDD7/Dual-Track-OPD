@@ -35,6 +35,7 @@ def test_va_opd_actor_loss_uses_rollout_weight_denominator() -> None:
             dtype=torch.float32,
         ),
         "fc_rollout_weights": torch.tensor([0.25, 0.75]),
+        "fc_teacher_valid_mask": torch.ones(2, 2, 3, dtype=torch.bool),
         "fc_condition_ids": np.array([[0, 1], [0, 1]]),
         "fc_opd_loss_mode": np.array(["va_opd", "va_opd"], dtype=object),
     }
@@ -58,3 +59,33 @@ def test_va_opd_actor_loss_uses_rollout_weight_denominator() -> None:
         torch.as_tensor(output.metrics["va_opd/rollout_weight_sum"]),
         torch.tensor(1.0),
     )
+
+
+def test_va_opd_actor_loss_masks_teacher_invalid_positions() -> None:
+    student_logits = torch.randn(1, 3, 7)
+    response_mask = torch.ones(1, 3, dtype=torch.bool)
+    responses = torch.tensor([[1, 2, 3]])
+    topk_ids = torch.tensor([[[[1, 5], [2, 5], [3, 5]], [[1, 5], [2, 5], [3, 5]]]], dtype=torch.long)
+    batch = {
+        "responses": responses,
+        "fc_teacher_topk_indices": topk_ids,
+        "fc_teacher_topk_log_probs": torch.log_softmax(torch.zeros(1, 2, 3, 2), dim=-1),
+        "fc_condition_weights": torch.ones(1, 2, 3),
+        "fc_teacher_sampled_log_probs": torch.tensor(
+            [[[-0.1, -0.2, -0.3], [-1.1, -0.2, -0.3]]],
+            dtype=torch.float32,
+        ),
+        "fc_teacher_valid_mask": torch.tensor([[[True, False, True], [True, True, True]]]),
+        "fc_condition_ids": np.array([[0, 1]]),
+        "fc_opd_loss_mode": np.array(["va_opd"], dtype=object),
+    }
+
+    output = compute_verl_fc_opd_actor_loss(
+        student_logits=student_logits,
+        batch=batch,
+        response_mask=response_mask,
+        config={"fc_opd": {"loss_mode": "va_opd"}},
+    )
+
+    assert output.metrics is not None
+    assert torch.as_tensor(output.metrics["teacher_valid_ratio"]).item() == np.float32(2 / 3).item()

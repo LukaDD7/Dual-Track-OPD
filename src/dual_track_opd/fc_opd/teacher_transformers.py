@@ -84,41 +84,37 @@ class TransformersTeacherScorer(TeacherScorer):
         return self._metadata
 
     def _check_response_text(self, request: TeacherScoreRequest) -> None:
-        """Verify teacher re-tokenization matches student token IDs.
-
-        If the teacher tokenizer produces different token IDs (rare edge case
-        with Qwen3-VL 32B vs 4B tokenizer differences), we use the teacher's
-        own encoding (truncated to the original length) so the forced forward
-        pass uses tokens the teacher model understands.  A warning is logged
-        so we can track how often this happens.
-        """
+        """Warn on response text round-trip drift without changing token IDs."""
         if request.response_text is None:
             return
         encoded = self.tokenizer.encode(request.response_text, add_special_tokens=False)
         if tuple(request.response_token_ids) == tuple(encoded):
             return
-        # Mismatch – repair by using the teacher's own tokenization, truncated
-        # to match the original response length so response_mask stays aligned.
-        original_len = len(request.response_token_ids)
-        repaired = encoded[:original_len]
-        if len(repaired) < original_len:
-            # Edge case: teacher encoding is shorter; pad with the last token
-            # (usually <|endoftext|> or similar) rather than inventing new ones.
-            pad = [repaired[-1]] * (original_len - len(repaired))
-            repaired = list(repaired) + pad
         import logging
         _logger = logging.getLogger(__name__)
-        _logger.warning(
-            "Teacher tokenizer mismatch at %d/%d positions – using repaired IDs "
-            "(first mismatch at pos %d: student=%d teacher=%d).  This is expected "
-            "to be rare (<1%% of steps).",
-            sum(1 for a, b in zip(request.response_token_ids, encoded) if a != b),
-            original_len,
-            next((i for i, (a, b) in enumerate(zip(request.response_token_ids, encoded)) if a != b), 0),
-            request.response_token_ids[next((i for i, (a, b) in enumerate(zip(request.response_token_ids, encoded)) if a != b), 0)],
-            encoded[next((i for i, (a, b) in enumerate(zip(request.response_token_ids, encoded)) if a != b), 0)],
+        compared_len = min(len(request.response_token_ids), len(encoded))
+        first_mismatch = next(
+            (i for i, (a, b) in enumerate(zip(request.response_token_ids, encoded)) if a != b),
+            compared_len,
         )
-        object.__setattr__(request, "response_token_ids", repaired)
+        student_token = (
+            request.response_token_ids[first_mismatch]
+            if first_mismatch < len(request.response_token_ids)
+            else -1
+        )
+        teacher_token = encoded[first_mismatch] if first_mismatch < len(encoded) else -1
+        _logger.warning(
+            "Teacher tokenizer round-trip mismatch at %d/%d compared positions "
+            "(student_len=%d teacher_len=%d, first mismatch at pos %d: student=%d teacher=%d). "
+            "Keeping the original student response_token_ids for forced scoring.",
+            sum(1 for a, b in zip(request.response_token_ids, encoded) if a != b),
+            compared_len,
+            len(request.response_token_ids),
+            len(encoded),
+            first_mismatch,
+            student_token,
+            teacher_token,
+        )
 
     def _prepare_prompt(self, request: TeacherScoreRequest) -> dict[str, torch.Tensor]:
         rendered = render_teacher_prompt(
@@ -244,9 +240,6 @@ class TransformersTeacherScorer(TeacherScorer):
             teacher_entropy=tuple(float(item) for item in entropy[0].cpu().tolist()),
             sampled_token_log_probs=tuple(float(item) for item in sampled_lp[0].cpu().tolist()),
         )
-        # NOTE: request.response_token_ids may have been repaired by
-        # _check_response_text; response.token_ids is set from the same
-        # (possibly repaired) list, so they are always consistent.
         return response
 
     @torch.inference_mode()

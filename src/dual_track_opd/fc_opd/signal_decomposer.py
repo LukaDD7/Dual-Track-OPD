@@ -17,6 +17,7 @@ class TeacherTopK:
     tail_log_prob: torch.Tensor | None = None
     entropy: torch.Tensor | None = None
     sampled_log_probs: torch.Tensor | None = None  # [B,T] exact log P_T(y_t|cond) per response token
+    valid_mask: torch.Tensor | None = None  # [B,T] positions with reliable teacher-token alignment
 
     def validate(self) -> None:
         if self.token_ids.ndim != 3:
@@ -44,6 +45,9 @@ class TeacherTopK:
                 raise ValueError("sampled_log_probs must have shape [batch, seq]")
             if not torch.isfinite(self.sampled_log_probs).all():
                 raise ValueError("sampled_log_probs contains NaN or Inf")
+        if self.valid_mask is not None:
+            if self.valid_mask.shape != self.token_ids.shape[:2]:
+                raise ValueError("valid_mask must have shape [batch, seq]")
 
 
 def _coalesced_distribution(

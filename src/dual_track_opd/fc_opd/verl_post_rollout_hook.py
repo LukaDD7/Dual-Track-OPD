@@ -115,9 +115,17 @@ def fc_opd_post_rollout_hook(
         degraded_idx = conditions.index(Condition.DEGRADED)
         sampled_log_probs = verl_tensors.teacher_sampled_log_probs.to(responses.device)
         va_pos = (sampled_log_probs[:, full_idx] - sampled_log_probs[:, degraded_idx]).clamp_min(0.0)
+        teacher_valid = (
+            torch.ones_like(response_mask, dtype=torch.bool, device=responses.device)
+            if verl_tensors.teacher_valid_mask is None
+            else (
+                verl_tensors.teacher_valid_mask[:, full_idx].to(responses.device, dtype=torch.bool)
+                & verl_tensors.teacher_valid_mask[:, degraded_idx].to(responses.device, dtype=torch.bool)
+            )
+        )
         batch.batch["fc_rollout_weights"] = compute_rollout_va_weights(
             va_pos,
-            response_mask=response_mask,
+            response_mask=response_mask & teacher_valid,
             prompt_ids=[sample.sample_uid for sample in samples],
         ).to(responses.device)
 
@@ -136,6 +144,12 @@ def fc_opd_post_rollout_hook(
         "fc_opd/hook_num_samples": float(len(samples)),
         "fc_opd/hook_active_weight": float(verl_tensors.condition_weights.detach().sum().cpu().item()),
     }
+    if verl_tensors.teacher_valid_mask is not None:
+        valid = verl_tensors.teacher_valid_mask.to(device=response_mask.device, dtype=torch.bool)
+        metrics["fc_opd/teacher_valid_ratio"] = float(
+            (valid & response_mask.unsqueeze(1)).float().sum().cpu().item()
+            / response_mask.unsqueeze(1).expand_as(valid).float().sum().clamp_min(1.0).cpu().item()
+        )
     for key, value in output.metrics.items():
         metrics[f"fc_opd/{key}"] = float(value.detach().cpu().item())
     return batch, metrics
@@ -439,7 +453,13 @@ def _select_row(value: Any, row_index: int) -> Any:
 
 def _decode_tokens(tokenizer: Any, token_ids: Sequence[int], *, skip_special_tokens: bool = True) -> str:
     try:
-        return str(tokenizer.decode(list(token_ids), skip_special_tokens=skip_special_tokens))
+        return str(
+            tokenizer.decode(
+                list(token_ids),
+                skip_special_tokens=skip_special_tokens,
+                clean_up_tokenization_spaces=False,
+            )
+        )
     except TypeError:
         return str(tokenizer.decode(list(token_ids)))
 
