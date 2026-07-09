@@ -56,12 +56,13 @@ def compute_verl_fc_opd_actor_loss(
     """
     fc_config = _fc_config(config)
     mode = _loss_mode(batch, fc_config)
-    if mode == "va_opd":
+    if mode in ("va_opd", "va_opd_jsd"):
         return _compute_va_opd_actor_loss(
             student_logits=student_logits,
             batch=batch,
             response_mask=response_mask,
             fc_config=fc_config,
+            loss_type="jsd" if mode == "va_opd_jsd" else "reverse",
         )
 
     compute_kd = compute_verl_sparse_reverse_kl if mode == "reverse" else compute_verl_sparse_topk_kd
@@ -84,6 +85,7 @@ def _compute_va_opd_actor_loss(
     batch: Mapping[str, Any],
     response_mask: torch.Tensor,
     fc_config: Mapping[str, Any],
+    loss_type: str = "reverse",
 ) -> VerlSparseKDOutput:
     sampled_log_probs = batch.get("fc_teacher_sampled_log_probs", None)
     if sampled_log_probs is None:
@@ -133,6 +135,8 @@ def _compute_va_opd_actor_loss(
         lambda_high=float(fc_config.get("va_lambda", 0.50)),
         renormalize_topk=bool(fc_config.get("renormalize_topk", True)),
         include_tail=bool(fc_config.get("include_tail", True)),
+        loss_type=loss_type,
+        jsd_beta=float(fc_config.get("jsd_beta", 0.5)),
         eps=float(fc_config.get("eps", 1e-8)),
     )
     return VerlSparseKDOutput(

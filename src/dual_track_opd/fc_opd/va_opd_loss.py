@@ -23,7 +23,10 @@ from typing import Sequence
 import torch
 
 from .signal_decomposer import TeacherTopK, sampled_token_log_prob
-from .verl_sparse_kd import compute_verl_sparse_reverse_kl
+from .verl_sparse_kd import (
+    compute_verl_sparse_jsd,
+    compute_verl_sparse_reverse_kl,
+)
 
 
 # ── VA-OPD defaults (from paper) ─────────────────────────────────────────
@@ -153,12 +156,19 @@ def compute_va_opd_loss(
     rollout_weights: torch.Tensor | None = None,
     renormalize_topk: bool = True,
     include_tail: bool = True,
+    loss_type: str = "reverse",                      # "reverse" | "jsd"
+    jsd_beta: float = 0.5,
     eps: float = 1e-8,
 ) -> VAOPDLossResult:
-    """Compute VA-OPD grouped reverse-KL loss (§3.2-3.3).
+    """Compute VA-OPD grouped distillation loss (§3.2-3.3).
 
-    L_VA-OPD(x) = Σ_k w^(k) * [λ·mean(KL_rev_High) + (1-λ)·mean(KL_rev_Low)]
-    where KL_rev = KL(P_S || P_T) is reverse (mode-seeking) KL.
+    L_VA-OPD(x) = Σ_k w^(k) * [λ·mean(KL_High) + (1-λ)·mean(KL_Low)]
+    where KL is either reverse (mode-seeking) or JSD (balanced), controlled
+    by ``loss_type``.
+
+    Args:
+        loss_type: "reverse" for KL(P_S || P_T) or "jsd" for JSD(P_T, P_S).
+        jsd_beta: Teacher weight in JSD mixture (default 0.5 = equal).
     """
     if response_mask is None:
         response_mask = torch.ones(
@@ -174,23 +184,40 @@ def compute_va_opd_loss(
     )
     training_mask = response_mask & teacher_mask
 
-    # ── 1. Per-token REVERSE KL (P_S || P_T) — mode-seeking, §3.3 ────────
-    # Reverse KL = KL(P_student || P_teacher), preferred for distillation.
-    reverse_kl_output = compute_verl_sparse_reverse_kl(
-        student_logits=student_logits,
-        teacher_topk_indices=teacher_full.token_ids.unsqueeze(1),   # [B, 1, T, K]
-        teacher_topk_log_probs=teacher_full.log_probs.unsqueeze(1), # [B, 1, T, K]
-        condition_weights=torch.ones(B, 1, T, device=student_logits.device),
-        response_mask=training_mask,
-        teacher_tail_log_prob=(
-            teacher_full.tail_log_prob.unsqueeze(1)                 # [B, 1, T]
-            if teacher_full.tail_log_prob is not None else None
-        ),
-        renormalize_topk=renormalize_topk,
-        include_tail=include_tail,
-        eps=eps,
-    )
-    per_token_kl = reverse_kl_output.per_token_loss  # [B, T] — already masked
+    # ── 1. Per-token distillation loss — §3.3 ──────────────────────────
+    if loss_type == "jsd":
+        kd_output = compute_verl_sparse_jsd(
+            student_logits=student_logits,
+            teacher_topk_indices=teacher_full.token_ids.unsqueeze(1),   # [B, 1, T, K]
+            teacher_topk_log_probs=teacher_full.log_probs.unsqueeze(1), # [B, 1, T, K]
+            condition_weights=torch.ones(B, 1, T, device=student_logits.device),
+            response_mask=training_mask,
+            teacher_tail_log_prob=(
+                teacher_full.tail_log_prob.unsqueeze(1)                 # [B, 1, T]
+                if teacher_full.tail_log_prob is not None else None
+            ),
+            renormalize_topk=renormalize_topk,
+            include_tail=include_tail,
+            jsd_beta=jsd_beta,
+            eps=eps,
+        )
+    else:
+        # Reverse KL = KL(P_student || P_teacher), mode-seeking.
+        kd_output = compute_verl_sparse_reverse_kl(
+            student_logits=student_logits,
+            teacher_topk_indices=teacher_full.token_ids.unsqueeze(1),   # [B, 1, T, K]
+            teacher_topk_log_probs=teacher_full.log_probs.unsqueeze(1), # [B, 1, T, K]
+            condition_weights=torch.ones(B, 1, T, device=student_logits.device),
+            response_mask=training_mask,
+            teacher_tail_log_prob=(
+                teacher_full.tail_log_prob.unsqueeze(1)                 # [B, 1, T]
+                if teacher_full.tail_log_prob is not None else None
+            ),
+            renormalize_topk=renormalize_topk,
+            include_tail=include_tail,
+            eps=eps,
+        )
+    per_token_kl = kd_output.per_token_loss  # [B, T] — already masked
 
     # ── 2. Visual advantage: a_t = max(log p_full - log p_deg, 0) §3.1 ──
     va_raw = compute_va(teacher_full, teacher_degraded, sampled_token_ids)

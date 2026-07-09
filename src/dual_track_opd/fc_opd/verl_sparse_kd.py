@@ -202,6 +202,118 @@ def compute_verl_sparse_reverse_kl(
     return VerlSparseKDOutput(per_token_loss=per_token_loss, active_weight=active_weight)
 
 
+def compute_verl_sparse_jsd(
+    student_logits: torch.Tensor,
+    teacher_topk_indices: torch.Tensor,
+    teacher_topk_log_probs: torch.Tensor,
+    condition_weights: torch.Tensor,
+    response_mask: torch.Tensor,
+    *,
+    teacher_tail_log_prob: torch.Tensor | None = None,
+    renormalize_topk: bool = True,
+    include_tail: bool = True,
+    jsd_beta: float = 0.5,
+    eps: float = 1e-8,
+) -> VerlSparseKDOutput:
+    """Compute weighted sparse **JSD** (Jensen-Shannon Divergence).
+
+    JSD(P, Q) = β·KL(P || M) + (1-β)·KL(Q || M)
+    where M = β·P + (1-β)·Q is the mixture distribution.
+
+    JSD is symmetric, bounded in [0, log 2], and avoids both mode-seeking
+    collapse (reverse KL) and mode-covering noise (forward KL).  Default
+    β=0.5 gives equal weight to teacher and student.
+    """
+    _validate_shapes(
+        student_logits=student_logits,
+        teacher_topk_indices=teacher_topk_indices,
+        teacher_topk_log_probs=teacher_topk_log_probs,
+        condition_weights=condition_weights,
+        response_mask=response_mask,
+        teacher_tail_log_prob=teacher_tail_log_prob,
+    )
+    if not torch.isfinite(student_logits).all():
+        raise ValueError("student_logits contains NaN or Inf")
+    if not torch.isfinite(teacher_topk_log_probs).all():
+        raise ValueError("teacher_topk_log_probs contains NaN or Inf")
+    if teacher_tail_log_prob is not None and not torch.isfinite(teacher_tail_log_prob).all():
+        raise ValueError("teacher_tail_log_prob contains NaN or Inf")
+    if torch.any(condition_weights < 0):
+        raise ValueError("condition_weights must be non-negative")
+    if not 0.0 < jsd_beta < 1.0:
+        raise ValueError(f"jsd_beta must be in (0, 1), got {jsd_beta}")
+
+    teacher_topk_indices = teacher_topk_indices.long()
+    condition_weights = condition_weights.detach().float()
+    response_mask_f = response_mask.detach().float()
+    beta = jsd_beta
+    one_minus_beta = 1.0 - beta
+
+    # ── Student distribution over teacher top-K + tail ──────────────────
+    student_probs = torch.softmax(student_logits.float(), dim=-1)  # [B, T, V]
+    expanded_student = student_probs.unsqueeze(1).expand(
+        -1, teacher_topk_indices.shape[1], -1, -1
+    )
+    student_topk_probs = torch.gather(expanded_student, dim=-1, index=teacher_topk_indices)  # [B,C,T,K]
+    student_topk_sum = student_topk_probs.sum(dim=-1)  # [B,C,T]
+    student_tail = (1.0 - student_topk_sum).clamp_min(eps)
+
+    # ── Teacher distribution ────────────────────────────────────────────
+    topk_mass = teacher_topk_log_probs.float().exp()
+    tail_mass = None
+    if include_tail and teacher_tail_log_prob is not None:
+        tail_mass = teacher_tail_log_prob.float().exp()
+    total_mass = topk_mass.sum(dim=-1)
+    if tail_mass is not None:
+        total_mass = total_mass + tail_mass
+    if torch.any(total_mass <= 0) or not torch.isfinite(total_mass).all():
+        raise ValueError("teacher probability mass must be finite and positive")
+    teacher_topk = topk_mass / total_mass.unsqueeze(-1).clamp_min(eps)
+    teacher_tail = None
+    if tail_mass is not None:
+        teacher_tail = tail_mass / total_mass.clamp_min(eps)
+
+    # ── Normalise student over top-k + tail ─────────────────────────────
+    student_total = student_topk_sum + student_tail  # [B,C,T]
+    student_topk = student_topk_probs / student_total.unsqueeze(-1).clamp_min(eps)
+    student_tail_norm = student_tail / student_total.clamp_min(eps)
+
+    # ── Mixture M = β·P + (1-β)·Q ───────────────────────────────────────
+    mix_topk = beta * teacher_topk + one_minus_beta * student_topk
+    mix_tail: torch.Tensor | None = None
+    if teacher_tail is not None:
+        mix_tail = beta * teacher_tail + one_minus_beta * student_tail_norm
+
+    log_mix_topk = mix_topk.clamp_min(eps).log()
+    log_teacher_topk = teacher_topk.clamp_min(eps).log()
+    log_student_topk = student_topk.clamp_min(eps).log().clamp_min(-15.0)
+
+    # ── β·KL(P || M) = β · Σ_k P_k · (log P_k - log M_k) ───────────────
+    kl_pm_topk = torch.sum(teacher_topk * (log_teacher_topk - log_mix_topk), dim=-1)
+    if teacher_tail is not None and mix_tail is not None:
+        log_mix_tail = mix_tail.clamp_min(eps).log()
+        log_teacher_tail = teacher_tail.clamp_min(eps).log()
+        kl_pm_tail = teacher_tail * (log_teacher_tail - log_mix_tail)
+        kl_pm = kl_pm_topk + kl_pm_tail
+    else:
+        kl_pm = kl_pm_topk
+
+    # ── (1-β)·KL(Q || M) = (1-β) · Σ_k Q_k · (log Q_k - log M_k) ───────
+    kl_qm_topk = torch.sum(student_topk * (log_student_topk - log_mix_topk), dim=-1)
+    if teacher_tail is not None and mix_tail is not None:
+        log_student_tail = student_tail_norm.clamp_min(eps).log().clamp_min(-15.0)
+        kl_qm_tail = student_tail_norm * (log_student_tail - log_mix_tail)
+        kl_qm = kl_qm_topk + kl_qm_tail
+    else:
+        kl_qm = kl_qm_topk
+
+    per_condition = beta * kl_pm + one_minus_beta * kl_qm
+
+    active_weight = condition_weights.sum(dim=1) * response_mask_f
+    per_token_loss = torch.sum(per_condition * condition_weights, dim=1) * response_mask_f
+    return VerlSparseKDOutput(per_token_loss=per_token_loss, active_weight=active_weight)
+
+
 def _validate_shapes(
     *,
     student_logits: torch.Tensor,

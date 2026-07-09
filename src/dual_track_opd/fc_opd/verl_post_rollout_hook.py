@@ -505,9 +505,9 @@ def _log_pipeline_verification(
         f"  exact_lp   = {sampled_lp_shape}  (None=tail-fallback)",
         f"  Student    = raw image + canonical question  (choices allowed, no XML)",
         f"  Teacher    = raw image + same canonical question  (no format bias)",
-        f"  KL         = {'reverse (mode-seeking) KL(P_S || P_T)' if loss_mode == 'va_opd' else 'forward'}",
+        f"  KL         = {'JSD(P_T, P_S)' if loss_mode == 'va_opd_jsd' else 'reverse KL(P_S || P_T)' if loss_mode == 'va_opd' else 'forward'}",
         f"  Formula §3.2: w^(k) = softmax(z_score(ā^(k)) / τ), sums to 1 per prompt",
-        f"  Formula §3.3: L_group = 0.5·mean(KL_rev,HighVA) + 0.5·mean(KL_rev,LowVA)",
+        f"  Formula §3.3: L_group = 0.5·mean(L_HighVA) + 0.5·mean(L_LowVA)",
         f"  Total (formula 7): L = Σ_k w^(k)·L_group^(k)   (pure distillation, no GRPO)",
         "=" * 72,
     ]
