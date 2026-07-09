@@ -8,9 +8,9 @@ The legacy PPO/FSDP line has been exhaustively tested:
 |------|--------|--------|------------|
 | 4-rank power-of-2 | fsdp_size=4, Trees | Step 27 silent hang | Allreduce deadlock, not allgather |
 | fsdp_size=1 (replicate) | No FSDP sharding | Step 25 silent hang | **Confirmed: gradient allreduce, not FSDP allgather** |
-| NCCL_ALGO=Ring | 4-rank, Ring algo | Step 56+ alive | Ring avoids Trees deadlock path |
+| NCCL_ALGO=Ring | 4-rank, Ring algo | Step 56+ alive (current observation, not final proof) | Ring avoids Trees deadlock path so far; needs 200+ steps to confirm |
 
-**Root cause**: NCCL 2.27.3 + CUDA 12.8 + 4×H200 has a probabilistic collective deadlock in the Trees algorithm path that affects both allgather and allreduce at gradient synchronization. The Ring algorithm works around it but is not a guaranteed permanent fix.
+**Working hypothesis**: NCCL 2.27.3 + CUDA 12.8 + 4×H200 has a probabilistic collective deadlock in the Trees algorithm path that affects both allgather and allreduce at gradient synchronization. The Ring algorithm may avoid the trigger but this is not yet confirmed as a permanent fix — longer runs are needed to rule out late-stage hangs.
 
 **Strategic decision**: Rather than further patching the legacy PPO/FSDP stack, migrate to the maintained GKD/Megatron OPD pipeline which uses a different collective pattern (Megatron TP/PP/DP instead of FSDP2) and has active upstream maintenance.
 

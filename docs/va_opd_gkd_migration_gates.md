@@ -102,14 +102,30 @@ Only after all gates 0–5 pass should VA-OPD loss migration begin:
 
 ---
 
+## Node Requirements
+
+**CPU node** (current session): Can only run setup, config, and import-level checks.
+- Gate 0 (partial): pip freeze audit, import torch/vllm/ray/te/megatron
+- Gate 4 Probe A (config only): AutoConfig, AutoTokenizer — no full weight loading for 4B
+
+**GPU node** (H200, driver 570.x, CUDA 12.8 max): Required for all real work.
+- Gate 0 (full): nvidia-smi, nvcc
+- Gate 1: nccl-tests all_reduce_perf (requires GPUs)
+- Gate 2/3: GKD text smoke (requires GPUs + Ray + vLLM)
+- Gate 4 Probe B/C: vLLM serve + Megatron actor load (requires GPUs)
+
+**Important**: The GPU node has **no internet access**. All models, wheels, and git repos must be prepared by the CPU node on NFS (`/inspire/hdd/global_user/mengweicheng-240108120092/lzy/`) before GPU-side scripts are invoked.
+
+---
+
 ## Summary Table
 
-| Gate | What | Steps | Key Risk |
-|------|------|-------|----------|
-| 0 | Env audit | — | cu129/cu130 wheels |
-| 1 | nccl-tests | — | NCCL collective hang |
-| 2 | Text smoke | 10 | GKD env integration |
-| 3 | Text smoke long | 200 | Late-step NCCL hang |
-| 4 | Qwen3.5 probe | — | Megatron arch unsupported |
-| 5 | 4B+27B train | 50 | Scale to real models |
-| 6 | VA-OPD migrate | 50+ | Loss port correctness |
+| Gate | What | Steps | Node | Key Risk |
+|------|------|-------|------|----------|
+| 0 | Env audit | — | CPU → GPU | cu129/cu130 wheels |
+| 1 | nccl-tests | — | GPU only | NCCL collective hang |
+| 2 | Text smoke | 10 | GPU only | GKD env integration |
+| 3 | Text smoke long | 200 | GPU only | Late-step NCCL hang |
+| 4 | Qwen3.5 probe | — | CPU config + GPU vllm/Megatron | Megatron arch unsupported |
+| 5 | 4B+27B train | 50 | GPU only | Scale to real models |
+| 6 | VA-OPD migrate | 50+ | GPU only | Loss port correctness |

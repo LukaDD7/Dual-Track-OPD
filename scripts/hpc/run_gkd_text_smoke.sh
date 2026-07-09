@@ -1,14 +1,17 @@
 #!/usr/bin/env bash
-# run_gkd_text_smoke.sh — GKD text-only smoke test (Gate 2)
+# run_gkd_text_smoke.sh — GKD text-only smoke test (Gate 2 / Gate 3)
 #
-# Runs the GKD recipe's test_qwen.sh pattern with Qwen3-0.6B on text-only
-# GSM8K-style data.  10 steps.  No image data, no VA-OPD patch, no Qwen3.5.
+# Runs the GKD recipe with synthetic text-only data. Qwen3-0.6B default.
+# No image data, no VA-OPD patch, no Qwen3.5.
 # Pure environment validation: GKD/Megatron/Ray/vLLM pipeline stability.
 #
+# GPU isolation: teacher on TEACHER_GPU, Ray + training on TRAIN_GPUS.
+#
 # Usage:
-#   bash scripts/hpc/run_gkd_text_smoke.sh              # 10 steps default
-#   bash scripts/hpc/run_gkd_text_smoke.sh --steps 200  # Gate 3 (200 steps)
-#   bash scripts/hpc/run_gkd_text_smoke.sh --background  # nohup
+#   bash scripts/hpc/run_gkd_text_smoke.sh                        # 10 steps, synthetic data
+#   bash scripts/hpc/run_gkd_text_smoke.sh --steps 200            # Gate 3 (200 steps)
+#   bash scripts/hpc/run_gkd_text_smoke.sh --teacher-gpu 0 --train-gpus 1,2,3,4
+#   bash scripts/hpc/run_gkd_text_smoke.sh --background
 
 set -euo pipefail
 
@@ -16,33 +19,42 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 RUN_ID="gkd_smoke_${TIMESTAMP}"
 
-CONDA_BASE="/inspire/hdd/global_user/mengweicheng-240108120092/lzy/miniconda3"
+# ── env var overrides ─────────────────────────────────────────────────────
+CONDA_BASE="${CONDA_BASE:-/inspire/hdd/global_user/mengweicheng-240108120092/lzy/miniconda3}"
+MODEL_ROOT="${MODEL_ROOT:-/inspire/hdd/global_user/mengweicheng-240108120092/lzy/models}"
 GKD_ENV="${CONDA_BASE}/envs/vaopd-gkd-cu128"
 PYTHON="${GKD_ENV}/bin/python"
+RAY="${GKD_ENV}/bin/ray"
 VERL_GKD_DIR="${REPO_ROOT}/external/verl_gkd/verl"
 GKD_RECIPE_DIR="${VERL_GKD_DIR}/recipe/gkd/megatron"
 
+# ── defaults ──────────────────────────────────────────────────────────────
+TEACHER_GPU=0
+TRAIN_GPU_LIST="1,2,3,4"
+NUM_STEPS=10
+MODEL_PATH="${MODEL_ROOT}/Qwen3-0.6B"
+SYNTHETIC_DATA=true
+RUN_BACKGROUND=false
+
 # ── fixed paths ───────────────────────────────────────────────────────────
-MODEL_PATH="/inspire/hdd/global_user/mengweicheng-240108120092/lzy/models/Qwen3-0.6B"
-TRAIN_DATA="/inspire/hdd/global_user/mengweicheng-240108120092/lzy/fc-opd-storage/outputs/fc_opd/geometry3k_full/train.parquet"
-VAL_DATA="/inspire/hdd/global_user/mengweicheng-240108120092/lzy/fc-opd-storage/outputs/fc_opd/geometry3k_full/val200.parquet"  # FIXME: use text-only data
 OUTPUT_DIR="${REPO_ROOT}/runs/gkd_smoke/${RUN_ID}"
+DATA_DIR="${OUTPUT_DIR}/data"
 TEACHER_PORT=15555
 TEACHER_PROXY_PORT=15556
 
-# ── training params ───────────────────────────────────────────────────────
-NUM_STEPS=10
-RUN_BACKGROUND=false
-
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --steps)       NUM_STEPS="${2:?--steps needs a value}"; shift 2 ;;
-        --background)  RUN_BACKGROUND=true; shift ;;
+        --teacher-gpu)    TEACHER_GPU="${2:?--teacher-gpu needs a value}"; shift 2 ;;
+        --train-gpus)     TRAIN_GPU_LIST="${2:?--train-gpus needs a value}"; shift 2 ;;
+        --steps)          NUM_STEPS="${2:?--steps needs a value}"; shift 2 ;;
+        --model-path)     MODEL_PATH="${2:?--model-path needs a value}"; shift 2 ;;
+        --synthetic-data) SYNTHETIC_DATA=true; shift ;;
+        --background)     RUN_BACKGROUND=true; shift ;;
         *) echo "Unknown arg: $1"; exit 1 ;;
     esac
 done
 
-mkdir -p "${OUTPUT_DIR}"
+mkdir -p "${OUTPUT_DIR}" "${DATA_DIR}"
 
 # ── background re-launch ──────────────────────────────────────────────────
 if ${RUN_BACKGROUND}; then
@@ -53,7 +65,13 @@ if ${RUN_BACKGROUND}; then
     done
     NOHUP_LOG="${OUTPUT_DIR}/nohup.log"
     echo "Launching background smoke test → ${NOHUP_LOG}"
-    nohup bash "$0" --steps "${NUM_STEPS}" "${RELAUNCH_ARGS[@]}" > "${NOHUP_LOG}" 2>&1 &
+    nohup bash "$0" \
+        --teacher-gpu "${TEACHER_GPU}" \
+        --train-gpus "${TRAIN_GPU_LIST}" \
+        --steps "${NUM_STEPS}" \
+        --model-path "${MODEL_PATH}" \
+        "${RELAUNCH_ARGS[@]}" \
+        > "${NOHUP_LOG}" 2>&1 &
     disown
     echo "Background PID: $!"
     exit 0
@@ -61,14 +79,15 @@ fi
 
 # ── preamble ──────────────────────────────────────────────────────────────
 echo "══════════════════════════════════════════════════════════════"
-echo "  GKD Text Smoke Test — Gate 2"
-echo "  Run ID:       ${RUN_ID}"
-echo "  Steps:        ${NUM_STEPS}"
-echo "  Model:        ${MODEL_PATH}"
-echo "  Train data:   ${TRAIN_DATA}"
-echo "  Val data:     ${VAL_DATA}"
-echo "  Output dir:   ${OUTPUT_DIR}"
-echo "  GKD recipe:   ${GKD_RECIPE_DIR}"
+echo "  GKD Text Smoke Test — Gate 2/3"
+echo "  Run ID:         ${RUN_ID}"
+echo "  Steps:          ${NUM_STEPS}"
+echo "  Model:          ${MODEL_PATH}"
+echo "  Teacher GPU:    ${TEACHER_GPU}"
+echo "  Train GPUs:     ${TRAIN_GPU_LIST}"
+echo "  Output dir:     ${OUTPUT_DIR}"
+echo "  GKD recipe:     ${GKD_RECIPE_DIR}"
+echo "  Synthetic data: ${SYNTHETIC_DATA}"
 echo "══════════════════════════════════════════════════════════════"
 echo ""
 
@@ -109,9 +128,73 @@ import ray; print(f'ray={ray.__version__}')
 "
 echo ""
 
+# ── generate synthetic data (text-only, no images) ────────────────────────
+TRAIN_PARQUET="${DATA_DIR}/train.parquet"
+VAL_PARQUET="${DATA_DIR}/val.parquet"
+
+if ${SYNTHETIC_DATA}; then
+    echo "=== Generating synthetic text-only data ==="
+    "${PYTHON}" -c "
+import pandas as pd
+
+prompts = [
+    'What is 2 + 2?',
+    'What is the capital of France?',
+    'If a train travels 60 miles in 2 hours, what is its average speed?',
+    'Solve: 3x + 5 = 20. What is x?',
+    'What is the square root of 144?',
+    'How many sides does a hexagon have?',
+    'What is 15% of 200?',
+    'If a pizza is cut into 8 slices and you eat 3, what fraction remains?',
+    'What is the chemical symbol for water?',
+    'How many minutes are in 2.5 hours?',
+    'What is the area of a square with side length 5?',
+    'Solve: 2^3 + 4^2 = ?',
+    'What planet is closest to the Sun?',
+    'If John has 5 apples and gives 2 to Mary, how many does he have left?',
+    'What is the boiling point of water in Celsius?',
+    'Convert 1/4 to a decimal.',
+    'What is 7 * 8?',
+    'How many grams are in a kilogram?',
+    'What is the next prime number after 7?',
+    'If a book costs \$12 and is on 25% discount, what is the sale price?',
+]
+data_sources = ['synthetic_math'] * 10 + ['synthetic_trivia'] * 10
+N = 128  # ensure enough for 10 steps at batch_size=4
+train_rows = []
+for i in range(N):
+    train_rows.append({
+        'prompt': prompts[i % len(prompts)],
+        'data_source': data_sources[i % len(data_sources)],
+    })
+train_df = pd.DataFrame(train_rows)
+train_df.to_parquet('${TRAIN_PARQUET}', index=False)
+print(f'Train data: {len(train_df)} rows → ${TRAIN_PARQUET}')
+
+# Validation: 16 samples
+val_rows = []
+for i in range(16):
+    val_rows.append({
+        'prompt': prompts[i % len(prompts)],
+        'data_source': 'synthetic_val',
+    })
+val_df = pd.DataFrame(val_rows)
+val_df.to_parquet('${VAL_PARQUET}', index=False)
+print(f'Val data:   {len(val_df)} rows  → ${VAL_PARQUET}')
+"
+    echo "[OK] Synthetic data generated"
+else
+    echo "Using existing data at ${DATA_DIR}"
+    if [[ ! -f "${TRAIN_PARQUET}" ]] || [[ ! -f "${VAL_PARQUET}" ]]; then
+        echo "FATAL: Data not found. Use --synthetic-data or provide existing parquet files."
+        exit 1
+    fi
+fi
+echo ""
+
 # ── cleanup ───────────────────────────────────────────────────────────────
 echo "=== Cleanup ==="
-ray stop -f 2>/dev/null || true
+"${RAY}" stop -f 2>/dev/null || true
 ps -ef | grep "python.*proxy.py" | grep -v grep | awk '{print $2}' | xargs -r kill -9 2>/dev/null || true
 ps -ef | grep "python.*worker.py" | grep -v grep | awk '{print $2}' | xargs -r kill -9 2>/dev/null || true
 lsof -ti:${TEACHER_PORT} 2>/dev/null | xargs -r kill -9 2>/dev/null || true
@@ -119,20 +202,20 @@ lsof -ti:${TEACHER_PROXY_PORT} 2>/dev/null | xargs -r kill -9 2>/dev/null || tru
 rm -rf /dev/shm/*vllm* /dev/shm/*psm_* 2>/dev/null || true
 sleep 2
 
-# ── 1. Teacher server ─────────────────────────────────────────────────────
-echo "=== Starting GKD teacher server ==="
-TEACHER_LOG="${OUTPUT_DIR}/teacher.log"
+# ── 1. Teacher server (isolated GPU) ──────────────────────────────────────
+echo "=== Starting GKD teacher server (GPU ${TEACHER_GPU}) ==="
 
 export PROXY_FRONTEND_PORT=${TEACHER_PORT}
 export PROXY_BACKEND_PORT=${TEACHER_PROXY_PORT}
 
 cd "${GKD_RECIPE_DIR}/teacher"
 
-# Start proxy
-nohup "${PYTHON}" proxy.py > "${OUTPUT_DIR}/proxy.log" 2>&1 &
+# Start proxy (uses CPU, no GPU needed)
+CUDA_VISIBLE_DEVICES="" nohup "${PYTHON}" proxy.py > "${OUTPUT_DIR}/proxy.log" 2>&1 &
 PROXY_PID=$!
 
-# Wait for proxy backend to be ready
+# Wait for proxy backend — fatal on timeout
+PROXY_READY=false
 echo -n "  Waiting for proxy backend..."
 for i in $(seq 1 60); do
     if "${PYTHON}" -c "
@@ -147,19 +230,29 @@ except:
     exit(1)
 " 2>/dev/null; then
         echo " OK"
+        PROXY_READY=true
         break
     fi
     if ! kill -0 ${PROXY_PID} 2>/dev/null; then
         echo " DIED"
-        cat "${OUTPUT_DIR}/proxy.log"
+        echo "=== proxy.log (last 30 lines) ==="
+        tail -30 "${OUTPUT_DIR}/proxy.log" 2>/dev/null || true
+        echo "FATAL: Teacher proxy died during startup"
         exit 1
     fi
     echo -n "."
     sleep 1
 done
+if ! ${PROXY_READY}; then
+    echo " TIMEOUT"
+    echo "=== proxy.log (last 30 lines) ==="
+    tail -30 "${OUTPUT_DIR}/proxy.log" 2>/dev/null || true
+    echo "FATAL: Teacher proxy not ready after 60s"
+    exit 1
+fi
 
-# Start worker (vLLM backend)
-nohup "${PYTHON}" worker.py \
+# Start worker (isolated to TEACHER_GPU)
+CUDA_VISIBLE_DEVICES="${TEACHER_GPU}" nohup "${PYTHON}" worker.py \
     --backend vllm \
     --tp-size 1 \
     --n-logprobs 32 \
@@ -167,9 +260,10 @@ nohup "${PYTHON}" worker.py \
     > "${OUTPUT_DIR}/worker.log" 2>&1 &
 WORKER_PID=$!
 
-# Wait for frontend to be ready
+# Wait for frontend — fatal on timeout
+WORKER_READY=false
 echo -n "  Waiting for teacher frontend..."
-for i in $(seq 1 120); do
+for i in $(seq 1 180); do
     if "${PYTHON}" -c "
 import socket
 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -182,47 +276,60 @@ except:
     exit(1)
 " 2>/dev/null; then
         echo " OK"
+        WORKER_READY=true
         break
     fi
     if ! kill -0 ${WORKER_PID} 2>/dev/null; then
         echo " DIED"
-        tail -30 "${OUTPUT_DIR}/worker.log"
+        echo "=== worker.log (last 30 lines) ==="
+        tail -30 "${OUTPUT_DIR}/worker.log" 2>/dev/null || true
+        echo "FATAL: Teacher worker died during startup"
         exit 1
     fi
     echo -n "."
     sleep 1
 done
+if ! ${WORKER_READY}; then
+    echo " TIMEOUT"
+    echo "=== worker.log (last 30 lines) ==="
+    tail -30 "${OUTPUT_DIR}/worker.log" 2>/dev/null || true
+    echo "FATAL: Teacher worker not ready after 180s"
+    exit 1
+fi
 
 cd "${REPO_ROOT}"
 echo "[OK] Teacher server ready on port ${TEACHER_PORT}"
 echo ""
 
-# ── 2. Ray ────────────────────────────────────────────────────────────────
-echo "=== Starting Ray ==="
-export RAY_memory_usage_threshold=0.95
-ray start --head --num-gpus=4 --disable-usage-stats
+# ── 2. Ray (isolated GPUs) ────────────────────────────────────────────────
+echo "=== Starting Ray (GPUs ${TRAIN_GPU_LIST}) ==="
+CUDA_VISIBLE_DEVICES="${TRAIN_GPU_LIST}" "${RAY}" start --head --num-gpus="$(echo "${TRAIN_GPU_LIST}" | tr ',' '\n' | wc -l)" --disable-usage-stats
 sleep 3
 echo "[OK] Ray started"
 echo ""
 
 # ── 3. Run GKD text smoke ─────────────────────────────────────────────────
 echo "=== Running GKD text smoke (${NUM_STEPS} steps) ==="
+echo "    Train data: ${TRAIN_PARQUET}"
+echo "    Val data:   ${VAL_PARQUET}"
+echo ""
 
-# Use ray job submit pattern from test_qwen.sh
 RUNTIME_ENV="${GKD_RECIPE_DIR}/config/runtime_env.yaml"
-
-# Override NCCL_DEBUG_FILE to our output dir
 export NCCL_DEBUG_FILE="${OUTPUT_DIR}/nccl_debug.log"
 export NCCL_DEBUG="WARN"
+export CUDA_VISIBLE_DEVICES="${TRAIN_GPU_LIST}"
 
+# Submit ray job WITHOUT --no-wait so we block until completion
+TRAIN_LOG="${OUTPUT_DIR}/train.log"
 set +e
-ray job submit --no-wait --runtime-env="${RUNTIME_ENV}" \
+"${RAY}" job submit \
+    --runtime-env="${RUNTIME_ENV}" \
     --working-dir "${GKD_RECIPE_DIR}" \
     -- "${PYTHON}" -m recipe.gkd.megatron.main_gkd \
     --config-path="${GKD_RECIPE_DIR}/config" \
     --config-name=on_policy_distill_trainer \
-    "data.train_files=${TRAIN_DATA}" \
-    "data.val_files=${VAL_DATA}" \
+    "data.train_files=${TRAIN_PARQUET}" \
+    "data.val_files=${VAL_PARQUET}" \
     "data.prompt_key=prompt" \
     "data.train_batch_size=4" \
     "data.max_prompt_length=512" \
@@ -251,9 +358,9 @@ ray job submit --no-wait --runtime-env="${RUNTIME_ENV}" \
     "trainer.logger=['console']" \
     "trainer.project_name=gkd_smoke" \
     "trainer.experiment_name=${RUN_ID}" \
-    "trainer.n_gpus_per_node=4" \
+    "trainer.n_gpus_per_node=$(echo "${TRAIN_GPU_LIST}" | tr ',' '\n' | wc -l)" \
     "trainer.nnodes=1" \
-    "rollout.n_gpus_per_node=4" \
+    "rollout.n_gpus_per_node=$(echo "${TRAIN_GPU_LIST}" | tr ',' '\n' | wc -l)" \
     "rollout.nnodes=1" \
     "trainer.save_freq=-1" \
     "trainer.test_freq=5" \
@@ -264,25 +371,73 @@ ray job submit --no-wait --runtime-env="${RUNTIME_ENV}" \
     "trainer.val_before_train=False" \
     "trainer.total_training_steps=${NUM_STEPS}" \
     "trainer.total_epochs=1" \
-    > "${OUTPUT_DIR}/train.log" 2>&1
+    > "${TRAIN_LOG}" 2>&1
 VERL_EXIT=$?
 set -e
+
+# ── capture ray job logs ─────────────────────────────────────────────────
+echo ""
+echo "=== Ray job logs ==="
+# Try to get the last job ID and fetch its logs
+JOB_ID=$("${RAY}" job list 2>/dev/null | grep -oP 'raysubmit_[^\s]+' | head -1 || true)
+if [[ -n "${JOB_ID}" ]]; then
+    "${RAY}" job logs "${JOB_ID}" > "${OUTPUT_DIR}/ray_job_logs.txt" 2>/dev/null || true
+    echo "Ray job logs saved to ${OUTPUT_DIR}/ray_job_logs.txt"
+fi
 
 # ── cleanup ───────────────────────────────────────────────────────────────
 echo ""
 echo "=== Cleanup ==="
-ray stop -f 2>/dev/null || true
+"${RAY}" stop -f 2>/dev/null || true
 kill ${PROXY_PID} 2>/dev/null || true
 kill ${WORKER_PID} 2>/dev/null || true
 sleep 2
 
+# ── validate smoke result ─────────────────────────────────────────────────
+echo ""
+echo "=== Smoke Validation ==="
+
+EXIT_OK=false
+STEPS_OK=false
+
+if [[ ${VERL_EXIT} -eq 0 ]]; then
+    echo "  Exit code: 0 ✓"
+    EXIT_OK=true
+else
+    echo "  Exit code: ${VERL_EXIT} ✗"
+fi
+
+# Check for training steps in log
+_STEP_COUNT=$(grep -c 'global_step\|step.*/' "${TRAIN_LOG}" 2>/dev/null || echo 0)
+if [[ "${_STEP_COUNT}" -ge $(( NUM_STEPS / 2 )) ]]; then
+    echo "  Steps found in log: ${_STEP_COUNT} (≥ ${NUM_STEPS}/2) ✓"
+    STEPS_OK=true
+else
+    echo "  Steps found in log: ${_STEP_COUNT} (need ≥ $(( NUM_STEPS / 2 ))) ✗"
+fi
+
+# Check for loss
+if grep -q 'loss\|kl_loss\|distill_loss' "${TRAIN_LOG}" 2>/dev/null; then
+    echo "  Loss/kl_loss found in log ✓"
+else
+    echo "  WARNING: No loss/kl_loss found in log"
+fi
+
 echo ""
 echo "══════════════════════════════════════════════════════════════"
-echo "  Run ID:   ${RUN_ID}"
-echo "  Steps:    ${NUM_STEPS}"
-echo "  Exit:     ${VERL_EXIT}"
-echo "  Log dir:  ${OUTPUT_DIR}"
-echo "  Train log: ${OUTPUT_DIR}/train.log"
+echo "  Run ID:     ${RUN_ID}"
+echo "  Steps:      ${NUM_STEPS}"
+echo "  Ray exit:   ${VERL_EXIT}"
+echo "  Log dir:    ${OUTPUT_DIR}"
+echo "  Train log:  ${TRAIN_LOG}"
 echo "══════════════════════════════════════════════════════════════"
 
-exit ${VERL_EXIT}
+if ${EXIT_OK} && ${STEPS_OK}; then
+    echo "SMOKE PASSED ✓"
+    exit 0
+else
+    echo "SMOKE FAILED ✗"
+    echo "=== Last 50 lines of train log ==="
+    tail -50 "${TRAIN_LOG}" 2>/dev/null || true
+    exit 1
+fi
