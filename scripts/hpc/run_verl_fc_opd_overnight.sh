@@ -26,7 +26,7 @@
 #   --batch-size N          Override train batch size (default: auto)
 #   --data PATH             Override parquet path
 #   --name TAG              Run name suffix
-#   --test-fix MODE         NCCL workaround: ring|noreshard|hsdp3
+#   --test-fix MODE         NCCL workaround: ring|noreshard|hsdp3|replicate
 #   --loss-mode MODE        va_opd (reverse KL) | va_opd_jsd (JSD, default)
 #   --resume PATH           Resume from checkpoint dir
 #   --keepalive             Start post-success GPU keepalive
@@ -63,7 +63,7 @@ RESUME_CKPT=""
 NUM_EPOCHS=5
 DATASET_SIZE=2101
 NAME_TAG=""
-TEST_FIX=""  # ring | noreshard | hsdp3 | none
+TEST_FIX=""  # ring | noreshard | hsdp3 | replicate
 BATCH_OVERRIDE=""  # empty = auto: floor(8 / TRAIN_GPUS) * TRAIN_GPUS
 LOSS_MODE="va_opd_jsd"  # va_opd | va_opd_jsd
 
@@ -78,7 +78,7 @@ while [[ $# -gt 0 ]]; do
         --batch-size)      BATCH_OVERRIDE="${2:?--batch-size needs a value}"; shift 2 ;;
         --data)            PARQUET_OVERRIDE="${2:?--data needs a path}"; shift 2 ;;
         --name)            NAME_TAG="_${2:?--name needs a value}"; shift 2 ;;
-        --test-fix)        TEST_FIX="${2:?--test-fix needs ring|noreshard|hsdp3}"; NAME_TAG="${NAME_TAG}_${2}"; shift 2 ;;
+        --test-fix)        TEST_FIX="${2:?--test-fix needs ring|noreshard|hsdp3|replicate}"; NAME_TAG="${NAME_TAG}_${2}"; shift 2 ;;
         --loss-mode)       LOSS_MODE="${2:?--loss-mode needs va_opd|va_opd_jsd}"; shift 2 ;;
         --resume)          RESUME_CKPT="${2:?--resume needs a checkpoint dir}"; shift 2 ;;
         --keepalive)       KEEPALIVE_SEC=86400; shift ;;
@@ -404,6 +404,14 @@ case "${TEST_FIX}" in
         VERL_EXTRA_ARGS+=(
             "actor_rollout_ref.actor.fsdp_config.fsdp_size=3"
             "actor_rollout_ref.ref.fsdp_config.fsdp_size=3"
+        )
+        ;;
+    replicate)
+        echo "=== Test fix: FSDP2 fsdp_size=1, avoid FSDP parameter allgather ==="
+        VERL_EXTRA_ARGS+=(
+            "actor_rollout_ref.actor.fsdp_config.fsdp_size=1"
+            "actor_rollout_ref.ref.fsdp_config.fsdp_size=1"
+            "actor_rollout_ref.rollout.gpu_memory_utilization=0.25"
         )
         ;;
 esac
