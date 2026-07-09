@@ -422,7 +422,7 @@ ${CONDA_ENV}/bin/python -m verl.trainer.main_ppo \
     "data.train_files=${PARQUET}" \
     "data.val_files=${VAL_PARQUET}" \
     "data.train_batch_size=${TRAIN_BATCH_SIZE}" \
-    "data.max_prompt_length=8192" \
+    "data.max_prompt_length=6144" \
     "data.max_response_length=2048" \
     "data.filter_overlong_prompts=false" \
     "data.truncation=error" \
@@ -450,7 +450,7 @@ ${CONDA_ENV}/bin/python -m verl.trainer.main_ppo \
     "actor_rollout_ref.rollout.name=vllm" \
     "actor_rollout_ref.rollout.tensor_model_parallel_size=1" \
     "actor_rollout_ref.rollout.gpu_memory_utilization=0.45" \
-    "actor_rollout_ref.rollout.max_model_len=10240" \
+    "actor_rollout_ref.rollout.max_model_len=8192" \
     "actor_rollout_ref.rollout.n=${ROLLOUT_N}" \
     "actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=8" \
     "actor_rollout_ref.rollout.agent.num_workers=4" \
