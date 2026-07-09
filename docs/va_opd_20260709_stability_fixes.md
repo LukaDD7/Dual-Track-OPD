@@ -109,8 +109,9 @@ Constraints: `ppo_max_token_len_per_gpu >= max_model_len >= max_prompt + max_res
 ### Remaining risk
 
 Memory still crept from 65 GB (step 2) to 95 GB (step 26) over time.
-Step 27 hung at 95.5 GB — possibly another OOM or NCCL hang at higher
-allgather sizes with larger sequences.
+Step 27 hung at 95.5 GB — initially suspected OOM or NCCL, but the
+replicate test (below) proved this is a **gradient allreduce hang**,
+not FSDP parameter allgather-specific.
 
 ## Experiment Log
 
@@ -121,14 +122,34 @@ allgather sizes with larger sequences.
 | train_jsd_bs5 #2 | 2T+5R | JSD | 10240 | 10 | Hang | NCCL deadlock |
 | t1_train4 #1 | 1T+4R | JSD | 10240 | 16 | OOM | 102.7 GB + 46 GB alloc |
 | t1_train4 #2 | 1T+4R | JSD | 8192 | 0 | Assertion | max_token < max_model |
-| t1_train4 #3 | 1T+4R | JSD | 8192 | 27 | Hang | 95.5 GB, silent after |
+| t1_train4 #3 | 1T+4R | JSD | 8192 | 27 | Silent hang | Gradient allreduce stuck |
+| t1_train4_repl | 1T+4R, fsdp_size=1 | JSD | 8192 | 25 | Silent hang | Gradient allreduce stuck |
+
+## 🔑 Replicate Test (fsdp_size=1): Ruled Out FSDP Allgather
+
+`--test-fix replicate` sets `fsdp_size=1`, eliminating FSDP parameter
+sharding entirely — each GPU holds the full model, no parameter allgather
+ever happens.  Only gradient allreduce remains.
+
+**Result**: Run hung at step 25 with same silent pattern as step 27 hang.
+Log last modified at 09:08 to 09:15+ with no new output.  No crash, no
+OOM, no NCCL timeout — just infinite wait on a collective.
+
+**Conclusion**: The hang is in **gradient allreduce**, not FSDP parameter
+allgather.  NCCL 2.27.3 + CUDA 12.8 + 4×H200 has a probabilistic
+collective deadlock that affects both allgather and allreduce at gradient
+synchronization.  The 4-rank power-of-2 topology delays the trigger
+(from ~step 10 at 6-rank to ~step 25-27 at 4-rank) but does not eliminate
+it.
 
 ## Next Steps
 
-1. **Test `--test-fix replicate`** to determine if step-27 hang is NCCL or memory
-2. **Reduce token budget further** (7168) if memory creep confirmed
-3. **Commit JSD changes** once full-run validated
-4. **Consider verl GKD recipe** — Megatron-only, but has forward KL + schedulers
+1. **Test `--test-fix ring`** — NCCL_ALGO=Ring may avoid the deadlock trigger
+2. **Test 2-GPU training** — reduce collective participants further
+3. **Try `export NCCL_DEBUG=INFO`** to capture NCCL collective sequence
+4. **Try `export NCCL_CUMEM_ENABLE=0`** (vLLM GKD recipe uses this)
+5. **Upgrade NCCL/CUDA toolkit** if available on the H200 node
+6. **Consider single-GPU training** (no collectives) as last-resort validation
 
 ## verl On-Policy Distillation Reference
 
