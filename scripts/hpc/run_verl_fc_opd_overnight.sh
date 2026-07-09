@@ -4,19 +4,33 @@
 # Scaled-up config referencing Vision-OPD (VA-OPD) paper settings:
 #   - Rollout n=8.
 #   - LR 2e-6 (VA-OPD: 2e-6 for 4B).
-#   - GPU memory 0.5 for vLLM (VA-OPD: 0.7; we're conservative with FSDP).
-#   - Grouped reverse KL with rollout-level VA reweighting.
-#   - Checkpoint every 25 steps.
+#   - GPU memory 0.45 for vLLM (VA-OPD: 0.7; we're conservative with FSDP).
+#   - JSD loss default (bounded, avoids reverse-KL mode collapse).
+#   - Checkpoint every 100 steps, keep last 5.
 #   - Log to file + console.
 #
-# Usage:
-#   bash scripts/hpc/run_verl_fc_opd_overnight.sh [--gpus N] [--steps S] [--background] [--data /path/to/train.parquet]
+# Recommended usage (8×H200, 4-rank power-of-2 training):
+#   bash scripts/hpc/run_verl_fc_opd_overnight.sh \
+#       --teacher-gpus 0 --train-gpus 1,2,3,4 \
+#       --name t1_train4 --background
 #
-#   --gpus N        GPUs to use (default: 4).  GPU 0=teacher, 1..N-1=verl.
-#   --steps S       PPO steps (default: 200).
-#   --background    Detach from terminal via nohup — safe to close code-server.
-#   --data PATH     Override parquet path (default: verl_smoke/train.parquet).
-#   --keepalive     Start post-success GPU keepalive after Ray/teacher cleanup.
+# Legacy usage (still works, deprecated):
+#   bash scripts/hpc/run_verl_fc_opd_overnight.sh --gpus 4 --background
+#
+# Flags:
+#   --teacher-gpus LIST     GPU indices for teacher(s), e.g. 0 or 0,1 (recommended)
+#   --train-gpus LIST       GPU indices for verl training, e.g. 1,2,3,4 (recommended)
+#   --allow-nonpower2       Allow non-power-of-2 training world size (risky)
+#   --gpus N                [legacy] Total GPU count; teacher auto-derived
+#   --steps S               PPO steps (default: 0 = auto-compute 5 epochs)
+#   --batch-size N          Override train batch size (default: auto)
+#   --data PATH             Override parquet path
+#   --name TAG              Run name suffix
+#   --test-fix MODE         NCCL workaround: ring|noreshard|hsdp3
+#   --loss-mode MODE        va_opd (reverse KL) | va_opd_jsd (JSD, default)
+#   --resume PATH           Resume from checkpoint dir
+#   --keepalive             Start post-success GPU keepalive
+#   --background            Detach via nohup — safe to close terminal
 #
 # Background mode:
 #   When --background is passed, the script re-launches itself under nohup and
@@ -28,7 +42,16 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 export PYTHONPATH="${REPO_ROOT}:${PYTHONPATH:-}"
 
-GPU_COUNT=4
+# ── defaults (new explicit layout) ──────────────────────────────────────────
+TEACHER_GPU_LIST="0"             # --teacher-gpus
+TRAIN_GPU_LIST="1,2,3,4"        # --train-gpus
+ALLOW_NONPOWER2=false            # --allow-nonpower2
+USE_EXPLICIT_LAYOUT=false        # true when --teacher-gpus or --train-gpus given
+
+# ── legacy fallback ─────────────────────────────────────────────────────────
+GPU_COUNT=0                      # 0 = not using legacy mode
+
+# ── training params ─────────────────────────────────────────────────────────
 NUM_STEPS=0  # 0 = auto: 5 epochs × 2101 prompts / TRAIN_BATCH_SIZE
 TOP_K=32
 TEACHER_PORT=18080
@@ -41,18 +64,25 @@ NUM_EPOCHS=5
 DATASET_SIZE=2101
 NAME_TAG=""
 TEST_FIX=""  # ring | noreshard | hsdp3 | none
+BATCH_OVERRIDE=""  # empty = auto: floor(8 / TRAIN_GPUS) * TRAIN_GPUS
+LOSS_MODE="va_opd_jsd"  # va_opd | va_opd_jsd
 
 # ── parse args ──────────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --gpus)       GPU_COUNT="${2:?--gpus needs a value}"; shift 2 ;;
-        --steps)      NUM_STEPS="${2:?--steps needs a value}"; shift 2 ;;
-        --data)       PARQUET_OVERRIDE="${2:?--data needs a path}"; shift 2 ;;
-        --name)       NAME_TAG="_${2:?--name needs a value}"; shift 2 ;;
-        --test-fix)   TEST_FIX="${2:?--test-fix needs ring|noreshard|hsdp3}"; NAME_TAG="${NAME_TAG}_${2}"; shift 2 ;;
-        --resume)     RESUME_CKPT="${2:?--resume needs a checkpoint dir}"; shift 2 ;;
-        --keepalive) KEEPALIVE_SEC=86400; shift ;;
-        --background) RUN_BACKGROUND=true; shift ;;
+        --teacher-gpus)    TEACHER_GPU_LIST="${2:?--teacher-gpus needs a list}"; USE_EXPLICIT_LAYOUT=true; shift 2 ;;
+        --train-gpus)      TRAIN_GPU_LIST="${2:?--train-gpus needs a list}";   USE_EXPLICIT_LAYOUT=true; shift 2 ;;
+        --allow-nonpower2) ALLOW_NONPOWER2=true; shift ;;
+        --gpus)            GPU_COUNT="${2:?--gpus needs a value}"; shift 2 ;;
+        --steps)           NUM_STEPS="${2:?--steps needs a value}"; shift 2 ;;
+        --batch-size)      BATCH_OVERRIDE="${2:?--batch-size needs a value}"; shift 2 ;;
+        --data)            PARQUET_OVERRIDE="${2:?--data needs a path}"; shift 2 ;;
+        --name)            NAME_TAG="_${2:?--name needs a value}"; shift 2 ;;
+        --test-fix)        TEST_FIX="${2:?--test-fix needs ring|noreshard|hsdp3}"; NAME_TAG="${NAME_TAG}_${2}"; shift 2 ;;
+        --loss-mode)       LOSS_MODE="${2:?--loss-mode needs va_opd|va_opd_jsd}"; shift 2 ;;
+        --resume)          RESUME_CKPT="${2:?--resume needs a checkpoint dir}"; shift 2 ;;
+        --keepalive)       KEEPALIVE_SEC=86400; shift ;;
+        --background)      RUN_BACKGROUND=true; shift ;;
         *) echo "Unknown arg: $1"; exit 1 ;;
     esac
 done
@@ -66,6 +96,7 @@ if ${RUN_BACKGROUND}; then
         [[ "$arg" != "--background" ]] || continue
         RELAUNCH_ARGS+=("$arg")
     done
+    # Carry all optional overrides explicitly (safer than re-parsing changed state)
     if [[ -n "${PARQUET_OVERRIDE}" ]]; then
         RELAUNCH_ARGS+=(--data "${PARQUET_OVERRIDE}")
     fi
@@ -78,6 +109,19 @@ if ${RUN_BACKGROUND}; then
     if [[ -n "${TEST_FIX}" ]]; then
         RELAUNCH_ARGS+=(--test-fix "${TEST_FIX}")
     fi
+    if [[ -n "${BATCH_OVERRIDE}" ]]; then
+        RELAUNCH_ARGS+=(--batch-size "${BATCH_OVERRIDE}")
+    fi
+    if [[ -n "${LOSS_MODE}" ]]; then
+        RELAUNCH_ARGS+=(--loss-mode "${LOSS_MODE}")
+    fi
+    if ${ALLOW_NONPOWER2}; then
+        RELAUNCH_ARGS+=(--allow-nonpower2)
+    fi
+    if ${USE_EXPLICIT_LAYOUT}; then
+        RELAUNCH_ARGS+=(--teacher-gpus "${TEACHER_GPU_LIST}")
+        RELAUNCH_ARGS+=(--train-gpus "${TRAIN_GPU_LIST}")
+    fi
     if [[ -n "${KEEPALIVE_SEC}" ]] && (( KEEPALIVE_SEC > 0 )); then
         RELAUNCH_ARGS+=(--keepalive)
     fi
@@ -85,13 +129,88 @@ if ${RUN_BACKGROUND}; then
     mkdir -p "$(dirname "${NOHUP_LOG}")"
     echo "Launching background training (PID will be printed, then exits)."
     echo "Monitor:  tail -f ${NOHUP_LOG}"
-    nohup bash "$0" --gpus "${GPU_COUNT}" --steps "${NUM_STEPS}" "${RELAUNCH_ARGS[@]}" \
+    # Re-invoke with explicit layout args, not legacy --gpus
+    nohup bash "$0" --teacher-gpus "${TEACHER_GPU_LIST}" --train-gpus "${TRAIN_GPU_LIST}" \
+        --steps "${NUM_STEPS}" "${RELAUNCH_ARGS[@]}" \
         > "${NOHUP_LOG}" 2>&1 &
     disown
     echo "Background PID: $!"
     exit 0
 fi
 
+# ── resolve GPU layout ──────────────────────────────────────────────────────
+# Helper: convert comma-separated list to bash array and count elements.
+_parse_gpu_list() {
+    # Prints elements one per line; count with wc -l.
+    local _list="$1"
+    echo "${_list}" | tr ',' '\n' | sed '/^[[:space:]]*$/d'
+}
+
+if ${USE_EXPLICIT_LAYOUT}; then
+    # ── explicit layout (recommended) ───────────────────────────────────────
+    TEACHER_GPUS=($(_parse_gpu_list "${TEACHER_GPU_LIST}"))
+    TRAIN_GPUS_ARR=($(_parse_gpu_list "${TRAIN_GPU_LIST}"))
+    NUM_TEACHERS=${#TEACHER_GPUS[@]}
+    TRAIN_GPUS=${#TRAIN_GPUS_ARR[@]}
+    VERL_GPU_LIST="${TRAIN_GPU_LIST}"
+    VERL_GPUS=${TRAIN_GPUS}
+else
+    # ── legacy layout (--gpus N) ────────────────────────────────────────────
+    if (( GPU_COUNT <= 0 )); then
+        GPU_COUNT=4
+    fi
+    echo "=== WARNING: --gpus is legacy.  Prefer --teacher-gpus / --train-gpus. ==="
+    if (( GPU_COUNT < 2 )); then
+        echo "FATAL: need at least 2 GPUs (1=teacher, >=1=verl train)"
+        exit 1
+    fi
+    if (( GPU_COUNT >= 5 )); then
+        NUM_TEACHERS=2
+        TEACHER_GPUS=(0 1)
+        TRAIN_GPUS=$(( GPU_COUNT - 2 ))
+        VERL_GPU_LIST=$(seq -s, 2 $(( GPU_COUNT - 1 )))
+    else
+        NUM_TEACHERS=1
+        TEACHER_GPUS=(0)
+        TRAIN_GPUS=$(( GPU_COUNT - 1 ))
+        VERL_GPU_LIST=$(seq -s, 1 $(( GPU_COUNT - 1 )))
+    fi
+    TEACHER_GPU_LIST=$(IFS=,; echo "${TEACHER_GPUS[*]}")
+    TRAIN_GPU_LIST="${VERL_GPU_LIST}"
+    TRAIN_GPUS_ARR=($(_parse_gpu_list "${TRAIN_GPU_LIST}"))
+    VERL_GPUS=${TRAIN_GPUS}
+fi
+
+# ── power-of-two guard ──────────────────────────────────────────────────────
+_is_power_of_two() {
+    local _n="$1"
+    (( _n > 0 )) && (( (_n & (_n - 1)) == 0 ))
+}
+if ! _is_power_of_two "${TRAIN_GPUS}"; then
+    if ${ALLOW_NONPOWER2}; then
+        echo "=== WARNING: TRAIN_GPUS=${TRAIN_GPUS} is NOT a power of 2. ==="
+        echo "=== This topology is known risky for FSDP2 / NCCL allgather deadlock. ==="
+        echo "=== Proceeding because --allow-nonpower2 was given. ==="
+    else
+        echo "FATAL: TRAIN_GPUS=${TRAIN_GPUS} is non-power-of-two and known risky"
+        echo "for FSDP2 / NCCL allgather deadlock on this node."
+        echo "Use --allow-nonpower2 to override, or set --train-gpus to 1,2,4,8."
+        echo "Recommended: --teacher-gpus 0 --train-gpus 1,2,3,4"
+        exit 1
+    fi
+fi
+
+# ── teacher URLs ────────────────────────────────────────────────────────────
+if (( NUM_TEACHERS == 1 )); then
+    TEACHER_URLS="http://127.0.0.1:${TEACHER_PORT}"
+elif (( NUM_TEACHERS == 2 )); then
+    TEACHER_URLS="http://127.0.0.1:${TEACHER_PORT},http://127.0.0.1:${TEACHER_PORT_2}"
+else
+    echo "FATAL: NUM_TEACHERS=${NUM_TEACHERS} unsupported (max 2)"
+    exit 1
+fi
+
+# ── fixed paths ─────────────────────────────────────────────────────────────
 MODEL_PATH="/inspire/hdd/global_user/mengweicheng-240108120092/lzy/models/Qwen3-VL-4B-Instruct"
 TEACHER_MODEL="/inspire/hdd/global_user/mengweicheng-240108120092/lzy/models/Qwen3-VL-32B-Instruct"
 PARQUET="${PARQUET_OVERRIDE:-/inspire/hdd/global_user/mengweicheng-240108120092/lzy/fc-opd-storage/outputs/fc_opd/geometry3k_full/train.parquet}"
@@ -105,8 +224,6 @@ REWARD_FN="file://${REPO_ROOT_ABS}/src/dual_track_opd/fc_opd/smoke_reward.py"
 mkdir -p "$(dirname "${TEACHER_LOG}")"
 
 # ── validation split ─────────────────────────────────────────────────────────
-# Auto-create a held-out validation set from the training parquet (one-time).
-# Geometry3K has 2101 prompts; we hold out ~10% (200) for periodic evaluation.
 VAL_PARQUET="${PARQUET%.parquet}_val200.parquet"
 ROLLOUT_DIR="${REPO_ROOT_ABS}/outputs/${RUN_ID}/rollouts"
 VAL_DIR="${REPO_ROOT_ABS}/outputs/${RUN_ID}/validation"
@@ -122,51 +239,27 @@ print(f'Val split created: {len(val)} rows (last {n_val} of {len(df)})')
 "
 fi
 mkdir -p "${ROLLOUT_DIR}" "${VAL_DIR}"
-# ──────────────────────────────────────────────────────────────────────────────
 
-# ── GPU math ────────────────────────────────────────────────────────────────
-# GPU 0: Teacher #1 (32B, 66 GB)
-# GPU 1 (if >=5 total): Teacher #2 (32B, 66 GB)
-# Remaining GPUs: verl PPO training (WorkerDict + vLLM)
-if (( GPU_COUNT < 2 )); then
-    echo "ERROR: need at least 2 GPUs (1=teacher, >=1=verl train)"
-    exit 1
-fi
-if (( GPU_COUNT >= 5 )); then
-    NUM_TEACHERS=2
-    TEACHER_GPU=0
-    TEACHER_GPU_2=1
-    TRAIN_GPUS=$(( GPU_COUNT - 2 ))
-    VERL_GPU_LIST=$(seq -s, 2 $(( GPU_COUNT - 1 )))
-    TEACHER_URLS="http://127.0.0.1:${TEACHER_PORT},http://127.0.0.1:${TEACHER_PORT_2}"
-    TEACHER_LOG_2="${REPO_ROOT_ABS}/artifacts/fc_opd/teacher2_${RUN_ID}.log"
-else
-    NUM_TEACHERS=1
-    TEACHER_GPU=0
-    TRAIN_GPUS=$(( GPU_COUNT - 1 ))
-    VERL_GPU_LIST=$(seq -s, 1 $(( GPU_COUNT - 1 )))
-    TEACHER_URLS="http://127.0.0.1:${TEACHER_PORT}"
-fi
-VERL_GPUS=${TRAIN_GPUS}
+# ── batch / steps math ──────────────────────────────────────────────────────
 SAVE_FREQ=100
-
-# Aligned with VA-OPD: K=8 sibling rollouts, 5 epochs.
 ROLLOUT_N=8
-# TRAIN_BATCH_SIZE must produce PPO_MINI_BATCH_SIZE that is divisible by TRAIN_GPUS.
-# Choose the largest multiple of TRAIN_GPUS that is ≤ 8.
-TRAIN_BATCH_SIZE=$(( (8 / TRAIN_GPUS) * TRAIN_GPUS ))
+
+if [[ -n "${BATCH_OVERRIDE}" ]]; then
+    TRAIN_BATCH_SIZE="${BATCH_OVERRIDE}"
+else
+    # Choose the largest multiple of TRAIN_GPUS that is ≤ 8.
+    TRAIN_BATCH_SIZE=$(( (8 / TRAIN_GPUS) * TRAIN_GPUS ))
+fi
 if (( TRAIN_BATCH_SIZE < 1 )); then TRAIN_BATCH_SIZE=${TRAIN_GPUS}; fi
 PPO_MINI_BATCH_SIZE=$(( TRAIN_BATCH_SIZE * ROLLOUT_N ))
 MICRO_BATCH_PER_GPU=1
-# Auto-compute steps to cover NUM_EPOCHS full passes when --steps is not given.
+
 if (( NUM_STEPS <= 0 )); then
     NUM_STEPS=$(( (NUM_EPOCHS * DATASET_SIZE + TRAIN_BATCH_SIZE - 1) / TRAIN_BATCH_SIZE ))
 fi
 
+# ── resume logic ────────────────────────────────────────────────────────────
 if [[ -n "${RESUME_CKPT}" ]]; then
-    # RESUME_CKPT can be either a specific global_step_XXX dir or a run dir.
-    # verl's find_latest_ckpt_path scans default_local_dir for global_step_*,
-    # so default_local_dir must be the *parent* of the step directory.
     RESUME_PARENT=$(dirname "${RESUME_CKPT}")
     if [[ "$(basename "${RESUME_CKPT}")" == global_step_* ]]; then
         CHECKPOINT_DIR="${RESUME_PARENT}"
@@ -179,24 +272,38 @@ else
     RESUME_MODE="disable"
 fi
 
+# ── layout summary ──────────────────────────────────────────────────────────
+_p2_label() { _is_power_of_two "$1" && echo "✓ power-of-2" || echo "✗ NON-POWER-OF-2 (risky)"; }
+TEACHER_LOG_2=""
+if (( NUM_TEACHERS >= 2 )); then
+    TEACHER_LOG_2="${REPO_ROOT_ABS}/artifacts/fc_opd/teacher2_${RUN_ID}.log"
+fi
+
 echo "══════════════════════════════════════════════════════════════"
 echo "  FC-OPD Training — VA-OPD aligned"
-echo "  Run ID:       ${RUN_ID}"
-echo "  Steps:        ${NUM_STEPS} (${NUM_EPOCHS} epochs × ${DATASET_SIZE}/${TRAIN_BATCH_SIZE} batch)"
-echo "  Save freq:    ${SAVE_FREQ}"
-echo "  Loss mode:    va_opd (VA grouped reverse KL)"
-echo "  Top-K:        ${TOP_K}"
-echo "  Rollout n:    ${ROLLOUT_N}"
-echo "  Train batch:  ${TRAIN_BATCH_SIZE} (VA-OPD: 16)"
-echo "  LR:           2e-6 (VA-OPD: 2e-6)"
-echo "  GPU layout:   teachers=${NUM_TEACHERS}, train=${VERL_GPU_LIST}"
-echo "  Data:         ${PARQUET}"
-echo "  Val  data:    ${VAL_PARQUET}"
-echo "  Eval freq:    every ${SAVE_FREQ} steps"
-echo "  Rollout dir:  ${ROLLOUT_DIR}"
-echo "  Val dir:      ${VAL_DIR}"
-echo "  Train log:    ${TRAIN_LOG}"
-echo "  Checkpoint:   ${CHECKPOINT_DIR}"
+echo "  Run ID:             ${RUN_ID}"
+echo "  Steps:              ${NUM_STEPS} (${NUM_EPOCHS} epochs × ${DATASET_SIZE}/${TRAIN_BATCH_SIZE} batch)"
+echo "  Save freq:          ${SAVE_FREQ}"
+echo "  Loss mode:          ${LOSS_MODE}"
+echo "  Top-K:              ${TOP_K}"
+echo "  Rollout n:          ${ROLLOUT_N}"
+echo "  LR:                 2e-6 (VA-OPD: 2e-6)"
+echo "──────────────────────────────────────────────────────────────"
+echo "  Teacher GPU list:   ${TEACHER_GPU_LIST}"
+echo "  Train GPU list:     ${TRAIN_GPU_LIST}"
+echo "  Num teachers:       ${NUM_TEACHERS}"
+echo "  Train world size:   ${TRAIN_GPUS}  $(_p2_label ${TRAIN_GPUS})"
+echo "  Train batch size:   ${TRAIN_BATCH_SIZE}"
+echo "  PPO mini-batch:     ${PPO_MINI_BATCH_SIZE}"
+echo "  Non-power-2 ok:     ${ALLOW_NONPOWER2}"
+echo "──────────────────────────────────────────────────────────────"
+echo "  Data:               ${PARQUET}"
+echo "  Val  data:          ${VAL_PARQUET}"
+echo "  Eval freq:          every ${SAVE_FREQ} steps"
+echo "  Rollout dir:        ${ROLLOUT_DIR}"
+echo "  Val dir:            ${VAL_DIR}"
+echo "  Train log:          ${TRAIN_LOG}"
+echo "  Checkpoint:         ${CHECKPOINT_DIR}"
 echo "══════════════════════════════════════════════════════════════"
 echo ""
 
@@ -226,8 +333,11 @@ rm -rf /dev/shm/*vllm* /dev/shm/*psm_* 2>/dev/null || true
 sleep 2
 
 # ── 1) Teacher(s) ───────────────────────────────────────────────────────────
-echo "=== Teacher #1 (GPU ${TEACHER_GPU}, port ${TEACHER_PORT}) ==="
-CUDA_VISIBLE_DEVICES=${TEACHER_GPU} \
+# Each teacher gets its own single visible GPU, and always uses --device cuda:0
+# inside the container GPU.
+
+echo "=== Teacher #1 (GPU ${TEACHER_GPUS[0]}, port ${TEACHER_PORT}) ==="
+CUDA_VISIBLE_DEVICES=${TEACHER_GPUS[0]} \
     ${CONDA_ENV}/bin/python -m dual_track_opd.fc_opd.teacher_service \
     --backend transformers --model "${TEACHER_MODEL}" \
     --port "${TEACHER_PORT}" --top-k "${TOP_K}" --dtype bfloat16 --device "cuda:0" \
@@ -241,8 +351,8 @@ for i in $(seq 1 300); do
 done
 
 if (( NUM_TEACHERS >= 2 )); then
-    echo "=== Teacher #2 (GPU ${TEACHER_GPU_2}, port ${TEACHER_PORT_2}) ==="
-    CUDA_VISIBLE_DEVICES=${TEACHER_GPU_2} \
+    echo "=== Teacher #2 (GPU ${TEACHER_GPUS[1]}, port ${TEACHER_PORT_2}) ==="
+    CUDA_VISIBLE_DEVICES=${TEACHER_GPUS[1]} \
         ${CONDA_ENV}/bin/python -m dual_track_opd.fc_opd.teacher_service \
         --backend transformers --model "${TEACHER_MODEL}" \
         --port "${TEACHER_PORT_2}" --top-k "${TOP_K}" --dtype bfloat16 --device "cuda:0" \
@@ -257,7 +367,7 @@ if (( NUM_TEACHERS >= 2 )); then
 fi
 
 # ── 2) Ray ──────────────────────────────────────────────────────────────────
-echo "=== Ray (${VERL_GPUS} GPUs) ==="
+echo "=== Ray (${VERL_GPUS} GPUs, devices ${VERL_GPU_LIST}) ==="
 export RAY_memory_usage_threshold=0.95
 CUDA_VISIBLE_DEVICES=${VERL_GPU_LIST} ray start --head --num-gpus=${VERL_GPUS} --disable-usage-stats
 sleep 3
@@ -353,7 +463,7 @@ ${CONDA_ENV}/bin/python -m verl.trainer.main_ppo \
     "+algorithm.fc_opd.teacher_urls='${TEACHER_URLS}'" \
     "+algorithm.fc_opd.conditions=[full,degraded]" \
     "+algorithm.fc_opd.loss_coef=1.0" \
-    "+algorithm.fc_opd.loss_mode=va_opd" \
+    "+algorithm.fc_opd.loss_mode=${LOSS_MODE}" \
     "+algorithm.fc_opd.renormalize_topk=true" \
     "+algorithm.fc_opd.include_tail=true" \
     "trainer.total_training_steps=${NUM_STEPS}" \
@@ -399,7 +509,6 @@ echo "  Exit:   ${VERL_EXIT}"
 echo "══════════════════════════════════════════════════════════════"
 
 # ── keepalive ────────────────────────────────────────────────────────────────
-# Optional GPU-busy keepalive, only after successful training and cleanup.
 _KEEPALIVE_SEC=${KEEPALIVE_SEC:-0}
 KEEPALIVE_GPUS="${KEEPALIVE_GPUS:-2,3}"
 _KEEPALIVE_SCRIPT="/inspire/hdd/global_user/mengweicheng-240108120092/lzy/scripts/busy_keepalive.py"
