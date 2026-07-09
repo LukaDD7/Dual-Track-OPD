@@ -18,9 +18,9 @@ The legacy PPO/FSDP line has been exhaustively tested:
 
 ### a. vLLM default wheel may be CUDA 12.9
 
-vLLM publishes wheels compiled against specific CUDA versions. A `cu129` wheel loaded under driver 570.x (CUDA 12.8 max) will fail at `cudaLaunchKernel` with `cudaErrorInvalidDeviceFunction` or silently corrupt NCCL communicators.
+vLLM publishes wheels compiled against specific CUDA versions. vLLM 0.11.x GitHub releases only provide `+cu129` CUDA wheels — there is **no** `+cu128` release wheel. A `cu129` wheel loaded under driver 570.x (CUDA 12.8 max) will fail at `cudaLaunchKernel` with `cudaErrorInvalidDeviceFunction` or silently corrupt NCCL communicators.
 
-**Mitigation**: Pin vLLM 0.11.0 with explicit `cu128` / `torch2.8` variant.
+**Mitigation**: Install vLLM 0.11.0 from PyPI after torch 2.8.0+cu128 is installed, using PyTorch cu128 `--extra-index-url` for dependency resolution. Validate with GPU runtime smoke (not just import check). PyPI wheel filename may not carry a CUDA tag — the real compatibility check is GPU runtime.
 
 ### b. Driver 570.x only supports CUDA ≤ 12.8
 
@@ -54,10 +54,11 @@ Current `third_party/verl` is at `bec9ef74` (verl 0.7.1). The GKD recipe is deve
 | torchaudio | 2.8.0+cu128 | Same index |
 | verl | commit `bcb638649a50e58494a8ddd92085ad1174f674b8` | GKD recipe pin, NOT verl 0.7.1 |
 | recipe submodule | commit `ba246418f4de12b845a09bba975f1a5242adc898` | `git submodule update --init --recursive recipe` |
-| vLLM | 0.11.0 | cu128 / torch2.8 variant only |
+| vLLM | 0.11.0 | PyPI (not GitHub release), cu128 extra-index; no +cu128 release wheel exists |
 | flash-attn | 2.8.1+cu12torch2.8 | Match CUDA 12.x + torch 2.8 |
 | flashinfer-python | 0.3.1 | Required by vLLM 0.11.0 |
-| TransformerEngine | v2.6 | Megatron backend requirement |
+| TransformerEngine (meta + cu12) | 2.6.0.post1 (PyPI prebuilt) | CPU: meta + CUDA kernels only |
+| TransformerEngine (torch bindings) | 2.6.0.post1 (source-only) | GPU: offline build via build_te_torch_offline.sh; no prebuilt wheel exists for this version |
 | Megatron-LM | core_v0.13.1 | GKD Megatron workers requirement |
 | nvidia-cudnn-cu12 | 9.10.2.21 | Explicit pin to avoid conda/pip resolver conflicts |
 

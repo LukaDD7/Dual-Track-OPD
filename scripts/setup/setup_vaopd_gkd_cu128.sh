@@ -17,9 +17,9 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 # ── env var overrides ─────────────────────────────────────────────────────
 CONDA_BASE="${CONDA_BASE:-/inspire/hdd/global_user/mengweicheng-240108120092/lzy/miniconda3}"
+CONDA_ENV_DIR="${CONDA_ENV_DIR:-/inspire/hdd/global_user/mengweicheng-240108120092/lzy/envs}"
 CUDA_HOME="${CUDA_HOME:-/inspire/hdd/global_user/mengweicheng-240108120092/lzy/envs/cuda128-toolchain}"
 MODEL_ROOT="${MODEL_ROOT:-/inspire/hdd/global_user/mengweicheng-240108120092/lzy/models}"
-CONDA_ENV_DIR="${CONDA_BASE}/envs"
 ENV_NAME="vaopd-gkd-cu128"
 ENV_PATH="${CONDA_ENV_DIR}/${ENV_NAME}"
 CONDA="${CONDA_BASE}/bin/conda"
@@ -36,7 +36,7 @@ RECIPE_COMMIT="ba246418f4de12b845a09bba975f1a5242adc898"
 VLLM_VER="0.11.0"
 FLASH_ATTN_VER="2.8.1"
 FLASHINFER_VER="0.3.1"
-TE_TAG="v2.6"
+TE_VER="2.6.0.post1"
 MEGATRON_TAG="core_v0.13.1"
 CUDNN_VER="9.10.2.21"
 VERL_GKD_DIR="${REPO_ROOT}/external/verl_gkd"
@@ -124,23 +124,34 @@ echo ""
 echo "=== Installing nvidia-cudnn-cu12==${CUDNN_VER} ==="
 _cmd "${ENV_PATH}/bin/pip" install "nvidia-cudnn-cu12==${CUDNN_VER}"
 
-# ── 4. vLLM (explicit cu128 wheel from GitHub releases) ────────────────────
+# ── 4. vLLM from PyPI with torch cu128 extra-index ────────────────────────
+# NOTE: vLLM 0.11.x GitHub releases only provide +cu129 wheels.
+# There is no +cu128 GitHub release wheel.  Install from PyPI instead;
+# the cu128 extra-index protects torch/CUDA dependency resolution.
 echo ""
-echo "=== Installing vLLM ${VLLM_VER} (cu128 wheel) ==="
-VLLM_WHEEL_URL="https://github.com/vllm-project/vllm/releases/download/v${VLLM_VER}/vllm-${VLLM_VER}+cu128-cp38-abi3-manylinux_2_35_${ARCH}.whl"
+echo "=== Installing vLLM ${VLLM_VER} from PyPI with torch cu128 index ==="
+_cmd "${ENV_PATH}/bin/pip" install \
+    "vllm==${VLLM_VER}" \
+    --extra-index-url "${CUDA_INDEX}"
 
-# Check wheel URL exists before attempting install
-if ${DRY_RUN}; then
-    _cmd "curl -I ${VLLM_WHEEL_URL}"
-else
-    echo "Checking vLLM wheel URL: ${VLLM_WHEEL_URL}"
-    HTTP_STATUS=$(curl -sL -o /dev/null -w "%{http_code}" "${VLLM_WHEEL_URL}" 2>/dev/null || echo "000")
-    if [[ "${HTTP_STATUS}" != "200" ]] && [[ "${HTTP_STATUS}" != "302" ]]; then
-        fatal "vLLM wheel not found at ${VLLM_WHEEL_URL} (HTTP ${HTTP_STATUS}). No fallback to PyPI default wheel allowed."
-    fi
-    echo "  URL OK (HTTP ${HTTP_STATUS})"
-    "${ENV_PATH}/bin/pip" install "${VLLM_WHEEL_URL}" --extra-index-url "${CUDA_INDEX}"
-fi
+# Post-install vLLM audit (strict)
+echo ""
+echo "--- vLLM post-install audit ---"
+_cmd "${ENV_PATH}/bin/python" - "${VLLM_VER}" <<'PY'
+import sys, torch, vllm
+expected = sys.argv[1]
+print(f"torch: {torch.__version__}")
+print(f"torch.version.cuda: {torch.version.cuda}")
+print(f"vllm: {vllm.__version__}")
+assert torch.__version__.startswith("2.8.0"), f"torch mismatch: {torch.__version__}"
+assert torch.version.cuda == "12.8", f"torch cuda mismatch: {torch.version.cuda}"
+assert vllm.__version__ == expected, f"vllm mismatch: {vllm.__version__}"
+print("vLLM post-install audit: PASS")
+PY
+
+echo ""
+echo "--- pip check ---"
+_cmd "${ENV_PATH}/bin/python" -m pip check
 
 # ── 5. flash-attn (pre-built wheel, no source compile) ─────────────────────
 echo ""
@@ -156,7 +167,7 @@ fi
 if [[ -x "${ENV_PATH}/bin/python" ]]; then
     PY_SHORT="cp$("${ENV_PATH}/bin/python" -c 'import sys; print(f"{sys.version_info.major}{sys.version_info.minor}")' 2>/dev/null)"
 else
-    PY_SHORT="cp312"  # assume target (env not created yet in dry-run)
+    PY_SHORT="cp312"
 fi
 if [[ "${PY_SHORT}" != "cp312" ]]; then
     if ${DRY_RUN}; then
@@ -173,14 +184,72 @@ echo ""
 echo "=== Installing flashinfer-python ${FLASHINFER_VER} ==="
 _cmd "${ENV_PATH}/bin/pip" install "flashinfer-python==${FLASHINFER_VER}"
 
-# ── 7. TransformerEngine (from git tag, requires CUDA_HOME) ────────────────
+# ── 7. TransformerEngine (CPU: meta + cu12 only; GPU: offline torch build) ─
+# transformer-engine (pure Python meta) + transformer_engine_cu12 (CUDA kernels)
+# are prebuilt manylinux wheels that install fine on CPU node.
+# transformer_engine_torch (PyTorch bindings) is SOURCE-ONLY for v2.6 —
+# it MUST be compiled on GPU node via scripts/hpc/build_te_torch_offline.sh.
 echo ""
-echo "=== Installing TransformerEngine ${TE_TAG} from git ==="
-if [[ ! -x "${CUDA_HOME}/bin/nvcc" ]]; then
-    fatal "nvcc not found at ${CUDA_HOME}/bin/nvcc. Set CUDA_HOME to the CUDA 12.8 toolchain on NFS (e.g. /inspire/hdd/.../lzy/envs/cuda128-toolchain)."
-fi
-echo "  Using CUDA_HOME=${CUDA_HOME} (nvcc: $("${CUDA_HOME}/bin/nvcc" --version 2>&1 | head -1))"
-_cmd "CUDA_HOME=${CUDA_HOME} NVTE_FRAMEWORK=pytorch ${ENV_PATH}/bin/pip install --no-deps git+https://github.com/NVIDIA/TransformerEngine.git@${TE_TAG}"
+echo "=== Installing TransformerEngine ${TE_VER} (meta + cu12 only) ==="
+
+_CONSTRAINTS="/tmp/te-constraints-$$.txt"
+_cmd "${ENV_PATH}/bin/pip" freeze | grep -E '^(torch|torchvision|torchaudio|vllm|nvidia-cudnn|nvidia-nccl|nvidia-cublas|nvidia-cuda-runtime|nvidia-cusolver)' > "${_CONSTRAINTS}" 2>/dev/null || true
+_cmd "${ENV_PATH}/bin/pip" install \
+    --only-binary=:all: \
+    "transformer-engine==${TE_VER}" \
+    "transformer-engine-cu12==${TE_VER}" \
+    -c "${_CONSTRAINTS}"
+
+echo ""
+echo "--- TE post-install audit (CPU) ---"
+_cmd "${ENV_PATH}/bin/python" - "${TE_VER}" <<'PY'
+import sys, torch
+import transformer_engine
+
+expected_te = sys.argv[1]
+te_ver = getattr(transformer_engine, '__version__', 'unknown')
+print(f"torch: {torch.__version__}  cuda: {torch.version.cuda}")
+print(f"transformer_engine: {te_ver}")
+assert torch.__version__.startswith("2.8.0"), f"torch mismatch: {torch.__version__}"
+assert torch.version.cuda == "12.8", f"cuda mismatch: {torch.version.cuda}"
+assert te_ver == expected_te, f"TE version mismatch: {te_ver}"
+
+try:
+    import transformer_engine.pytorch as te
+    print("transformer_engine.pytorch: OK (already built)")
+except Exception as e:
+    print(f"transformer_engine.pytorch: expected not yet available ({type(e).__name__})")
+    print("  -> Must build on GPU: bash scripts/hpc/build_te_torch_offline.sh")
+
+print("TE CPU audit: PASS (meta + cu12 installed; pytorch pending GPU build)")
+PY
+
+echo ""
+echo "--- pip show TE ---"
+_cmd "${ENV_PATH}/bin/python" -m pip show transformer-engine transformer-engine-cu12 2>/dev/null || true
+echo ""
+echo "--- pip check ---"
+_cmd "${ENV_PATH}/bin/python" -m pip check
+
+# Prepare wheelhouse for offline TE torch build on GPU node.
+# pip download fails on CPU (isolated build env lacks torch). Fetch sdist via wget.
+WHEELHOUSE="${REPO_ROOT}/wheelhouse/te260-cu128-torch280-py312"
+echo ""
+echo "--- Preparing TE torch wheelhouse for GPU offline build ---"
+_cmd mkdir -p "${WHEELHOUSE}"
+_cmd /bin/bash -c "URL=\$(${ENV_PATH}/bin/python -c \"
+import urllib.request, json
+url = 'https://pypi.org/pypi/transformer-engine-torch/${TE_VER}/json'
+data = json.load(urllib.request.urlopen(url))
+for u in data['urls']:
+    if u['packagetype'] == 'sdist':
+        print(u['url'])
+\"); wget -q -P ${WHEELHOUSE} \$URL && echo 'Downloaded: ' \$URL"
+_cmd "${ENV_PATH}/bin/pip" install cmake ninja pybind11 packaging wheel setuptools
+echo "  Wheelhouse: ${WHEELHOUSE}"
+echo "  GPU build:  bash scripts/hpc/build_te_torch_offline.sh"
+
+rm -f "${_CONSTRAINTS}" 2>/dev/null || true
 
 # ── 8. Megatron-LM (from git tag, not pip package) ─────────────────────────
 echo ""
@@ -204,7 +273,6 @@ if [[ ! -d "${VERL_GKD_DIR}" ]]; then
     _cmd git clone "${VERL_REPO}" "${VERL_GKD_DIR}/verl"
     _cmd git -C "${VERL_GKD_DIR}/verl" checkout "${VERL_COMMIT}"
 
-    # Verify verl checkout (only in --execute mode)
     if ${DRY_RUN}; then
         echo "[DRY-RUN] would verify verl checkout at ${VERL_COMMIT}"
     else
@@ -212,18 +280,15 @@ if [[ ! -d "${VERL_GKD_DIR}" ]]; then
         if [[ "${_VERL_ACTUAL}" != "${VERL_COMMIT}" ]]; then
             fatal "verl checkout mismatch: expected ${VERL_COMMIT}, got ${_VERL_ACTUAL}"
         fi
-        echo "  verl HEAD: ${_VERL_ACTUAL} ✓"
+        echo "  verl HEAD: ${_VERL_ACTUAL} OK"
     fi
 
     echo ""
     echo "=== Initializing recipe submodule ==="
     _cmd git -C "${VERL_GKD_DIR}/verl" submodule update --init --recursive recipe
-
-    # Checkout recipe to pinned commit
     _cmd git -C "${VERL_GKD_DIR}/verl/recipe" fetch origin 2>/dev/null || true
     _cmd git -C "${VERL_GKD_DIR}/verl/recipe" checkout "${RECIPE_COMMIT}"
 
-    # Verify recipe checkout — fatal on mismatch, no silent swallowing (only in --execute)
     if ${DRY_RUN}; then
         echo "[DRY-RUN] would verify recipe checkout at ${RECIPE_COMMIT}"
     else
@@ -231,7 +296,7 @@ if [[ ! -d "${VERL_GKD_DIR}" ]]; then
         if [[ "${_RECIPE_ACTUAL}" != "${RECIPE_COMMIT}" ]]; then
             fatal "recipe checkout mismatch: expected ${RECIPE_COMMIT}, got ${_RECIPE_ACTUAL}"
         fi
-        echo "  recipe HEAD: ${_RECIPE_ACTUAL} ✓"
+        echo "  recipe HEAD: ${_RECIPE_ACTUAL} OK"
     fi
 fi
 
@@ -240,13 +305,20 @@ echo ""
 echo "=== Installing verl (editable, --no-deps) ==="
 _cmd "${ENV_PATH}/bin/pip install --no-deps -e ${VERL_GKD_DIR}/verl"
 
-# ── 11. Ray ────────────────────────────────────────────────────────────────
+# ── 11. core verl deps (not pulled by --no-deps) ──────────────────────────
+echo ""
+echo "=== Installing core verl dependencies ==="
+_cmd "${ENV_PATH}/bin/pip" install \
+    'tensordict>=0.8.0,<=0.10.0,!=0.9.0' \
+    omegaconf hydra-core
+
+# ── 12. Ray ────────────────────────────────────────────────────────────────
 echo ""
 echo "=== Ensuring ray is installed ==="
-_cmd "${ENV_PATH}/bin/pip install ray[default]" 2>/dev/null || \
-    _cmd "${ENV_PATH}/bin/pip install ray"
+_cmd "${ENV_PATH}/bin/pip" install ray[default] 2>/dev/null || \
+    _cmd "${ENV_PATH}/bin/pip" install ray
 
-# ── 12. post-install audit ─────────────────────────────────────────────────
+# ── 13. post-install audit ─────────────────────────────────────────────────
 echo ""
 echo "══════════════════════════════════════════════════════════════"
 echo "  POST-INSTALL AUDIT"
@@ -254,7 +326,6 @@ echo "════════════════════════�
 
 _audit_failures=0
 
-# a. torch.version.cuda must be 12.8
 echo ""
 echo "--- Audit: torch.version.cuda == 12.8 ---"
 if ${DRY_RUN}; then
@@ -272,7 +343,6 @@ else
     fi
 fi
 
-# b. No cu129/cu130 in pip freeze
 echo ""
 echo "--- Audit: no cu129/cu130 in pip freeze ---"
 if ${DRY_RUN}; then
@@ -288,38 +358,36 @@ else
     fi
 fi
 
-# c. import torch, vllm, ray
 echo ""
 echo "--- Audit: import torch, vllm, ray ---"
 if ${DRY_RUN}; then
     echo "[DRY-RUN] would test imports"
 else
     "${ENV_PATH}/bin/python" -c "
-import torch; print(f'  torch={torch.__version__} ✓')
-import vllm; print(f'  vllm={vllm.__version__} ✓')
-import ray; print(f'  ray={ray.__version__} ✓')
+import torch; print('  torch=' + torch.__version__ + ' OK')
+import vllm; print('  vllm=' + vllm.__version__ + ' OK')
+import ray; print('  ray=' + ray.__version__ + ' OK')
 " 2>&1 || {
         echo "FAIL: one or more imports failed (torch/vllm/ray)"
         _audit_failures=$((_audit_failures + 1))
     }
 fi
 
-# d. import megatron, transformer_engine
 echo ""
-echo "--- Audit: import megatron, transformer_engine ---"
+echo "--- Audit: import megatron, transformer_engine, verl ---"
 if ${DRY_RUN}; then
-    echo "[DRY-RUN] would test megatron/te imports"
+    echo "[DRY-RUN] would test megatron/te/verl imports"
 else
     "${ENV_PATH}/bin/python" -c "
-import megatron; print(f'  megatron ✓ ({megatron.__file__})')
-import transformer_engine; print(f'  transformer_engine={transformer_engine.__version__} ✓')
+import megatron; print('  megatron OK')
+import transformer_engine; print('  transformer_engine=' + str(getattr(transformer_engine, '__version__', '?')) + ' OK')
+import verl; print('  verl=' + verl.__version__ + ' OK')
 " 2>&1 || {
-        echo "FAIL: one or more imports failed (megatron/transformer_engine)"
+        echo "FAIL: one or more imports failed (megatron/transformer_engine/verl)"
         _audit_failures=$((_audit_failures + 1))
     }
 fi
 
-# ── post-install preamble ──────────────────────────────────────────────────
 echo ""
 _ver_preamble
 
@@ -329,12 +397,15 @@ if ${DRY_RUN}; then
     echo "  DRY-RUN complete.  Re-run with --execute to install."
 else
     if (( _audit_failures > 0 )); then
-        echo "  POST-INSTALL AUDIT: ${_audit_failures} FAILURE(S) — see above"
+        echo "  POST-INSTALL AUDIT: ${_audit_failures} FAILURE(S)"
         echo "  Setup incomplete. Fix failures before using this env."
         exit 1
     fi
     echo "  Setup complete — all audits passed."
     echo "  Activate:  conda activate ${ENV_NAME}"
     echo "  Verl dir:  ${VERL_GKD_DIR}/verl"
+    echo ""
+    echo "  NEXT: On GPU node, build TE torch bindings:"
+    echo "    bash scripts/hpc/build_te_torch_offline.sh"
 fi
 echo "══════════════════════════════════════════════════════════════"
