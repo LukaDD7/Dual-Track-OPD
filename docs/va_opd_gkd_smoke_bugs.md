@@ -267,6 +267,21 @@ token prompt and passes the list positionally to `LLM.generate`. The patch
 upgrades both pristine sources and files that already contain the B20 memory
 fix, avoiding an incorrect idempotent skip.
 
+### B22. Failed teacher warmup leaves orphaned `VLLM::EngineCore`
+
+**Symptom**: after a warmup/API failure, the next teacher launch sees only
+25.89 GiB free. `nvidia-smi` shows the previous `VLLM::EngineCore` reparented to
+PID 1 and retaining 51.8 GiB, in addition to an unrelated 64 GiB workload.
+
+**Root cause**: the launcher killed only the `worker.py` parent PID. vLLM 0.11
+runs EngineCore in a subprocess, which survived parent termination and retained
+its CUDA context.
+
+**Resolution**: launch proxy and teacher under separate `setsid` process groups
+and install an EXIT trap that terminates the complete groups, escalating from
+TERM to KILL. Startup failures now print the last 100 worker-log lines so the
+original EngineCore error is retained.
+
 **Key files involved**:
 - `external/verl_gkd/verl/recipe/gkd/megatron/megatron_workers.py` (lines ~782-850) — GKD rollout worker sync_rollout_weights
 - `external/verl_gkd/verl/verl/workers/rollout/vllm_rollout/vllm_rollout.py` (line 155) — ServerAdapter.update_weights

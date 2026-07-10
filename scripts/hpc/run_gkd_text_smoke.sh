@@ -65,6 +65,28 @@ OUTPUT_DIR="${REPO_ROOT}/runs/gkd_smoke/${RUN_ID}"
 DATA_DIR="${OUTPUT_DIR}/data"
 TEACHER_PORT=15555
 TEACHER_PROXY_PORT=15556
+PROXY_PID=""
+WORKER_PID=""
+
+cleanup_teacher_processes() {
+    local pid
+    # proxy.py and worker.py are launched with setsid.  Killing their process
+    # groups also terminates vLLM EngineCore children, which otherwise become
+    # PPID-1 orphans and retain tens of GiB on the teacher GPU.
+    for pid in "${WORKER_PID:-}" "${PROXY_PID:-}"; do
+        [[ -n "${pid}" ]] || continue
+        kill -TERM -- "-${pid}" 2>/dev/null || kill -TERM "${pid}" 2>/dev/null || true
+    done
+    sleep 1
+    for pid in "${WORKER_PID:-}" "${PROXY_PID:-}"; do
+        [[ -n "${pid}" ]] || continue
+        kill -KILL -- "-${pid}" 2>/dev/null || kill -KILL "${pid}" 2>/dev/null || true
+    done
+    WORKER_PID=""
+    PROXY_PID=""
+}
+
+trap cleanup_teacher_processes EXIT
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -374,7 +396,7 @@ cd "${GKD_RECIPE_DIR}/teacher"
 
 # Start proxy (uses CPU, no GPU needed)
 # -u = unbuffered stdout so log is visible immediately
-CUDA_VISIBLE_DEVICES="" nohup "${PYTHON}" -u proxy.py > "${OUTPUT_DIR}/proxy.log" 2>&1 &
+nohup setsid env CUDA_VISIBLE_DEVICES="" "${PYTHON}" -u proxy.py > "${OUTPUT_DIR}/proxy.log" 2>&1 &
 PROXY_PID=$!
 
 # Wait for proxy backend — fatal on timeout
@@ -406,7 +428,7 @@ fi
 
 # Start worker (isolated to TEACHER_GPU)
 # -u = unbuffered stdout so log is visible immediately
-CUDA_VISIBLE_DEVICES="${TEACHER_GPU}" nohup "${PYTHON}" -u worker.py \
+nohup setsid env CUDA_VISIBLE_DEVICES="${TEACHER_GPU}" "${PYTHON}" -u worker.py \
     --backend vllm \
     --tp-size 1 \
     --n-logprobs 32 \
@@ -426,8 +448,8 @@ for i in $(seq 1 180); do
     fi
     if ! kill -0 ${WORKER_PID} 2>/dev/null; then
         echo " DIED"
-        echo "=== worker.log (last 30 lines) ==="
-        tail -30 "${OUTPUT_DIR}/worker.log" 2>/dev/null || true
+        echo "=== worker.log (last 100 lines) ==="
+        tail -100 "${OUTPUT_DIR}/worker.log" 2>/dev/null || true
         echo "FATAL: Teacher worker died during startup"
         exit 1
     fi
@@ -436,8 +458,8 @@ for i in $(seq 1 180); do
 done
 if ! ${WORKER_READY}; then
     echo " TIMEOUT"
-    echo "=== worker.log (last 30 lines) ==="
-    tail -30 "${OUTPUT_DIR}/worker.log" 2>/dev/null || true
+    echo "=== worker.log (last 100 lines) ==="
+    tail -100 "${OUTPUT_DIR}/worker.log" 2>/dev/null || true
     echo "FATAL: Teacher engine not ready after 180s"
     exit 1
 fi
@@ -489,7 +511,7 @@ then
     tail -100 "${OUTPUT_DIR}/worker.log" 2>/dev/null || true
     echo "=== proxy.log (last 30 lines) ==="
     tail -30 "${OUTPUT_DIR}/proxy.log" 2>/dev/null || true
-    kill ${WORKER_PID} ${PROXY_PID} 2>/dev/null || true
+    cleanup_teacher_processes
     echo "FATAL: Teacher end-to-end warmup failed"
     exit 1
 fi
@@ -545,8 +567,7 @@ cd "${REPO_ROOT}"
 echo ""
 echo "=== Cleanup ==="
 "${RAY}" stop -f 2>/dev/null || true
-kill ${PROXY_PID} 2>/dev/null || true
-kill ${WORKER_PID} 2>/dev/null || true
+cleanup_teacher_processes
 sleep 2
 
 # ── validate smoke result ─────────────────────────────────────────────────

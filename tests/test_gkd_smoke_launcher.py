@@ -65,6 +65,17 @@ def test_teacher_readiness_requires_engine_and_end_to_end_inference():
     assert source.index("Teacher end-to-end inference warmup passed") < source.index("=== Starting Ray")
 
 
+def test_teacher_process_group_cleanup_includes_vllm_children():
+    source = SMOKE.read_text(encoding="utf-8")
+
+    assert "trap cleanup_teacher_processes EXIT" in source
+    assert 'nohup setsid env CUDA_VISIBLE_DEVICES=""' in source
+    assert 'nohup setsid env CUDA_VISIBLE_DEVICES="${TEACHER_GPU}"' in source
+    assert 'kill -TERM -- "-${pid}"' in source
+    assert 'kill -KILL -- "-${pid}"' in source
+    assert "worker.log (last 100 lines)" in source
+
+
 def test_smoke_rejects_skipped_teacher_batches_as_fake_progress():
     source = SMOKE.read_text(encoding="utf-8")
 
