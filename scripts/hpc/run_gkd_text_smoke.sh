@@ -317,6 +317,8 @@ echo "[OK] Teacher server ready on port ${TEACHER_PORT}"
 echo ""
 
 # ── 2. Ray (isolated GPUs) ────────────────────────────────────────────────
+# Set PYTHONPATH before Ray starts so workers inherit it
+export PYTHONPATH="${VERL_GKD_DIR}:${PYTHONPATH:-}"
 echo "=== Starting Ray (GPUs ${TRAIN_GPU_LIST}) ==="
 CUDA_VISIBLE_DEVICES="${TRAIN_GPU_LIST}" "${RAY}" start --head --num-gpus="$(echo "${TRAIN_GPU_LIST}" | tr ',' '\n' | wc -l)" --disable-usage-stats
 sleep 3
@@ -354,7 +356,6 @@ export CUDA_VISIBLE_DEVICES="${TRAIN_GPU_LIST}"
 
 TRAIN_LOG="${OUTPUT_DIR}/train.log"
 cd "${GKD_RECIPE_DIR}"
-export PYTHONPATH="${VERL_GKD_DIR}:${PYTHONPATH:-}"
 set +e
 "${PYTHON}" -m "${GKD_MAIN_MODULE}" \
     --config-path="${GKD_RECIPE_DIR}/config" \
