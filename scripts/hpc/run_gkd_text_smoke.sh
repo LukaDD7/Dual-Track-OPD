@@ -22,7 +22,7 @@ RUN_ID="gkd_smoke_${TIMESTAMP}"
 # ── env var overrides ─────────────────────────────────────────────────────
 CONDA_BASE="${CONDA_BASE:-/inspire/hdd/global_user/mengweicheng-240108120092/lzy/miniconda3}"
 MODEL_ROOT="${MODEL_ROOT:-/inspire/hdd/global_user/mengweicheng-240108120092/lzy/models}"
-GKD_ENV="${CONDA_BASE}/envs/vaopd-gkd-cu128"
+GKD_ENV="${GKD_ENV:-/inspire/hdd/global_user/mengweicheng-240108120092/lzy/envs/vaopd-gkd-cu128}"
 PYTHON="${GKD_ENV}/bin/python"
 RAY="${GKD_ENV}/bin/ray"
 VERL_GKD_DIR="${REPO_ROOT}/external/verl_gkd/verl"
@@ -211,7 +211,8 @@ export PROXY_BACKEND_PORT=${TEACHER_PROXY_PORT}
 cd "${GKD_RECIPE_DIR}/teacher"
 
 # Start proxy (uses CPU, no GPU needed)
-CUDA_VISIBLE_DEVICES="" nohup "${PYTHON}" proxy.py > "${OUTPUT_DIR}/proxy.log" 2>&1 &
+# -u = unbuffered stdout so log is visible immediately
+CUDA_VISIBLE_DEVICES="" nohup "${PYTHON}" -u proxy.py > "${OUTPUT_DIR}/proxy.log" 2>&1 &
 PROXY_PID=$!
 
 # Wait for proxy backend — fatal on timeout
@@ -252,7 +253,8 @@ if ! ${PROXY_READY}; then
 fi
 
 # Start worker (isolated to TEACHER_GPU)
-CUDA_VISIBLE_DEVICES="${TEACHER_GPU}" nohup "${PYTHON}" worker.py \
+# -u = unbuffered stdout so log is visible immediately
+CUDA_VISIBLE_DEVICES="${TEACHER_GPU}" nohup "${PYTHON}" -u worker.py \
     --backend vllm \
     --tp-size 1 \
     --n-logprobs 32 \
