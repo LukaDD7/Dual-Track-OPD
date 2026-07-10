@@ -80,6 +80,26 @@ def _build_vllm_engine_args(
     return {k: v for k, v in args.items() if v is not None}
 
 
+def _register_dummy_megatron_loader() -> None:
+    """Register ``dummy_megatron`` as a vLLM model loader format.
+
+    The GKD recipe uses ``load_format=dummy_megatron`` (see the official
+    ``run_moonlight_dsv3_training.sh``), but vLLM does not ship this format.
+    We register a DummyModelLoader variant so the vLLM engine can start with
+    random weights.  The real weights are loaded later via NCCL broadcast +
+    ``sync_rollout_weights``.
+    """
+    from vllm.config.load import LoadConfig
+    from vllm.model_executor.model_loader import register_model_loader
+    from vllm.model_executor.model_loader.base_loader import BaseModelLoader
+    from vllm.model_executor.model_loader.dummy_loader import DummyModelLoader
+
+    @register_model_loader("dummy_megatron")
+    class DummyMegatronModelLoader(DummyModelLoader):
+        """Identical to ``dummy`` — random-weight init for Megatron GKD."""
+        pass
+
+
 def init_engine_sync(rollout: Any) -> None:
     """Initialise the vLLM inference engine for *rollout* (a vLLMAsyncRollout).
 
@@ -99,6 +119,10 @@ def init_engine_sync(rollout: Any) -> None:
         return
 
     # 1. Build VllmConfig from rollout + model config --------------------------------
+
+    # Register dummy_megatron loader before touching the vLLM engine.
+    _register_dummy_megatron_loader()
+
     engine_args_dict = _build_vllm_engine_args(rollout.config, rollout.model_config)
 
     # Parse through vLLM's standard CLI machinery (mirrors the async server).
