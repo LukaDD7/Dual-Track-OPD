@@ -150,6 +150,15 @@ if [[ "${GKD_LAYOUT}" != "integrated" || "${_VERL_HEAD}" != "${GKD_COMPAT_COMMIT
 fi
 echo "[OK] Integrated GKD/verl compatibility pin verified: ${_VERL_HEAD}"
 
+# Apply runtime patches for Python 3.12 event-loop compatibility.
+# These patch in-place (idempotent); the git HEAD stays unchanged so the
+# compatibility guard above still passes.
+_PATCH_DIR="${REPO_ROOT}/scripts/hpc"
+"${PYTHON}" "${_PATCH_DIR}/patch_gkd_b15_event_loop.py" \
+    "${GKD_RECIPE_DIR}/megatron_workers.py" 2>/dev/null || true
+"${PYTHON}" "${_PATCH_DIR}/patch_gkd_b16_event_loop.py" \
+    "${VERL_GKD_DIR}/verl/workers/rollout/vllm_rollout/vllm_rollout.py" 2>/dev/null || true
+
 echo ""
 
 # ── quick version check ───────────────────────────────────────────────────
