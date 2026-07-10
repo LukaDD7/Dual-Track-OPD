@@ -88,6 +88,11 @@ traceback. Do not infer support from registry grep/introspection: the probe now
 uses the actual actor build/load path. Do NOT patch Megatron model layers
 without explicit approval — this is a non-trivial engineering task.
 
+When using `--env-path` for a Qwen3.5-compatible Transformers overlay, Probe C
+propagates that environment into its nested one-step GKD smoke. Seeing
+`vaopd-gkd-cu128` rather than the requested overlay in nested traceback paths
+means the launcher is stale and must be updated before interpreting the result.
+
 ---
 
 ## Gate 5: Qwen3.5-4B Student + Qwen3.5-27B Teacher — 50 Steps

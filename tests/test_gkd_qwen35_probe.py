@@ -13,6 +13,8 @@ def test_gate4_uses_compatible_checkout_and_real_weight_loads():
     assert "run_probe_c_legacy_introspection" not in source
     assert "run_gkd_text_smoke.sh" in source
     assert "--steps 1" in source
+    assert 'GKD_ENV="${GKD_ENV}"' in source
+    assert 'VERL_GKD_DIR="${VERL_GKD_DIR}"' in source
 
 
 def test_gate4_has_explicit_nonoverlapping_gpu_selection():

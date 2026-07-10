@@ -307,7 +307,8 @@ run_probe_c() {
     fi
 
     set +e
-    VERL_GKD_DIR="${VERL_GKD_DIR}" \
+    GKD_ENV="${GKD_ENV}" \
+        VERL_GKD_DIR="${VERL_GKD_DIR}" \
         bash "${REPO_ROOT}/scripts/hpc/run_gkd_text_smoke.sh" \
         --steps 1 \
         --model-path "${QWEN35_08B_PATH}" \
