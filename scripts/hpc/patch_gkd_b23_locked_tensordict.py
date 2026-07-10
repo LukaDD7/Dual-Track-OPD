@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Allow the GKD actor to cast attention_mask in a locked TensorDict.
+"""Allow the GKD actor to construct writable TensorDict microbatches.
 
 Newer TensorDict versions reject item replacement while the container is
-locked.  The GKD actor must replace the attention-mask tensor because its dtype
-changes to bool, so ``set_`` (which preserves the original storage) is not an
-appropriate substitute.  Unlock only for the replacement and restore the lock
-on context exit.
+locked.  The GKD actor replaces the attention-mask tensor and later adds KL and
+teacher tensors to split microbatches.  Unlock the local batch at method entry
+so all derived microbatches remain writable.  ``set_`` is not a substitute: it
+cannot add the later keys and preserves storage when the mask dtype changes.
 """
 
 from __future__ import annotations
@@ -14,16 +14,22 @@ from pathlib import Path
 
 
 OLD = '        data.batch["attention_mask"] = data.batch["attention_mask"].to(bool)'
-NEW = (
+OLD_SCOPED_FIX = (
     "        with data.batch.unlock_():\n"
     '            data.batch["attention_mask"] = data.batch["attention_mask"].to(bool)'
 )
-MARKER = "with data.batch.unlock_():"
+NEW = (
+    "        data.batch.unlock_()\n"
+    '        data.batch["attention_mask"] = data.batch["attention_mask"].to(bool)'
+)
+MARKER = "        data.batch.unlock_()\n"
 
 
 def patch_source(source: str) -> tuple[str, str]:
     if MARKER in source:
         return source, "skip"
+    if OLD_SCOPED_FIX in source:
+        return source.replace(OLD_SCOPED_FIX, NEW, 1), "ok"
     if OLD not in source:
         return source, "no_match"
     return source.replace(OLD, NEW, 1), "ok"

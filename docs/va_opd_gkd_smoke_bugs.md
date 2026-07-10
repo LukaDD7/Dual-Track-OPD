@@ -293,9 +293,14 @@ TensorDict`.
 batches and reject non-in-place replacement. `set_()` is not suitable because
 it preserves the existing tensor storage while this operation changes dtype.
 
-**Resolution**: use TensorDict's `unlock_()` context only around the mask
-replacement. Context exit restores the prior lock state before the remaining
-forward/backward path.
+**Superseded first fix**: an `unlock_()` context only around the mask replacement
+allowed that assignment but re-locked the batch before microbatch construction.
+The next new key, `calc_kl_mask`, failed with the same lock error.
+
+**Resolution**: unlock the local batch at `forward_backward_batch` entry so
+split microbatches remain writable while the recipe adds KL masks, loss buffers,
+and teacher tensors. The runtime patch upgrades both pristine source and the
+earlier scoped B23 form.
 
 **Key files involved**:
 - `external/verl_gkd/verl/recipe/gkd/megatron/megatron_workers.py` (lines ~782-850) — GKD rollout worker sync_rollout_weights

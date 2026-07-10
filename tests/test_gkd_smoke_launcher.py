@@ -129,7 +129,7 @@ def test_teacher_patch_upgrades_generate_after_memory_patch_was_already_applied(
     assert module.GENERATE_MARKER in patched
 
 
-def test_locked_tensordict_patch_is_scoped_and_idempotent():
+def test_locked_tensordict_patch_unlocks_batch_for_microbatch_construction():
     import importlib.util
 
     spec = importlib.util.spec_from_file_location("patch_gkd_b23_locked_tensordict", TENSORDICT_PATCH)
@@ -143,9 +143,29 @@ def test_locked_tensordict_patch_is_scoped_and_idempotent():
     )
     patched, status = module.patch_source(original)
     assert status == "ok"
-    assert "with data.batch.unlock_():" in patched
+    assert "        data.batch.unlock_()\n" in patched
+    assert "with data.batch.unlock_():" not in patched
     assert patched.count("unlock_()") == 1
     assert module.patch_source(patched) == (patched, "skip")
+
+
+def test_locked_tensordict_patch_upgrades_scoped_b23_fix():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("patch_gkd_b23_locked_tensordict", TENSORDICT_PATCH)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+
+    scoped = (
+        "        with data.batch.unlock_():\n"
+        "            data.batch[\"attention_mask\"] = "
+        "data.batch[\"attention_mask\"].to(bool)\n"
+    )
+    patched, status = module.patch_source(scoped)
+    assert status == "ok"
+    assert "with data.batch.unlock_():" not in patched
+    assert module.MARKER in patched
 
 
 def test_smoke_applies_locked_tensordict_patch_before_ray():
