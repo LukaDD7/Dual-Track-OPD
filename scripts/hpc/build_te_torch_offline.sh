@@ -62,15 +62,24 @@ if [[ ! -d "${CUDA_TOOLCHAIN}" ]]; then
     exit 1
 fi
 
-# ── activate CUDA 12.8 build env ─────────────────────────────────────────
+# ── activate CUDA 12.8 build env + isolate from legacy conda ─────────────
+# Unset legacy conda paths that pollute compiler include flags
+unset CONDA_PREFIX
+unset CPATH
+unset C_INCLUDE_PATH
+unset CPLUS_INCLUDE_PATH
 source "${REPO_ROOT}/scripts/env/activate_cuda128_build.sh"
 
 # ── find CUDNN from pip-installed nvidia-cudnn-cu12 ─────────────────────
 CUDNN_LIB=$("${PYTHON}" -c "
-import nvidia.cudnn, pathlib, os
-cudnn_dir = pathlib.Path(nvidia.cudnn.__file__).parent
-lib_dir = cudnn_dir / 'lib'
-print(lib_dir)
+import nvidia.cudnn, os
+# nvidia.cudnn is a namespace package (__file__ is None).
+# The actual .so files are under nvidia/cudnn/lib/ in site-packages.
+for p in nvidia.cudnn.__path__:
+    lib_dir = os.path.join(p, 'lib')
+    if os.path.isdir(lib_dir):
+        print(lib_dir)
+        break
 ")
 if [[ -d "${CUDNN_LIB}" ]]; then
     export LD_LIBRARY_PATH="${CUDNN_LIB}:${LD_LIBRARY_PATH}"
@@ -101,9 +110,10 @@ mkdir -p "${TE_BUILD_DIR}"
 echo "=== Building transformer_engine_torch ${TE_TORCH_VER} ==="
 CUDA_VISIBLE_DEVICES="${GPU_ID}" "${PYTHON}" -m pip install \
     --no-build-isolation \
+    --no-deps \
     --no-index \
     --find-links "${WHEELHOUSE}" \
-    --target "${ENV_PATH}/lib/python3.12/site-packages" \
+    --upgrade \
     "transformer-engine-torch==${TE_TORCH_VER}" \
     -v \
     2>&1 | tee "${TE_BUILD_DIR}/build.log"

@@ -23,6 +23,33 @@ fi
 
 export CUDA_HOME="${CUDA128_ROOT}"
 export CUDA_PATH="${CUDA128_ROOT}"
+
+# Conda-installed CUDA toolkit puts headers in targets/<arch>/include, not include/
+_CUDA_TARGET_INCLUDE="${CUDA128_ROOT}/targets/x86_64-linux/include"
+if [[ -f "${_CUDA_TARGET_INCLUDE}/cuda_runtime_api.h" ]]; then
+    export CPLUS_INCLUDE_PATH="${_CUDA_TARGET_INCLUDE}${CPLUS_INCLUDE_PATH:+:${CPLUS_INCLUDE_PATH}}"
+    export C_INCLUDE_PATH="${_CUDA_TARGET_INCLUDE}${C_INCLUDE_PATH:+:${C_INCLUDE_PATH}}"
+    echo "[cuda128-build] Added conda CUDA include: ${_CUDA_TARGET_INCLUDE}"
+fi
+# Pip-installed nvidia-* packages carry their own include dirs (cusparse, cublas, etc.)
+# The conda cuda-12.8.0 channel has no dev packages for these.
+_GKD_ENV="/inspire/hdd/global_user/mengweicheng-240108120092/lzy/envs/vaopd-gkd-cu128"
+_NVIDIA_GLOB="${_GKD_ENV}/lib/python3.12/site-packages/nvidia/*/include"
+for _incdir in ${_NVIDIA_GLOB}; do
+    if [[ -d "${_incdir}" ]]; then
+        export CPLUS_INCLUDE_PATH="${CPLUS_INCLUDE_PATH}:${_incdir}"
+        export C_INCLUDE_PATH="${C_INCLUDE_PATH:-}:${_incdir}"
+    fi
+done
+echo "[cuda128-build] Added pip nvidia includes"
+# Fallback: system CUDA headers on GPU node
+_SYS_CUDA_INCLUDE="/usr/local/cuda/include"
+if [[ -f "${_SYS_CUDA_INCLUDE}/cuda_runtime_api.h" ]]; then
+    export CPLUS_INCLUDE_PATH="${CPLUS_INCLUDE_PATH}:${_SYS_CUDA_INCLUDE}"
+    export C_INCLUDE_PATH="${C_INCLUDE_PATH:-}:${_SYS_CUDA_INCLUDE}"
+    echo "[cuda128-build] Added system CUDA include: ${_SYS_CUDA_INCLUDE}"
+fi
+
 export PATH="${CUDA128_ROOT}/bin:${PATH}"
 export LD_LIBRARY_PATH="${CUDA128_ROOT}/lib64:${CUDA128_ROOT}/lib:${LD_LIBRARY_PATH:-}"
 

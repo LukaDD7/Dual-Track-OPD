@@ -1,0 +1,394 @@
+From f7903c31aa177167e899166e3875202c0d6600d3 Mon Sep 17 00:00:00 2001
+From: LukaDD7 <LukaDD7@users.noreply.github.com>
+Date: Fri, 10 Jul 2026 02:37:02 +0000
+Subject: [PATCH 1/8] fix: rebuild OmegaConf structure after Ray serialization
+
+Ray serializes nested OmegaConf DictConfigs to plain dicts, causing
+ConfigAttributeError for any attribute-style access (config.actor.foo).
+Rebuild OmegaConf via to_container + create at the Ray actor entry
+point, fixing ALL dict-vs-struct mismatches for sub-config access.
+---
+ gkd/megatron/main_gkd.py | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/gkd/megatron/main_gkd.py b/gkd/megatron/main_gkd.py
+index b94e13e..f8ba8ae 100644
+--- a/gkd/megatron/main_gkd.py
++++ b/gkd/megatron/main_gkd.py
+@@ -122,6 +122,10 @@ class TaskRunner:
+ 
+         pprint(OmegaConf.to_container(config, resolve=True))
+ 
++        # Ray serialization converts nested OmegaConf DictConfig → plain dict.
++        # Restore OmegaConf structure so attribute access (config.actor.foo)
++        # works in downstream worker init code.
++        config = OmegaConf.create(OmegaConf.to_container(config, resolve=False))
+         OmegaConf.resolve(config)
+ 
+         # Download the checkpoint from HDFS to the local machine.
+-- 
+2.43.0
+
+
+From 9b2dea28939190c100978c35652cb31e34056089 Mon Sep 17 00:00:00 2001
+From: LukaDD7 <LukaDD7@users.noreply.github.com>
+Date: Fri, 10 Jul 2026 02:51:08 +0000
+Subject: [PATCH 2/8] fix: rebuild OmegaConf in worker __init__ after Ray
+ serialization
+
+Both actor and rollout workers receive configs that have been
+serialized through Ray, converting nested DictConfig to plain dict.
+Rebuild OmegaConf at worker entry point.
+---
+ gkd/megatron/megatron_workers.py | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/gkd/megatron/megatron_workers.py b/gkd/megatron/megatron_workers.py
+index e3339ff..e150761 100644
+--- a/gkd/megatron/megatron_workers.py
++++ b/gkd/megatron/megatron_workers.py
+@@ -449,6 +449,10 @@ class MegatronOnPolicyDistillActorWorker(ActorRolloutRefWorker):
+     """
+ 
+     def __init__(self, config: DictConfig, role: str):
++        # Ray serializes OmegaConf DictConfig → plain dict. Rebuild it.
++        if isinstance(config, dict):
++            config = OmegaConf.create(config)
++
+         # Ensure we run as actor-only worker
+         is_struct = OmegaConf.is_struct(config) or False
+         OmegaConf.set_struct(config, False)
+@@ -624,6 +628,10 @@ class MegatronOnPolicyDistillRolloutWorker(ActorRolloutRefWorker):
+     """
+ 
+     def __init__(self, config: DictConfig, role: str):
++        # Ray serializes OmegaConf DictConfig → plain dict. Rebuild it.
++        if isinstance(config, dict):
++            config = OmegaConf.create(config)
++
+         # Ensure we run as rollout-only worker
+         # is_struct = OmegaConf.is_struct(config) or False
+         # OmegaConf.set_struct(config, False)
+-- 
+2.43.0
+
+
+From 4af521c7ff608c9a249ebe580cff559c123fc0e6 Mon Sep 17 00:00:00 2001
+From: LukaDD7 <LukaDD7@users.noreply.github.com>
+Date: Fri, 10 Jul 2026 03:04:01 +0000
+Subject: [PATCH 3/8] fix: force-rebuild entire OmegaConf tree in worker init
+
+OmegaConf.create() on a top-level DictConfig doesn't recursively
+convert nested plain dicts. Use to_container() + create() to
+force a full rebuild, ensuring all sub-configs (rollout, actor,
+model) support attribute access.
+---
+ gkd/megatron/megatron_workers.py | 12 ++++++------
+ 1 file changed, 6 insertions(+), 6 deletions(-)
+
+diff --git a/gkd/megatron/megatron_workers.py b/gkd/megatron/megatron_workers.py
+index e150761..f453156 100644
+--- a/gkd/megatron/megatron_workers.py
++++ b/gkd/megatron/megatron_workers.py
+@@ -449,9 +449,9 @@ class MegatronOnPolicyDistillActorWorker(ActorRolloutRefWorker):
+     """
+ 
+     def __init__(self, config: DictConfig, role: str):
+-        # Ray serializes OmegaConf DictConfig → plain dict. Rebuild it.
+-        if isinstance(config, dict):
+-            config = OmegaConf.create(config)
++        # Ray serializes OmegaConf DictConfig, leaving nested dicts as plain dict.
++        # Force-rebuild the entire config tree so attribute access works everywhere.
++        config = OmegaConf.create(OmegaConf.to_container(config, resolve=False))
+ 
+         # Ensure we run as actor-only worker
+         is_struct = OmegaConf.is_struct(config) or False
+@@ -628,9 +628,9 @@ class MegatronOnPolicyDistillRolloutWorker(ActorRolloutRefWorker):
+     """
+ 
+     def __init__(self, config: DictConfig, role: str):
+-        # Ray serializes OmegaConf DictConfig → plain dict. Rebuild it.
+-        if isinstance(config, dict):
+-            config = OmegaConf.create(config)
++        # Ray serializes OmegaConf DictConfig, leaving nested dicts as plain dict.
++        # Force-rebuild the entire config tree so attribute access works everywhere.
++        config = OmegaConf.create(OmegaConf.to_container(config, resolve=False))
+ 
+         # Ensure we run as rollout-only worker
+         # is_struct = OmegaConf.is_struct(config) or False
+-- 
+2.43.0
+
+
+From cac2233c5ea0f211ea79db0dc6d1a1635c847817 Mon Sep 17 00:00:00 2001
+From: LukaDD7 <LukaDD7@users.noreply.github.com>
+Date: Fri, 10 Jul 2026 03:17:04 +0000
+Subject: [PATCH 4/8] fix: rebuild OmegaConf in worker __init__ after Ray
+ serialization
+
+---
+ gkd/megatron/megatron_workers.py | 16 ++++++++++++++++
+ gkd/ray_trainer.py               |  1 +
+ gkd/teacher                      |  1 +
+ gkd/teacher_utils.py             |  1 +
+ 4 files changed, 19 insertions(+)
+ create mode 120000 gkd/ray_trainer.py
+ create mode 120000 gkd/teacher
+ create mode 120000 gkd/teacher_utils.py
+
+diff --git a/gkd/megatron/megatron_workers.py b/gkd/megatron/megatron_workers.py
+index f453156..94f1979 100644
+--- a/gkd/megatron/megatron_workers.py
++++ b/gkd/megatron/megatron_workers.py
+@@ -451,7 +451,15 @@ class MegatronOnPolicyDistillActorWorker(ActorRolloutRefWorker):
+     def __init__(self, config: DictConfig, role: str):
+         # Ray serializes OmegaConf DictConfig, leaving nested dicts as plain dict.
+         # Force-rebuild the entire config tree so attribute access works everywhere.
++        # Ray serializes OmegaConf → plain dict. Rebuild and allow dynamic keys.
+         config = OmegaConf.create(OmegaConf.to_container(config, resolve=False))
++        # Disable struct mode so missing keys (e.g. rollout.n) don't raise errors
++        def _unstruct(cfg):
++            OmegaConf.set_struct(cfg, False)
++            for _k, _v in cfg.items():
++                if OmegaConf.is_dict(_v):
++                    _unstruct(_v)
++        _unstruct(config)
+ 
+         # Ensure we run as actor-only worker
+         is_struct = OmegaConf.is_struct(config) or False
+@@ -630,7 +638,15 @@ class MegatronOnPolicyDistillRolloutWorker(ActorRolloutRefWorker):
+     def __init__(self, config: DictConfig, role: str):
+         # Ray serializes OmegaConf DictConfig, leaving nested dicts as plain dict.
+         # Force-rebuild the entire config tree so attribute access works everywhere.
++        # Ray serializes OmegaConf → plain dict. Rebuild and allow dynamic keys.
+         config = OmegaConf.create(OmegaConf.to_container(config, resolve=False))
++        # Disable struct mode so missing keys (e.g. rollout.n) don't raise errors
++        def _unstruct(cfg):
++            OmegaConf.set_struct(cfg, False)
++            for _k, _v in cfg.items():
++                if OmegaConf.is_dict(_v):
++                    _unstruct(_v)
++        _unstruct(config)
+ 
+         # Ensure we run as rollout-only worker
+         # is_struct = OmegaConf.is_struct(config) or False
+diff --git a/gkd/ray_trainer.py b/gkd/ray_trainer.py
+new file mode 120000
+index 0000000..2b6329b
+--- /dev/null
++++ b/gkd/ray_trainer.py
+@@ -0,0 +1 @@
++megatron/ray_trainer.py
+\ No newline at end of file
+diff --git a/gkd/teacher b/gkd/teacher
+new file mode 120000
+index 0000000..30f6860
+--- /dev/null
++++ b/gkd/teacher
+@@ -0,0 +1 @@
++megatron/teacher
+\ No newline at end of file
+diff --git a/gkd/teacher_utils.py b/gkd/teacher_utils.py
+new file mode 120000
+index 0000000..85abed7
+--- /dev/null
++++ b/gkd/teacher_utils.py
+@@ -0,0 +1 @@
++megatron/teacher_utils.py
+\ No newline at end of file
+-- 
+2.43.0
+
+
+From 916c319dacebd8055cadf4155acb9f265c4e5f97 Mon Sep 17 00:00:00 2001
+From: LukaDD7 <LukaDD7@users.noreply.github.com>
+Date: Fri, 10 Jul 2026 03:22:49 +0000
+Subject: [PATCH 5/8] fix: tokenize raw_prompt into input_ids when dataset
+ lacks pre-tokenized data
+
+Newer verl RLHFDataset only returns raw_prompt (not input_ids/
+attention_mask/position_ids). GKD recipe expects pre-tokenized
+inputs. Add fallback tokenization using apply_chat_template.
+---
+ gkd/megatron/ray_trainer.py | 18 ++++++++++++++++++
+ 1 file changed, 18 insertions(+)
+
+diff --git a/gkd/megatron/ray_trainer.py b/gkd/megatron/ray_trainer.py
+index 533979d..0fa11c2 100644
+--- a/gkd/megatron/ray_trainer.py
++++ b/gkd/megatron/ray_trainer.py
+@@ -342,6 +342,24 @@ class OnPolicyDistillTrainer(RayPPOTrainer):
+         Call parameter synchronization and asynchronous sequence generation.
+         """
+         batch = DataProto.from_single_dict(batch_dict)
++        # If dataset only provides raw_prompt (not pre-tokenized input_ids),
++        # tokenize here to produce input_ids/attention_mask for rollout generation.
++        if "input_ids" not in batch.batch and "raw_prompt" in batch.non_tensor_batch:
++            raw_prompts = batch.non_tensor_batch["raw_prompt"].tolist()
++            tokenized = self.tokenizer.apply_chat_template(
++                raw_prompts, add_generation_prompt=True, tokenize=True,
++                return_dict=True, return_tensors="pt",
++            )
++            from verl.utils.tokenizer import normalize_token_ids
++            input_ids = tokenized["input_ids"]
++            attention_mask = tokenized["attention_mask"]
++            batch.batch["input_ids"] = input_ids
++            batch.batch["attention_mask"] = attention_mask
++            position_ids = torch.arange(input_ids.shape[1]).unsqueeze(0).expand(input_ids.shape[0], -1)
++            batch.batch["position_ids"] = position_ids
++            raw_prompt_ids = [normalize_token_ids(ids) for ids in input_ids.tolist()]
++            batch.non_tensor_batch["raw_prompt_ids"] = np.array(raw_prompt_ids, dtype=object)
++
+         # pop those keys for generation
+         batch_keys_to_pop = ["input_ids", "attention_mask", "position_ids"]
+         non_tensor_batch_keys_to_pop = ["raw_prompt_ids"]
+-- 
+2.43.0
+
+
+From cf79377c7967da94a4198a357183e849dcfae2c1 Mon Sep 17 00:00:00 2001
+From: LukaDD7 <LukaDD7@users.noreply.github.com>
+Date: Fri, 10 Jul 2026 03:26:58 +0000
+Subject: [PATCH 6/8] fix: tokenize prompts individually then pad for batching
+
+apply_chat_template with a list treats it as a single conversation.
+Tokenize each prompt individually, then pad to max length.
+---
+ gkd/megatron/ray_trainer.py | 27 +++++++++++++++++----------
+ 1 file changed, 17 insertions(+), 10 deletions(-)
+
+diff --git a/gkd/megatron/ray_trainer.py b/gkd/megatron/ray_trainer.py
+index 0fa11c2..0ecf9e3 100644
+--- a/gkd/megatron/ray_trainer.py
++++ b/gkd/megatron/ray_trainer.py
+@@ -345,20 +345,27 @@ class OnPolicyDistillTrainer(RayPPOTrainer):
+         # If dataset only provides raw_prompt (not pre-tokenized input_ids),
+         # tokenize here to produce input_ids/attention_mask for rollout generation.
+         if "input_ids" not in batch.batch and "raw_prompt" in batch.non_tensor_batch:
+-            raw_prompts = batch.non_tensor_batch["raw_prompt"].tolist()
+-            tokenized = self.tokenizer.apply_chat_template(
+-                raw_prompts, add_generation_prompt=True, tokenize=True,
+-                return_dict=True, return_tensors="pt",
+-            )
+             from verl.utils.tokenizer import normalize_token_ids
+-            input_ids = tokenized["input_ids"]
+-            attention_mask = tokenized["attention_mask"]
++            raw_prompts = batch.non_tensor_batch["raw_prompt"].tolist()
++            # Tokenize each prompt individually, then pad to max length
++            all_input_ids = []
++            for rp in raw_prompts:
++                tok = self.tokenizer.apply_chat_template(
++                    rp, add_generation_prompt=True, tokenize=True,
++                )
++                all_input_ids.append(normalize_token_ids(tok))
++            max_len = max(len(ids) for ids in all_input_ids)
++            pad_id = self.tokenizer.pad_token_id or self.tokenizer.eos_token_id or 0
++            input_ids = torch.full((len(all_input_ids), max_len), pad_id, dtype=torch.long)
++            attention_mask = torch.zeros(len(all_input_ids), max_len, dtype=torch.long)
++            for i, ids in enumerate(all_input_ids):
++                input_ids[i, :len(ids)] = torch.tensor(ids, dtype=torch.long)
++                attention_mask[i, :len(ids)] = 1
++            position_ids = torch.arange(max_len).unsqueeze(0).expand(len(all_input_ids), -1)
+             batch.batch["input_ids"] = input_ids
+             batch.batch["attention_mask"] = attention_mask
+-            position_ids = torch.arange(input_ids.shape[1]).unsqueeze(0).expand(input_ids.shape[0], -1)
+             batch.batch["position_ids"] = position_ids
+-            raw_prompt_ids = [normalize_token_ids(ids) for ids in input_ids.tolist()]
+-            batch.non_tensor_batch["raw_prompt_ids"] = np.array(raw_prompt_ids, dtype=object)
++            batch.non_tensor_batch["raw_prompt_ids"] = np.array([ids for ids in all_input_ids], dtype=object)
+ 
+         # pop those keys for generation
+         batch_keys_to_pop = ["input_ids", "attention_mask", "position_ids"]
+-- 
+2.43.0
+
+
+From 6fc801107dd10c9e60e75f0db8a12f597576079b Mon Sep 17 00:00:00 2001
+From: LukaDD7 <LukaDD7@users.noreply.github.com>
+Date: Fri, 10 Jul 2026 03:37:36 +0000
+Subject: [PATCH 7/8] fix: use ServerAdapter.update_weights for vLLM weight
+ sync
+
+Modern verl uses ServerAdapter (client-server pattern) instead of
+direct inference_engine access. Add detection for ServerAdapter
+and use its async update_weights via IPC for model weight syncing.
+Fall back to direct engine access for older vLLM setups.
+---
+ gkd/megatron/megatron_workers.py | 12 ++++++++++--
+ 1 file changed, 10 insertions(+), 2 deletions(-)
+
+diff --git a/gkd/megatron/megatron_workers.py b/gkd/megatron/megatron_workers.py
+index 94f1979..f7065a4 100644
+--- a/gkd/megatron/megatron_workers.py
++++ b/gkd/megatron/megatron_workers.py
+@@ -786,7 +786,10 @@ class MegatronOnPolicyDistillRolloutWorker(ActorRolloutRefWorker):
+         assert self._is_rollout and not self.config.hybrid_engine
+         assert hasattr(self, "_weights_info") and self._weights_info is not None
+         rollout_name = self.config.rollout.name
+-        if rollout_name == "vllm":
++        # Use ServerAdapter API for modern vLLM (client-server pattern).
++        # Fall back to direct engine access for older vLLM versions.
++        _use_server_adapter = rollout_name == "vllm" and hasattr(self.rollout, "update_weights")
++        if rollout_name == "vllm" and not _use_server_adapter:
+             inference_model = (
+                 self.rollout.inference_engine.llm_engine.model_executor.driver_worker.worker.model_runner.model
+             )
+@@ -840,7 +843,12 @@ class MegatronOnPolicyDistillRolloutWorker(ActorRolloutRefWorker):
+ 
+         for tensors in group_tensor_generator():
+             if rollout_name == "vllm":
+-                inference_model.load_weights(tensors)
++                if _use_server_adapter:
++                    # ServerAdapter uses async update_weights via IPC
++                    loop = asyncio.get_event_loop_policy().get_event_loop()
++                    loop.run_until_complete(self.rollout.update_weights(tensors))
++                else:
++                    inference_model.load_weights(tensors)
+             elif rollout_name == "sglang":
+                 loop.run_until_complete(update_weights(inference_model, tensors))
+ 
+-- 
+2.43.0
+
+
+From a40c0e94830e73db07416b2b59b77df2f6ba733c Mon Sep 17 00:00:00 2001
+From: LukaDD7 <LukaDD7@users.noreply.github.com>
+Date: Fri, 10 Jul 2026 03:49:07 +0000
+Subject: [PATCH 8/8] fix: fix if/else logic for vLLM ServerAdapter weight sync
+
+ServerAdapter detection was causing fallthrough to NotImplementedError.
+Restructure to properly handle vllm with or without ServerAdapter.
+---
+ gkd/megatron/megatron_workers.py | 16 +++++++++-------
+ 1 file changed, 9 insertions(+), 7 deletions(-)
+
+diff --git a/gkd/megatron/megatron_workers.py b/gkd/megatron/megatron_workers.py
+index f7065a4..1f146b7 100644
+--- a/gkd/megatron/megatron_workers.py
++++ b/gkd/megatron/megatron_workers.py
+@@ -789,13 +789,15 @@ class MegatronOnPolicyDistillRolloutWorker(ActorRolloutRefWorker):
+         # Use ServerAdapter API for modern vLLM (client-server pattern).
+         # Fall back to direct engine access for older vLLM versions.
+         _use_server_adapter = rollout_name == "vllm" and hasattr(self.rollout, "update_weights")
+-        if rollout_name == "vllm" and not _use_server_adapter:
+-            inference_model = (
+-                self.rollout.inference_engine.llm_engine.model_executor.driver_worker.worker.model_runner.model
+-            )
+-            from verl.utils.vllm.patch import patch_vllm_moe_model_weight_loader
+-
+-            patch_vllm_moe_model_weight_loader(inference_model)
++        if rollout_name == "vllm":
++            if _use_server_adapter:
++                pass  # ServerAdapter handles weight sync via IPC, no direct model access needed
++            else:
++                inference_model = (
++                    self.rollout.inference_engine.llm_engine.model_executor.driver_worker.worker.model_runner.model
++                )
++                from verl.utils.vllm.patch import patch_vllm_moe_model_weight_loader
++                patch_vllm_moe_model_weight_loader(inference_model)
+         elif rollout_name == "sglang":
+             from sglang.srt.weight_sync.utils import update_weights as sgl_update_weights
+ 
+-- 
+2.43.0
+

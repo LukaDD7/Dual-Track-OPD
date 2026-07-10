@@ -227,6 +227,12 @@ else
     log "Running vLLM GPU runtime smoke with model ${VLLM_SMOKE_MODEL}..."
     log ""
     set +e
+    # Use conda cuda128-toolchain (headers now complete via symlinks).
+    # Clear LD_LIBRARY_PATH so torch's bundled CUDA libs are used at runtime.
+    export CUDA_HOME="/inspire/hdd/global_user/mengweicheng-240108120092/lzy/envs/cuda128-toolchain"
+    export PATH="${CUDA_HOME}/bin:${PATH}"
+    export LD_LIBRARY_PATH=""
+    rm -rf /root/.cache/flashinfer 2>/dev/null || true
     CUDA_VISIBLE_DEVICES=0 "${PYTHON}" - "${VLLM_SMOKE_MODEL}" <<'PY' 2>&1 | tee -a "${AUDIT_LOG}"
 import sys, os
 model_id = sys.argv[1]
@@ -243,7 +249,7 @@ llm = LLM(
     model=model_id,
     trust_remote_code=True,
     tensor_parallel_size=1,
-    gpu_memory_utilization=0.20,
+    gpu_memory_utilization=0.08,
     max_model_len=512,
     enforce_eager=True,
 )
@@ -286,6 +292,10 @@ else
     fi
     log "Running TE GPU smoke on GPU 0..."
     set +e
+    export CUDA_HOME="/inspire/hdd/global_user/mengweicheng-240108120092/lzy/envs/cuda128-toolchain"
+    export PATH="${CUDA_HOME}/bin:${PATH}"
+    export LD_LIBRARY_PATH=""
+    rm -rf /root/.cache/flashinfer 2>/dev/null || true
     CUDA_VISIBLE_DEVICES=0 "${PYTHON}" - 2>&1 <<'PY' | tee -a "${AUDIT_LOG}"
 import torch
 import transformer_engine.pytorch as te

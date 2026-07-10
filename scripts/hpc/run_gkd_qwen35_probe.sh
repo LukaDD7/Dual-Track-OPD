@@ -26,7 +26,7 @@ PROBE_LOG="${OUTPUT_DIR}/probe.log"
 # ── env var overrides ─────────────────────────────────────────────────────
 CONDA_BASE="${CONDA_BASE:-/inspire/hdd/global_user/mengweicheng-240108120092/lzy/miniconda3}"
 MODEL_ROOT="${MODEL_ROOT:-/inspire/hdd/global_user/mengweicheng-240108120092/lzy/models}"
-GKD_ENV="${CONDA_BASE}/envs/vaopd-gkd-cu128"
+GKD_ENV="${GKD_ENV:-/inspire/hdd/global_user/mengweicheng-240108120092/lzy/envs/vaopd-gkd-cu128}"
 PYTHON="${GKD_ENV}/bin/python"
 VERL_GKD_DIR="${REPO_ROOT}/external/verl_gkd/verl"
 
