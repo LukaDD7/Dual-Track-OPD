@@ -93,6 +93,13 @@ propagates that environment into its nested one-step GKD smoke. Seeing
 `vaopd-gkd-cu128` rather than the requested overlay in nested traceback paths
 means the launcher is stale and must be updated before interpreting the result.
 
+The vLLM 0.11 native registry predates `Qwen3_5ForConditionalGeneration`, so
+the probes explicitly test its documented Transformers backend. The compatible
+verl checkout also receives a narrow import alias from the removed
+`AutoModelForVision2Seq` name to Transformers 5's
+`AutoModelForImageTextToText`. A later failure in linear attention or Megatron
+model construction is a real capability boundary rather than an import alias.
+
 ---
 
 ## Gate 5: Qwen3.5-4B Student + Qwen3.5-27B Teacher — 50 Steps

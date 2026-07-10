@@ -230,6 +230,11 @@ _PATCH_DIR="${REPO_ROOT}/scripts/hpc"
 "${PYTHON}" "${_PATCH_DIR}/patch_gkd_b23_locked_tensordict.py" \
     "${GKD_RECIPE_DIR}/megatron_workers.py"
 
+# Transformers 5 removed AutoModelForVision2Seq, which this verl pin imports
+# during preflight even though the GKD Megatron path does not use it directly.
+"${PYTHON}" "${_PATCH_DIR}/patch_gkd_transformers5_compat.py" \
+    "${VERL_GKD_DIR}/verl/utils/model.py"
+
 echo ""
 
 # ── quick version check ───────────────────────────────────────────────────

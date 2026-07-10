@@ -6,6 +6,7 @@ VALIDATOR = Path("scripts/hpc/validate_gkd_smoke_config.py")
 PREPARE = Path("scripts/setup/prepare_gkd_compatible_checkout.sh")
 TEACHER_PATCH = Path("scripts/hpc/patch_gkd_teacher_memory.py")
 TENSORDICT_PATCH = Path("scripts/hpc/patch_gkd_b23_locked_tensordict.py")
+TRANSFORMERS5_PATCH = Path("scripts/hpc/patch_gkd_transformers5_compat.py")
 
 
 def test_smoke_uses_official_gkd_namespaces_and_explicit_upstream_defaults():
@@ -96,7 +97,8 @@ def test_teacher_memory_patch_is_idempotent():
 
     original = (
         "import argparse\n\n"
-        "value = gpu_memory_utilization=0.7,\n"
+        "        self.llm = LLM(\n"
+        "            gpu_memory_utilization=0.7,\n"
         "outputs = self.llm.generate("
         "prompt_token_ids=prompt_token_ids, sampling_params=sampling_params)\n"
     )
@@ -118,7 +120,8 @@ def test_teacher_patch_upgrades_generate_after_memory_patch_was_already_applied(
 
     partially_patched = (
         "import argparse\nimport os\n\n"
-        'value = gpu_memory_utilization=float(os.environ.get('
+        "        self.llm = LLM(\n"
+        '            gpu_memory_utilization=float(os.environ.get('
         '"GKD_TEACHER_GPU_MEMORY_UTILIZATION", "0.7")),\n'
         "outputs = self.llm.generate("
         "prompt_token_ids=prompt_token_ids, sampling_params=sampling_params)\n"
@@ -184,3 +187,28 @@ def test_training_epochs_cover_requested_steps_instead_of_stopping_at_32():
     assert "_TOTAL_EPOCHS=$(( (NUM_STEPS + _STEPS_PER_EPOCH - 1) / _STEPS_PER_EPOCH ))" in source
     assert '"trainer.total_epochs=${_TOTAL_EPOCHS}"' in source
     assert '"trainer.total_epochs=1"' not in source
+
+
+def test_transformers5_auto_model_bridge_is_applied_before_preflight():
+    source = SMOKE.read_text(encoding="utf-8")
+
+    assert "patch_gkd_transformers5_compat.py" in source
+    assert source.index("patch_gkd_transformers5_compat.py") < source.index("Hydra/config preflight")
+
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("patch_gkd_transformers5_compat", TRANSFORMERS5_PATCH)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    original = (
+        "from transformers import (\n"
+        "    AutoConfig,\n"
+        "    AutoModelForVision2Seq,\n"
+        ")\n"
+        "from transformers.modeling_outputs import CausalLMOutputWithPast\n"
+    )
+    patched, status = module.patch_source(original)
+    assert status == "ok"
+    assert module.MARKER in patched
+    assert module.patch_source(patched) == (patched, "skip")

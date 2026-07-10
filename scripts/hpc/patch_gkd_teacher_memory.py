@@ -26,6 +26,7 @@ NEW_GENERATE = (
     "sampling_params=sampling_params)"
 )
 GENERATE_MARKER = 'for token_ids in prompt_token_ids], sampling_params=sampling_params)'
+MODEL_IMPL_MARKER = 'model_impl=os.environ.get("GKD_TEACHER_MODEL_IMPL", "auto")'
 
 
 def patch_source(source: str) -> tuple[str, str]:
@@ -43,6 +44,20 @@ def patch_source(source: str) -> tuple[str, str]:
         if OLD_GENERATE not in patched:
             return source, "no_match"
         patched = patched.replace(OLD_GENERATE, NEW_GENERATE, 1)
+        changed = True
+
+    if MODEL_IMPL_MARKER not in patched:
+        memory_line = (
+            '            gpu_memory_utilization=float(os.environ.get('
+            '"GKD_TEACHER_GPU_MEMORY_UTILIZATION", "0.7")),\n'
+        )
+        if memory_line not in patched:
+            return source, "no_match"
+        patched = patched.replace(
+            memory_line,
+            memory_line + f"            {MODEL_IMPL_MARKER},\n",
+            1,
+        )
         changed = True
 
     return patched, "ok" if changed else "skip"

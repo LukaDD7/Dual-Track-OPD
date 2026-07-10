@@ -234,6 +234,7 @@ try:
         max_model_len=512,
         tensor_parallel_size=1,
         enforce_eager=True,
+        model_impl='transformers',
     )
     print(f'  vLLM LLM created OK')
     prompts = ['What is 2 + 2?']
@@ -307,7 +308,8 @@ run_probe_c() {
     fi
 
     set +e
-    GKD_ENV="${GKD_ENV}" \
+    GKD_TEACHER_MODEL_IMPL="transformers" \
+        GKD_ENV="${GKD_ENV}" \
         VERL_GKD_DIR="${VERL_GKD_DIR}" \
         bash "${REPO_ROOT}/scripts/hpc/run_gkd_text_smoke.sh" \
         --steps 1 \
