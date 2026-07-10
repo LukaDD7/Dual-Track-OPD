@@ -5,6 +5,7 @@ SMOKE = Path("scripts/hpc/run_gkd_text_smoke.sh")
 VALIDATOR = Path("scripts/hpc/validate_gkd_smoke_config.py")
 PREPARE = Path("scripts/setup/prepare_gkd_compatible_checkout.sh")
 TEACHER_PATCH = Path("scripts/hpc/patch_gkd_teacher_memory.py")
+TENSORDICT_PATCH = Path("scripts/hpc/patch_gkd_b23_locked_tensordict.py")
 
 
 def test_smoke_uses_official_gkd_namespaces_and_explicit_upstream_defaults():
@@ -126,3 +127,29 @@ def test_teacher_patch_upgrades_generate_after_memory_patch_was_already_applied(
     assert status == "ok"
     assert module.OLD_GENERATE not in patched
     assert module.GENERATE_MARKER in patched
+
+
+def test_locked_tensordict_patch_is_scoped_and_idempotent():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("patch_gkd_b23_locked_tensordict", TENSORDICT_PATCH)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+
+    original = (
+        "        data.batch[\"attention_mask\"] = "
+        "data.batch[\"attention_mask\"].to(bool)\n"
+    )
+    patched, status = module.patch_source(original)
+    assert status == "ok"
+    assert "with data.batch.unlock_():" in patched
+    assert patched.count("unlock_()") == 1
+    assert module.patch_source(patched) == (patched, "skip")
+
+
+def test_smoke_applies_locked_tensordict_patch_before_ray():
+    source = SMOKE.read_text(encoding="utf-8")
+
+    assert "patch_gkd_b23_locked_tensordict.py" in source
+    assert source.index("patch_gkd_b23_locked_tensordict.py") < source.index("=== Starting Ray")

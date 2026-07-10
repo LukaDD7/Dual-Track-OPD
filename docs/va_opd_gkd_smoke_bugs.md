@@ -282,6 +282,21 @@ and install an EXIT trap that terminates the complete groups, escalating from
 TERM to KILL. Startup failures now print the last 100 worker-log lines so the
 original EngineCore error is retained.
 
+### B23. Actor cannot replace `attention_mask` in locked TensorDict
+
+**Symptom**: teacher warmup succeeds with zero skipped batches, but the first
+actor update fails at the attention-mask bool cast with `Cannot modify locked
+TensorDict`.
+
+**Root cause**: the integrated GKD recipe assigns a new bool tensor through
+`data.batch["attention_mask"] = ...`. Newer TensorDict versions lock transferred
+batches and reject non-in-place replacement. `set_()` is not suitable because
+it preserves the existing tensor storage while this operation changes dtype.
+
+**Resolution**: use TensorDict's `unlock_()` context only around the mask
+replacement. Context exit restores the prior lock state before the remaining
+forward/backward path.
+
 **Key files involved**:
 - `external/verl_gkd/verl/recipe/gkd/megatron/megatron_workers.py` (lines ~782-850) — GKD rollout worker sync_rollout_weights
 - `external/verl_gkd/verl/verl/workers/rollout/vllm_rollout/vllm_rollout.py` (line 155) — ServerAdapter.update_weights

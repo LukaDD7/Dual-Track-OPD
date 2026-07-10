@@ -224,6 +224,11 @@ _PATCH_DIR="${REPO_ROOT}/scripts/hpc"
 "${PYTHON}" "${_PATCH_DIR}/patch_gkd_teacher_memory.py" \
     "${GKD_RECIPE_DIR}/teacher/vllm_engine.py"
 
+# B23: newer TensorDict locks transferred batches; the GKD actor replaces the
+# attention-mask tensor while casting it to bool and must unlock briefly.
+"${PYTHON}" "${_PATCH_DIR}/patch_gkd_b23_locked_tensordict.py" \
+    "${GKD_RECIPE_DIR}/megatron_workers.py"
+
 echo ""
 
 # ── quick version check ───────────────────────────────────────────────────
