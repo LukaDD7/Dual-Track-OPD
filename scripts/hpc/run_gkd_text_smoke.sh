@@ -219,17 +219,7 @@ PROXY_PID=$!
 PROXY_READY=false
 echo -n "  Waiting for proxy backend..."
 for i in $(seq 1 60); do
-    if "${PYTHON}" -c "
-import socket
-s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-s.settimeout(1)
-try:
-    s.connect(('127.0.0.1', ${TEACHER_PROXY_PORT}))
-    s.close()
-    exit(0)
-except:
-    exit(1)
-" 2>/dev/null; then
+    if ss -Hltn "sport = :${TEACHER_PROXY_PORT}" 2>/dev/null | grep -q .; then
         echo " OK"
         PROXY_READY=true
         break
@@ -266,17 +256,7 @@ WORKER_PID=$!
 WORKER_READY=false
 echo -n "  Waiting for teacher frontend..."
 for i in $(seq 1 180); do
-    if "${PYTHON}" -c "
-import socket
-s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-s.settimeout(1)
-try:
-    s.connect(('127.0.0.1', ${TEACHER_PORT}))
-    s.close()
-    exit(0)
-except:
-    exit(1)
-" 2>/dev/null; then
+    if ss -Hltn "sport = :${TEACHER_PORT}" 2>/dev/null | grep -q .; then
         echo " OK"
         WORKER_READY=true
         break
