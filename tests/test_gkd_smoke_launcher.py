@@ -40,3 +40,15 @@ def test_compatible_checkout_restores_sync_rollout_from_pre_retirement_commit():
     assert "vllm_rollout/vllm_rollout_spmd.py" in source
     assert "verl/workers/rollout/base.py" in source
     assert "recipe/gkd/megatron_workers.py" in source
+
+
+def test_smoke_exports_complete_cuda_jit_environment_before_ray():
+    source = SMOKE.read_text(encoding="utf-8")
+
+    assert 'CUDA_TOOLCHAIN="${CUDA_TOOLCHAIN:-' in source
+    assert '"${CUDA_TOOLCHAIN}/bin/nvcc"' in source
+    assert '"${CUDA_TOOLCHAIN}/lib"' in source
+    assert '"${CUDA_TOOLCHAIN}/targets/x86_64-linux/lib"' in source
+    assert 'export LIBRARY_PATH="${CUDA_RUNTIME_LIB}' in source
+    assert 'export LD_LIBRARY_PATH="${CUDA_RUNTIME_LIB}' in source
+    assert source.index('export CUDA_HOME="${CUDA_TOOLCHAIN}"') < source.index("=== Starting Ray")

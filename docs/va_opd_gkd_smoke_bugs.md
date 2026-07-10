@@ -218,6 +218,23 @@ The exact same array is Hydra-composed and validated before teacher/Ray startup,
 including lookup of the in-process `vLLMRollout` class. Missing or stale
 config now fails before GPU allocation.
 
+### B19. FlashInfer sampling JIT cannot find `nvcc` / `-lcudart`
+
+**Symptom**: the first rollout reaches FlashInfer sampling, initially fails to
+spawn `nvcc`, then (after adding it to `PATH`) compiles CUDA objects but fails
+to link with `/usr/bin/ld: cannot find -lcudart`.
+
+**Root cause**: the CUDA 12.8 conda toolchain is complete, but keeps
+`libcudart.so` under `cuda128-toolchain/lib` and
+`targets/x86_64-linux/lib`. The smoke launcher did not export the toolchain to
+Ray, and FlashInfer's generated link line only added `CUDA_HOME/lib64`.
+
+**Resolution**: before starting Ray, the launcher now verifies `nvcc` and
+`libcudart.so`, exports `CUDA_HOME`, `CUDA_PATH`, and `PATH`, discovers the real
+runtime-library directory, and adds it to both `LIBRARY_PATH` (build-time link)
+and `LD_LIBRARY_PATH` (runtime load). H200 JIT compilation is constrained with
+`TORCH_CUDA_ARCH_LIST=9.0`.
+
 **Key files involved**:
 - `external/verl_gkd/verl/recipe/gkd/megatron/megatron_workers.py` (lines ~782-850) — GKD rollout worker sync_rollout_weights
 - `external/verl_gkd/verl/verl/workers/rollout/vllm_rollout/vllm_rollout.py` (line 155) — ServerAdapter.update_weights

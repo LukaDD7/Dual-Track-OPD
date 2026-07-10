@@ -23,6 +23,7 @@ RUN_ID="gkd_smoke_${TIMESTAMP}"
 CONDA_BASE="${CONDA_BASE:-/inspire/hdd/global_user/mengweicheng-240108120092/lzy/miniconda3}"
 MODEL_ROOT="${MODEL_ROOT:-/inspire/hdd/global_user/mengweicheng-240108120092/lzy/models}"
 GKD_ENV="${GKD_ENV:-/inspire/hdd/global_user/mengweicheng-240108120092/lzy/envs/vaopd-gkd-cu128}"
+CUDA_TOOLCHAIN="${CUDA_TOOLCHAIN:-/inspire/hdd/global_user/mengweicheng-240108120092/lzy/envs/cuda128-toolchain}"
 PYTHON="${GKD_ENV}/bin/python"
 RAY="${GKD_ENV}/bin/ray"
 GKD_COMPAT_COMMIT="d8e97e1724e348658c670b9160f1393d4fb20678"
@@ -138,6 +139,41 @@ if [[ ! -d "${MODEL_PATH}" ]]; then
     exit 1
 fi
 
+# vLLM 0.11 / FlashInfer builds sampling kernels on first use.  The conda
+# CUDA toolkit stores libcudart under lib/ (and targets/.../lib), while the
+# generated extension link command may only add CUDA_HOME/lib64.  Export both
+# the compiler and the real runtime-library directory before Ray starts so all
+# workers inherit a complete JIT environment.
+if [[ ! -x "${CUDA_TOOLCHAIN}/bin/nvcc" ]]; then
+    echo "FATAL: CUDA 12.8 nvcc not found at ${CUDA_TOOLCHAIN}/bin/nvcc" >&2
+    echo "Run: bash scripts/setup/setup_cuda128_toolchain.sh" >&2
+    exit 1
+fi
+
+CUDA_RUNTIME_LIB=""
+for _candidate in \
+    "${CUDA_TOOLCHAIN}/lib" \
+    "${CUDA_TOOLCHAIN}/targets/x86_64-linux/lib" \
+    "${CUDA_TOOLCHAIN}/lib64"; do
+    if [[ -f "${_candidate}/libcudart.so" ]]; then
+        CUDA_RUNTIME_LIB="${_candidate}"
+        break
+    fi
+done
+if [[ -z "${CUDA_RUNTIME_LIB}" ]]; then
+    echo "FATAL: libcudart.so not found under ${CUDA_TOOLCHAIN}" >&2
+    exit 1
+fi
+
+export CUDA_HOME="${CUDA_TOOLCHAIN}"
+export CUDA_PATH="${CUDA_TOOLCHAIN}"
+export PATH="${CUDA_TOOLCHAIN}/bin:${PATH}"
+export LIBRARY_PATH="${CUDA_RUNTIME_LIB}${LIBRARY_PATH:+:${LIBRARY_PATH}}"
+export LD_LIBRARY_PATH="${CUDA_RUNTIME_LIB}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+export TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-9.0}"
+
+echo "[OK] CUDA JIT toolchain: nvcc=$(${CUDA_TOOLCHAIN}/bin/nvcc --version | grep release | head -1)"
+echo "[OK] CUDA runtime library: ${CUDA_RUNTIME_LIB}/libcudart.so"
 echo "[OK] Environment checks passed"
 
 _VERL_HEAD="$(git -C "${VERL_GKD_DIR}" rev-parse HEAD 2>/dev/null || true)"
