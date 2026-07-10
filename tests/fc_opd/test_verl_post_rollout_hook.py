@@ -227,3 +227,73 @@ def test_post_rollout_hook_masks_teacher_padding_in_va_path():
     assert batch.batch["fc_teacher_valid_mask"][0, :, -1].sum().item() == 0
     assert batch.batch["fc_condition_weights"][0, :, -1].sum().item() == 0.0
     assert metrics["fc_opd/teacher_valid_ratio"] < 1.0
+
+
+def test_post_rollout_hook_plain_gkd_skips_student_router():
+    tokenizer = ByteTokenizer()
+    valid_ids = tuple(tokenizer.encode("Reasoning. Answer: B"))
+    responses = torch.tensor([valid_ids], dtype=torch.long)
+    response_mask = torch.ones_like(responses, dtype=torch.bool)
+    teacher = RecordingTeacher()
+    batch = SimpleNamespace(
+        batch={"responses": responses, "response_mask": response_mask},
+        non_tensor_batch={
+            "uid": ["gkd-prompt-1"],
+            "question": ["Find the angle."],
+            "condition_inputs": [_condition_inputs().to_dict()],
+        },
+    )
+
+    updated, metrics = fc_opd_post_rollout_hook(
+        batch=batch,
+        tokenizer=tokenizer,
+        processor=None,
+        config={
+            "algorithm": {
+                "fc_opd": {
+                    "teacher_scorer": teacher,
+                    "conditions": ["full"],
+                    "loss_mode": "gkd",
+                }
+            }
+        },
+        global_steps=1,
+    )
+
+    assert updated is batch
+    assert teacher.calls == [valid_ids]
+    assert batch.batch["fc_teacher_topk_indices"].shape == (1, 1, len(valid_ids), 2)
+    assert batch.batch["fc_condition_weights"].eq(1).all()
+    assert batch.non_tensor_batch["fc_opd_loss_mode"].tolist() == ["gkd"]
+    assert metrics["fc_opd/is_plain_gkd"] == 1.0
+
+
+def test_post_rollout_hook_plain_gkd_rejects_multiple_conditions():
+    tokenizer = ByteTokenizer()
+    valid_ids = tuple(tokenizer.encode("Answer: B"))
+    batch = SimpleNamespace(
+        batch={
+            "responses": torch.tensor([valid_ids], dtype=torch.long),
+            "response_mask": torch.ones((1, len(valid_ids)), dtype=torch.bool),
+        },
+        non_tensor_batch={
+            "question": ["Find the angle."],
+            "condition_inputs": [_condition_inputs().to_dict()],
+        },
+    )
+    with pytest.raises(ValueError, match=r"conditions=\[full\]"):
+        fc_opd_post_rollout_hook(
+            batch=batch,
+            tokenizer=tokenizer,
+            processor=None,
+            config={
+                "algorithm": {
+                    "fc_opd": {
+                        "teacher_scorer": RecordingTeacher(),
+                        "conditions": ["full", "degraded"],
+                        "loss_mode": "gkd",
+                    }
+                }
+            },
+            global_steps=1,
+        )

@@ -160,7 +160,9 @@ fi
 
 if [[ ! -d "${MODEL_PATH}" ]]; then
     echo "FATAL: Model not found at ${MODEL_PATH}"
-    echo "Download: huggingface-cli download Qwen/Qwen3-0.6B --local-dir ${MODEL_PATH}"
+    echo "Available local Qwen3 candidates under ${MODEL_ROOT}:"
+    find "${MODEL_ROOT}" -maxdepth 1 -type d -name 'Qwen3*' -print 2>/dev/null | sort || true
+    echo "Download explicitly with: hf download Qwen/<model-name> --local-dir ${MODEL_PATH}"
     exit 1
 fi
 

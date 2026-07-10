@@ -57,6 +57,7 @@ def test_validate_score_response_checks_shapes_and_values():
         topk_log_probs=((math.log(0.6), math.log(0.3)),),
         tail_log_prob=(math.log(0.1),),
         teacher_entropy=(1.0,),
+        sampled_token_log_probs=(math.log(0.6),),
     )
     validate_score_response(response, metadata)
 
@@ -78,6 +79,7 @@ def test_validate_score_response_rejects_non_normalized_mass():
         topk_log_probs=((math.log(0.4), math.log(0.3)),),
         tail_log_prob=(math.log(0.1),),
         teacher_entropy=(1.0,),
+        sampled_token_log_probs=(math.log(0.4),),
     )
     with pytest.raises(ValueError, match="sum to one"):
         validate_score_response(response, metadata)
@@ -121,5 +123,7 @@ def test_transformers_backend_retokenization_gate_without_loading_a_model(caplog
     caplog.clear()
     with caplog.at_level("WARNING"):
         scorer._check_response_text(request)
-    assert tuple(request.response_token_ids) == (ord("B"),)
-    assert "Teacher tokenizer mismatch" in caplog.text
+    # The current student token IDs are the distillation target.  A teacher
+    # tokenizer round-trip mismatch is logged, never silently substituted.
+    assert tuple(request.response_token_ids) == (ord("A"),)
+    assert "Teacher tokenizer round-trip mismatch" in caplog.text

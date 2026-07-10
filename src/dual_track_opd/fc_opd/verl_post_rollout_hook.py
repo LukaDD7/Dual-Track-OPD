@@ -64,10 +64,20 @@ def fc_opd_post_rollout_hook(
         for index in range(int(responses.shape[0]))
     ]
     teacher_scorer = _build_teacher_scorer(fc_config, tokenizer, samples, conditions)
-    # VA-OPD mode: full+degraded only → skip chunk parsing, student scorer, routing
-    _is_va_opd = set(conditions) == {Condition.FULL, Condition.DEGRADED} and len(conditions) == 2
-    pre_scored_students = None if _is_va_opd else _pre_score_students(fc_config, samples, conditions)
-    student_scorer = _NOOP_SCORER if _is_va_opd else _build_student_scorer(fc_config)
+    loss_mode = str(_config_get(fc_config, "loss_mode", "forward"))
+    # Vanilla GKD and VA-OPD are both pure online distillation objectives.  They
+    # do not need the FC-OPD chunk router or a second student scorer service.
+    _is_plain_gkd = loss_mode in {"gkd", "gkd_forward"}
+    if _is_plain_gkd and conditions != (Condition.FULL,):
+        raise ValueError("loss_mode=gkd requires exactly conditions=[full]")
+    _is_va_opd = loss_mode in {"va_opd", "va_opd_jsd"}
+    if _is_va_opd and not (
+        set(conditions) == {Condition.FULL, Condition.DEGRADED} and len(conditions) == 2
+    ):
+        raise ValueError("VA-OPD requires exactly conditions=[full,degraded]")
+    skip_routing = _is_plain_gkd or _is_va_opd
+    pre_scored_students = None if skip_routing else _pre_score_students(fc_config, samples, conditions)
+    student_scorer = _NOOP_SCORER if skip_routing else _build_student_scorer(fc_config)
     output = compute_online_fc_opd_batch(
         samples,
         tokenizer=tokenizer,
@@ -77,7 +87,7 @@ def fc_opd_post_rollout_hook(
         config=OnlineFCOPDConfig(
             conditions=conditions,
             compute_hook_loss=bool(_config_get(fc_config, "compute_hook_loss", True)),
-            skip_routing=_is_va_opd,
+            skip_routing=skip_routing,
         ),
         pre_scored_students=pre_scored_students,
     )
@@ -101,7 +111,6 @@ def fc_opd_post_rollout_hook(
     loss_coef = float(_config_get(fc_config, "loss_coef", 0.0))
     batch.batch["fc_opd_coef"] = torch.full((B,), loss_coef, device=responses.device)
     # Pass loss_mode — store as a list of strings [B] to survive batch.reorder.
-    loss_mode = str(_config_get(fc_config, "loss_mode", "forward"))
     import numpy as np
     batch.non_tensor_batch["fc_opd_loss_mode"] = np.array([loss_mode] * B, dtype=object)
     batch.non_tensor_batch["fc_prompt_ids"] = np.array(
@@ -143,6 +152,7 @@ def fc_opd_post_rollout_hook(
         "fc_opd/hook_loss": float(output.loss.detach().cpu().item()),
         "fc_opd/hook_num_samples": float(len(samples)),
         "fc_opd/hook_active_weight": float(verl_tensors.condition_weights.detach().sum().cpu().item()),
+        "fc_opd/is_plain_gkd": float(_is_plain_gkd),
     }
     if verl_tensors.teacher_valid_mask is not None:
         valid = verl_tensors.teacher_valid_mask.to(device=response_mask.device, dtype=torch.bool)
@@ -490,13 +500,15 @@ def _log_pipeline_verification(
     sampled_lp_shape: tuple[int, ...] | None,
     top_k: int | None,
 ) -> None:
-    """Print formal pipeline verification header for VA-OPD reproducibility."""
+    """Print the active online-distillation contract for reproducibility."""
     import logging as _logging
     import sys as _sys
     _log = _logging.getLogger(__name__)
+    is_gkd = loss_mode in {"gkd", "gkd_forward"}
+    title = "Qwen3-VL Online GKD Pipeline Verification" if is_gkd else "VA-OPD Pipeline Verification (arXiv 2605.21924 §3.2-3.3)"
     lines = [
         "=" * 72,
-        "  VA-OPD Pipeline Verification (arXiv 2605.21924 §3.2-3.3)",
+        f"  {title}",
         "=" * 72,
         f"  C          = {len(conditions)}  conditions: {[c.value for c in conditions]}",
         f"  loss_mode  = {loss_mode}",
@@ -506,9 +518,22 @@ def _log_pipeline_verification(
         f"  Student    = raw image + canonical question  (choices allowed, no XML)",
         f"  Teacher    = raw image + same canonical question  (no format bias)",
         f"  KL         = {'JSD(P_T, P_S)' if loss_mode == 'va_opd_jsd' else 'reverse KL(P_S || P_T)' if loss_mode == 'va_opd' else 'forward'}",
-        f"  Formula §3.2: w^(k) = softmax(z_score(ā^(k)) / τ), sums to 1 per prompt",
-        f"  Formula §3.3: L_group = 0.5·mean(L_HighVA) + 0.5·mean(L_LowVA)",
-        f"  Total (formula 7): L = Σ_k w^(k)·L_group^(k)   (pure distillation, no GRPO)",
+        (
+            "  Objective  = forward KL on the full-image teacher distribution "
+            "(pure distillation, no GRPO)"
+            if is_gkd
+            else "  Formula §3.2: w^(k) = softmax(z_score(ā^(k)) / τ), sums to 1 per prompt"
+        ),
+        (
+            "  Routing    = uniform over teacher-valid response tokens"
+            if is_gkd
+            else "  Formula §3.3: L_group = 0.5·mean(L_HighVA) + 0.5·mean(L_LowVA)"
+        ),
+        (
+            "  Update     = current rollout -> immediate teacher score -> actor backward"
+            if is_gkd
+            else "  Total (formula 7): L = Σ_k w^(k)·L_group^(k)   (pure distillation, no GRPO)"
+        ),
         "=" * 72,
     ]
     for line in lines:

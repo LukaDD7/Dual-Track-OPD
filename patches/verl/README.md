@@ -28,12 +28,15 @@ Patches:
   - Preserves FC-OPD tensor fields through `DataParallelPPOActor.update_policy`.
   - Computes the actor-side auxiliary loss from live actor logits in
     `_forward_micro_batch`.
-  - Supports the faithful VA-OPD path (`loss_mode=va_opd`): full/degraded
+  - Supports a vanilla multimodal GKD baseline (`loss_mode=gkd`): one full-image
+    condition, online teacher forced-scoring of the current rollout, and pure
+    forward KL with no GRPO term.
+  - Supports the faithful VA-OPD paths (`loss_mode=va_opd` or
+    `loss_mode=va_opd_jsd`): full/degraded
     teacher scores, exact sampled-token VA, rollout softmax weights that sum
     to 1 per prompt, and grouped reverse KL.
-  - Treats `va_opd` as pure distillation in the actor update, replacing the
-    zero-advantage PPO loss instead of multiplying by an auxiliary coefficient
-    stored outside the actor config.
+  - Treats GKD and both VA-OPD modes as pure distillation in the actor update,
+    replacing the PPO loss instead of adding an auxiliary objective.
   - Adds `actor/fc_opd_loss`, `actor/fc_opd_coef`, denominator metrics, and
     VA diagnostics such as `actor/fc_opd_va/mean`.
   - Delegates tensor math to `dual_track_opd.fc_opd.verl_actor_loss` so the

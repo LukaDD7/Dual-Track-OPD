@@ -1,0 +1,44 @@
+# Canonical Route-1 baseline. The launcher records its resolved CLI overrides
+# and this reference file in run_manifest.json.
+experiment:
+  name: qwen3vl_geometry3k_gkd
+  objective: gkd
+  on_policy: true
+  pure_distillation: true
+
+models:
+  student: ${DTOPD_ROOT}/models/Qwen3-VL-4B-Instruct
+  teacher: ${DTOPD_ROOT}/models/Qwen3-VL-32B-Instruct
+
+data:
+  source: ${DTOPD_ROOT}/dataset/geometry3k/data/train-00000-of-00001.parquet
+  prepared_root: ${DTOPD_ROOT}/fc-opd-storage/outputs/fc_opd/geometry3k_gkd
+  validation_size: 200
+  holdout_validation: true
+  degradation: lowres_10pct_nearest
+
+distillation:
+  conditions: [full]
+  divergence: forward_kl
+  teacher_top_k: 32
+  renormalize_top_k: true
+  include_tail: true
+  replace_policy_gradient: true
+
+training:
+  learning_rate: 2.0e-6
+  steps: 10
+  prompt_batch_size: 4
+  rollouts_per_prompt: 4
+  max_prompt_length: 6144
+  max_response_length: 1024
+  actor_strategy: fsdp2
+  rollout_backend: vllm
+  rollout_gpu_memory_utilization: 0.45
+  gradient_checkpointing: true
+  fused_actor_kernels: false
+
+hardware:
+  teacher_gpus: [0]
+  train_gpus: [1, 2, 3, 4]
+  cuda: "12.8"

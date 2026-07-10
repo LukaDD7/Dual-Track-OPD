@@ -99,7 +99,7 @@
              if calculate_entropy:
                  outputs["entropys"] = entropy
              if calculate_sum_pi_squared:
-@@ -522,6 +573,19 @@
+@@ -522,6 +573,20 @@
              "old_log_probs",
              "advantages",
          ]
@@ -120,7 +120,7 @@
          if self.use_prefix_grouper and "prompts" in data.batch.keys():
              select_keys.append("prompts")
          if self.config.use_kl_loss:
-@@ -538,6 +602,15 @@
+@@ -538,6 +603,15 @@
          non_tensor_select_keys = []
          if has_multi_modal_inputs:
              non_tensor_select_keys.append("multi_modal_inputs")
@@ -136,14 +136,16 @@
          if self.use_prefix_grouper and "uid" in data.non_tensor_batch.keys():
              non_tensor_select_keys.append("uid")
  
-@@ -564,6 +637,15 @@
+@@ -564,6 +638,17 @@
                      )
                      micro_batches = mini_batch.split(self.config.ppo_micro_batch_size_per_gpu)
  
 +                mini_batch_fields = {**mini_batch.batch, **mini_batch.non_tensor_batch}
 +                fc_opd_denominator = None
 +                fc_opd_mode = _fc_opd_loss_mode(mini_batch_fields)
-+                pure_fc_opd = fc_opd_mode in ("vgg_opd", "va_opd")
++                pure_fc_opd = fc_opd_mode in (
++                    "gkd", "gkd_forward", "vgg_opd", "va_opd", "va_opd_jsd"
++                )
 +                if has_fc_opd_tensors(mini_batch_fields):
 +                    fc_opd_denominator = fc_opd_batch_denominator(
 +                        mini_batch_fields, mini_batch.batch["response_mask"]
@@ -152,7 +154,7 @@
                  self.actor_optimizer.zero_grad()
  
                  for micro_batch in micro_batches:
-@@ -656,6 +738,30 @@
+@@ -656,6 +741,30 @@
                          metrics["actor/kl_loss"] += kl_loss.detach().item() * loss_scale_factor
                          micro_batch_metrics["actor/kl_coef"] = self.config.kl_loss_coef
  
@@ -163,7 +165,7 @@
 +                        denominator = fc_opd_denominator.to(fc_opd_loss_sum.device)
 +                        fc_opd_loss = fc_opd_loss_sum / denominator
 +                        # The actor multiplies policy_loss by loss_scale_factor below.
-+                        # Pure VA/VGG-OPD should be the whole objective, so divide here
++                        # Pure GKD/VA/VGG-OPD is the whole objective, so divide here
 +                        # to keep the actor's later scaling from shrinking the gradient.
 +                        if pure_fc_opd:
 +                            policy_loss = fc_opd_loss / loss_scale_factor
@@ -183,7 +185,7 @@
                      if self.config.use_dynamic_bsz:
                          # relative to the dynamic bsz
                          loss = policy_loss * loss_scale_factor
-@@ -674,3 +780,44 @@
+@@ -674,3 +783,44 @@
                  append_to_dict(metrics, mini_batch_metrics)
          self.actor_optimizer.zero_grad()
          return metrics

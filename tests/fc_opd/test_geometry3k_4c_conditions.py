@@ -31,7 +31,10 @@ def test_degraded_condition_uses_degraded_image_path():
     rendered = render_teacher_prompt(Condition.DEGRADED, "What is x?", inputs)
 
     assert rendered.image_paths == ("/tmp/degraded.png",)
-    assert "degraded image" in rendered.messages[0]["content"][1]["text"]
+    # Condition identity must be carried by the image, not leaked as a textual
+    # cue that could bias teacher probabilities.
+    assert "degraded image" not in rendered.messages[0]["content"][1]["text"]
+    assert "What is x?" in rendered.messages[0]["content"][1]["text"]
 
 
 def test_evidence_leakage_warns_on_answer_phrase_but_not_plain_observation():
