@@ -142,8 +142,21 @@ reproducible.
 1. **Our repo** (`Dual-Track-OPD`, branch `codex/va-opd`): `scripts/hpc/run_gkd_text_smoke.sh`
 2. **verl checkout** (`external/verl_gkd/verl/`, detached HEAD): `verl/workers/megatron_workers.py`, `verl/workers/config/rollout.py`, `verl/utils/profiler/profile.py`
 3. **recipe submodule** (`external/verl_gkd/verl/recipe/`, detached HEAD): `gkd/megatron/main_gkd.py`, `gkd/megatron/megatron_workers.py`, `gkd/megatron/ray_trainer.py`, symlinks in `gkd/`
-
 ---
+
+## Fresh Environment Setup
+
+All bug fixes are archived as format-patch files. After a fresh `git clone` + `git submodule update`:
+
+```bash
+# Apply verl checkout patches (5 commits: B6, B8, B10, B11, B12)
+git -C external/verl_gkd/verl am ../../../patches/verl/verl_gkd_bugfixes.patch
+
+# Apply recipe submodule patches (8 commits: B5, B11, B13, B14)
+git -C external/verl_gkd/verl/recipe am ../../../../../patches/verl/recipe_gkd_bugfixes.patch
+```
+
+B15 (event loop) is applied at runtime by `scripts/hpc/patch_gkd_b15_event_loop.py`.
 
 ## How to Reproduce
 
