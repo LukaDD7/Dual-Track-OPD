@@ -150,14 +150,14 @@ if [[ "${GKD_LAYOUT}" != "integrated" || "${_VERL_HEAD}" != "${GKD_COMPAT_COMMIT
 fi
 echo "[OK] Integrated GKD/verl compatibility pin verified: ${_VERL_HEAD}"
 
-# Apply runtime patches (idempotent, in-place, git HEAD stays unchanged).
+# Apply only the two compatibility edits required by the integrated GKD pin.
+# Do not suppress patcher failures: an unknown source revision must fail before
+# any GPU process starts.
 _PATCH_DIR="${REPO_ROOT}/scripts/hpc"
-"${PYTHON}" "${_PATCH_DIR}/patch_gkd_b15_event_loop.py" \
-    "${GKD_RECIPE_DIR}/megatron_workers.py" 2>/dev/null || true
 "${PYTHON}" "${_PATCH_DIR}/patch_gkd_b16_event_loop.py" \
-    "${VERL_GKD_DIR}/verl/workers/rollout/vllm_rollout/vllm_rollout.py" 2>/dev/null || true
+    "${VERL_GKD_DIR}/verl/workers/rollout/vllm_rollout/vllm_rollout.py"
 "${PYTHON}" "${_PATCH_DIR}/patch_gkd_b10_router_replay.py" \
-    "${VERL_GKD_DIR}/verl/workers/megatron_workers.py" 2>/dev/null || true
+    "${VERL_GKD_DIR}/verl/workers/megatron_workers.py"
 
 echo ""
 
@@ -232,6 +232,82 @@ else
         exit 1
     fi
 fi
+echo ""
+
+# Resource pools are disjoint in the official GKD recipe.
+_TRAIN_GPU_COUNT=$(echo "${TRAIN_GPU_LIST}" | tr ',' '\n' | wc -l)
+_POOL_GPUS=$(( _TRAIN_GPU_COUNT / 2 ))
+if [[ ${_POOL_GPUS} -lt 1 ]]; then
+    echo "FATAL: GKD needs at least two training GPUs (one actor + one rollout)" >&2
+    exit 1
+fi
+
+# Keep this list close to the official recipe/gkd/run_moonlight_dsv3_training.sh.
+# Explicit compatibility additions are marked below.  The same array is used
+# for Hydra preflight and the real launch so validation cannot drift.
+GKD_OVERRIDES=(
+    "data.train_files=${TRAIN_PARQUET}"
+    "data.val_files=${VAL_PARQUET}"
+    "data.prompt_key=prompt"
+    "data.train_batch_size=4"
+    "data.max_prompt_length=512"
+    "data.max_response_length=512"
+    "data.filter_overlong_prompts=True"
+    "data.truncation=error"
+    "data.trust_remote_code=True"
+    "actor_rollout_ref.model.path=${MODEL_PATH}"
+    "actor_rollout_ref.model.trust_remote_code=True"
+    "actor_rollout_ref.actor.megatron.sequence_parallel=False"
+    "actor_rollout_ref.actor.optim.lr=1e-6"
+    "actor_rollout_ref.actor.micro_batch_size=1"
+    "actor_rollout_ref.actor.use_dynamic_bsz=False"
+    "actor_rollout_ref.actor.use_torch_compile=False"
+    "actor_rollout_ref.actor.checkpoint.save_contents=['model']"
+    "actor_rollout_ref.actor.checkpoint.load_contents=[]"
+    "actor_rollout_ref.actor.megatron.pipeline_model_parallel_size=1"
+    "actor_rollout_ref.actor.megatron.tensor_model_parallel_size=1"
+    "actor_rollout_ref.actor.megatron.expert_model_parallel_size=1"
+    "actor_rollout_ref.actor.megatron.expert_tensor_parallel_size=1"
+    "actor_rollout_ref.rollout.name=vllm"
+    # The integrated commit registers its in-process vLLM class as "async"
+    # even though GKD calls generate_sequences synchronously.
+    "actor_rollout_ref.rollout.mode=async"
+    "actor_rollout_ref.rollout.gpu_memory_utilization=0.45"
+    "actor_rollout_ref.rollout.temperature=1.0"
+    "actor_rollout_ref.rollout.top_p=0.99"
+    "actor_rollout_ref.rollout.top_k=-1"
+    "actor_rollout_ref.rollout.enable_chunked_prefill=False"
+    "actor_rollout_ref.rollout.enforce_eager=True"
+    "actor_rollout_ref.rollout.tensor_model_parallel_size=1"
+    "actor_rollout_ref.rollout.load_format=dummy_megatron"
+    "actor_rollout_ref.rollout.agent.num_workers=1"
+    # Upstream YAML omission: base MegatronWorker reads both keys before
+    # RolloutConfig dataclass defaults are materialized.
+    "+actor_rollout_ref.rollout.n=1"
+    "+actor_rollout_ref.actor.ppo_mini_batch_size=4"
+    "actor_rollout_ref.teacher.server_ip=127.0.0.1"
+    "actor_rollout_ref.teacher.server_port=${TEACHER_PORT}"
+    "actor_rollout_ref.teacher.n_server_workers=1"
+    "trainer.logger=['console']"
+    "trainer.project_name=gkd_smoke"
+    "trainer.experiment_name=${RUN_ID}"
+    "trainer.n_gpus_per_node=${_POOL_GPUS}"
+    "trainer.nnodes=1"
+    "rollout.n_gpus_per_node=${_POOL_GPUS}"
+    "rollout.nnodes=1"
+    "trainer.scheduler=one_step_off"
+    "trainer.save_freq=-1"
+    "trainer.test_freq=-1"
+    "trainer.val_before_train=False"
+    "trainer.total_training_steps=${NUM_STEPS}"
+    "trainer.total_epochs=1"
+)
+
+echo "=== Hydra/config preflight (no Ray, no GPU allocation) ==="
+PYTHONPATH="${VERL_GKD_DIR}:${PYTHONPATH:-}" "${PYTHON}" \
+    "${REPO_ROOT}/scripts/hpc/validate_gkd_smoke_config.py" \
+    --config-dir "${GKD_RECIPE_DIR}/config" \
+    -- "${GKD_OVERRIDES[@]}"
 echo ""
 
 # ── cleanup ───────────────────────────────────────────────────────────────
@@ -335,14 +411,6 @@ echo "[OK] Ray started"
 echo ""
 
 # ── 3. Run GKD text smoke (direct, no ray job submit) ────────────────────
-# GKD splits GPUs: actor_pool + rollout_pool = separate Ray resource pools.
-# Each pool gets floor(n_gpus / 2), minimum 1.  With 2 train GPUs: 1+1=2 total.
-_TRAIN_GPU_COUNT=$(echo "${TRAIN_GPU_LIST}" | tr ',' '\n' | wc -l)
-_POOL_GPUS=$(( _TRAIN_GPU_COUNT / 2 ))
-if [[ ${_POOL_GPUS} -lt 1 ]]; then
-    _POOL_GPUS=1
-fi
-
 echo "=== Running GKD text smoke (${NUM_STEPS} steps) ==="
 echo "    Train data: ${TRAIN_PARQUET}"
 echo "    Val data:   ${VAL_PARQUET}"
@@ -369,50 +437,7 @@ set +e
 "${PYTHON}" -m "${GKD_MAIN_MODULE}" \
     --config-path="${GKD_RECIPE_DIR}/config" \
     --config-name=on_policy_distill_trainer \
-    "data.train_files=${TRAIN_PARQUET}" \
-    "data.val_files=${VAL_PARQUET}" \
-    "data.prompt_key=prompt" \
-    "data.train_batch_size=4" \
-    "data.max_prompt_length=512" \
-    "data.max_response_length=512" \
-    "data.filter_overlong_prompts=True" \
-    "data.truncation=error" \
-    "data.trust_remote_code=True" \
-    "+teacher.server_ip=127.0.0.1" \
-    "+teacher.server_port=${TEACHER_PORT}" \
-    "actor_rollout_ref.model.path=${MODEL_PATH}" \
-    "actor_rollout_ref.model.trust_remote_code=True" \
-    "actor_rollout_ref.actor.megatron.sequence_parallel=False" \
-    "+actor_rollout_ref.actor.megatron.override_transformer_config.sequence_parallel=False" \
-    "actor_rollout_ref.actor.optim.lr=1e-6" \
-    "+actor_rollout_ref.actor.ppo_mini_batch_size=4" \
-    "+actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1" \
-    "+actor_rollout_ref.actor.use_kl_loss=False" \
-    "actor_rollout_ref.actor.use_torch_compile=False" \
-    "actor_rollout_ref.rollout.mode=async" \
-    "actor_rollout_ref.rollout.name=vllm" \
-    "actor_rollout_ref.rollout.gpu_memory_utilization=0.45" \
-    "actor_rollout_ref.rollout.temperature=1.0" \
-    "actor_rollout_ref.rollout.top_k=32" \
-    "actor_rollout_ref.rollout.tensor_model_parallel_size=1" \
-    "actor_rollout_ref.rollout.load_format=auto" \
-    "+algorithm.use_kl_in_reward=False" \
-    "trainer.logger=['console']" \
-    "trainer.project_name=gkd_smoke" \
-    "trainer.experiment_name=${RUN_ID}" \
-    "trainer.n_gpus_per_node=${_POOL_GPUS}" \
-    "trainer.nnodes=1" \
-    "rollout.n_gpus_per_node=${_POOL_GPUS}" \
-    "rollout.nnodes=1" \
-    "trainer.save_freq=-1" \
-    "trainer.test_freq=5" \
-    "actor_rollout_ref.actor.megatron.pipeline_model_parallel_size=1" \
-    "actor_rollout_ref.actor.megatron.tensor_model_parallel_size=1" \
-    "actor_rollout_ref.actor.megatron.expert_model_parallel_size=1" \
-    "actor_rollout_ref.actor.megatron.expert_tensor_parallel_size=1" \
-    "trainer.val_before_train=False" \
-    "trainer.total_training_steps=${NUM_STEPS}" \
-    "trainer.total_epochs=1" \
+    "${GKD_OVERRIDES[@]}" \
     > "${TRAIN_LOG}" 2>&1
 VERL_EXIT=$?
 set -e

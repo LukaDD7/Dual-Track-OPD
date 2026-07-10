@@ -147,6 +147,27 @@ worktree at that revision alongside the existing patched checkout. It does not
 delete or rewrite the latter. The smoke launcher now fails fast on the invalid
 split-recipe/new-ServerAdapter combination.
 
+### B17. `actor_rollout_ref.rollout.n` missing in integrated GKD
+
+**Symptom**: actor creation fails in base `MegatronWorker.__init__` with
+`ConfigAttributeError: Key 'n' is not in struct`.
+
+**Root cause**: the official integrated GKD YAML omits both `rollout.n` and the
+legacy `actor.ppo_mini_batch_size`. Both have defaults in newer dataclasses or
+are unrelated to GKD's custom actor update, but the reused base Megatron worker
+reads them directly from the original `DictConfig` before dataclass defaults
+are materialized. The official GKD actor itself uses `actor.micro_batch_size`;
+mixing in additional PPO-era overrides obscured which keys were compatibility
+shims and which controlled the actual recipe.
+
+**Resolution**: the smoke now maintains one override array modeled on upstream
+`recipe/gkd/run_moonlight_dsv3_training.sh`. It adds only the two explicitly
+documented base-worker shims (`rollout.n=1`, `ppo_mini_batch_size=4`) and the
+`mode=async` registry-name compatibility required by the integrated commit.
+The exact same array is Hydra-composed and validated before teacher/Ray startup,
+including lookup of the in-process `vLLMAsyncRollout` class. Missing or stale
+config now fails before GPU allocation.
+
 **Key files involved**:
 - `external/verl_gkd/verl/recipe/gkd/megatron/megatron_workers.py` (lines ~782-850) — GKD rollout worker sync_rollout_weights
 - `external/verl_gkd/verl/verl/workers/rollout/vllm_rollout/vllm_rollout.py` (line 155) — ServerAdapter.update_weights
