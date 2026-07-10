@@ -8,6 +8,10 @@ not launch an async server — it owns the rollout worker directly and expects a
 ready, in-process engine.
 
 These helpers bridge that gap without rewriting either codebase.
+
+IMPORTANT: We call _init_worker / _load_model **directly** — NOT through ZMQ.
+Ray actors dispatch synchronously; the ZMQ event loop is never started, so
+any ZMQ send/recv would deadlock.
 """
 
 from __future__ import annotations
@@ -79,15 +83,14 @@ def _build_vllm_engine_args(
 def init_engine_sync(rollout: Any) -> None:
     """Initialise the vLLM inference engine for *rollout* (a vLLMAsyncRollout).
 
-    Must be called after ``_build_rollout()`` (which creates the ZMQ loop and
-    binds the IPC socket).  Sends ``init_worker`` / ``init_device`` /
-    ``load_model`` through the local ZMQ socket — exactly what
-    ExternalZeroMQDistributedExecutor would do, but performed inline so the
-    GKD recipe can proceed with its sync path.
+    Must be called after ``_build_rollout()``.  Calls ``_init_worker`` and
+    ``_load_model`` **directly** — these are regular synchronous methods on
+    vLLMAsyncRollout.  We do NOT go through ZMQ because the ZMQ event loop
+    is never started on Ray actors (they dispatch synchronously), so any
+    ZMQ ``send/recv`` would deadlock.
     """
-    import pickle
+    import os
 
-    import zmq
     from vllm.engine.arg_utils import AsyncEngineArgs
     from vllm.usage.usage_lib import UsageContext
 
@@ -95,11 +98,10 @@ def init_engine_sync(rollout: Any) -> None:
         logger.info("vLLM inference engine already initialized, skipping.")
         return
 
-    # 1. Build CLI args + VllmConfig -------------------------------------------------
+    # 1. Build VllmConfig from rollout + model config --------------------------------
     engine_args_dict = _build_vllm_engine_args(rollout.config, rollout.model_config)
 
-    # Parse through vLLM's standard CLI machinery (the way the async server does it).
-    # We mimic ``vllm serve <model> --key val ...``.
+    # Parse through vLLM's standard CLI machinery (mirrors the async server).
     cli = ["serve", str(rollout.model_config.local_path)]
     for k, v in engine_args_dict.items():
         if isinstance(v, bool):
@@ -115,7 +117,6 @@ def init_engine_sync(rollout: Any) -> None:
     from vllm.utils import FlexibleArgumentParser
 
     parser = FlexibleArgumentParser(description="vLLM CLI – GKD sync stub")
-    # Register the ``serve`` subcommand (required by vLLM's parser).
     import vllm.entrypoints.cli.serve as serve_mod
 
     subparsers = parser.add_subparsers(required=False, dest="subparser")
@@ -129,12 +130,7 @@ def init_engine_sync(rollout: Any) -> None:
     engine_args = AsyncEngineArgs.from_cli_args(parsed)
     vllm_config = engine_args.create_engine_config(usage_context=UsageContext.OPENAI_API_SERVER)
 
-    # 2. Send init commands via ZMQ to *self* ---------------------------------------
-    address = rollout.get_zeromq_address()
-    context = zmq.Context()
-    socket = context.socket(zmq.REQ)
-    socket.connect(address)
-
+    # 2. Initialise the engine directly (no ZMQ) -------------------------------------
     kwargs = dict(
         vllm_config=vllm_config,
         local_rank=0,
@@ -143,22 +139,15 @@ def init_engine_sync(rollout: Any) -> None:
         is_driver_worker=True,
     )
 
-    def _zmq_rpc(method: str, args: tuple = (), kw: dict | None = None):
-        msg = pickle.dumps((method, args, kw or {}))
-        socket.send(msg)
-        result = pickle.loads(socket.recv())
-        if isinstance(result, Exception):
-            raise result
-        return result
+    # _init_worker creates WorkerWrapperBase and calls its init_worker (which
+    # constructs self.worker but does NOT call init_device).
+    rollout._init_worker([kwargs])
 
-    try:
-        _zmq_rpc("init_worker", args=([kwargs],))
-        _zmq_rpc("init_device")
-        _zmq_rpc("load_model")
-        logger.info("vLLM inference engine initialised via ZMQ loopback (B17).")
-    finally:
-        socket.close()
-        context.term()
+    # WorkerWrapperBase.init_device → worker.init_device (GPU alloc, etc.)
+    rollout.inference_engine.init_device()
 
-    # Verify the engine is ready
+    # _load_model loads the weights via WorkerWrapperBase.load_model → worker.load_model
+    rollout._load_model()
+
     assert rollout.inference_engine is not None, "Engine init failed — inference_engine still None"
+    logger.info("vLLM inference engine initialised via direct call (B17).")
