@@ -357,6 +357,7 @@ set +e
     "+actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1" \
     "+actor_rollout_ref.actor.use_kl_loss=False" \
     "actor_rollout_ref.actor.use_torch_compile=False" \
+    "actor_rollout_ref.rollout.mode=async" \
     "actor_rollout_ref.rollout.name=vllm" \
     "actor_rollout_ref.rollout.gpu_memory_utilization=0.45" \
     "actor_rollout_ref.rollout.temperature=1.0" \
