@@ -4,7 +4,7 @@
 # Staged probes:
 #   --stage config    CPU-safe: AutoConfig, AutoTokenizer, AutoProcessor
 #   --stage vllm      GPU required: vLLM load + single inference
-#   --stage megatron  GPU required: GKD Megatron actor model provider
+#   --stage megatron  3 GPUs: one-step GKD smoke with real Megatron actor load
 #   --stage all       Run all stages (CPU-safe parts on CPU, GPU parts need GPU)
 #
 # GPU node has no internet — must use local model paths.
@@ -13,6 +13,7 @@
 #   bash scripts/hpc/run_gkd_qwen35_probe.sh --stage config
 #   bash scripts/hpc/run_gkd_qwen35_probe.sh --stage all
 #   bash scripts/hpc/run_gkd_qwen35_probe.sh --stage vllm --qwen35-08b-path /path/to/model
+#   bash scripts/hpc/run_gkd_qwen35_probe.sh --stage megatron --teacher-gpu 0 --train-gpus 1,2
 
 set -euo pipefail
 
@@ -28,12 +29,16 @@ CONDA_BASE="${CONDA_BASE:-/inspire/hdd/global_user/mengweicheng-240108120092/lzy
 MODEL_ROOT="${MODEL_ROOT:-/inspire/hdd/global_user/mengweicheng-240108120092/lzy/models}"
 GKD_ENV="${GKD_ENV:-/inspire/hdd/global_user/mengweicheng-240108120092/lzy/envs/vaopd-gkd-cu128}"
 PYTHON="${GKD_ENV}/bin/python"
-VERL_GKD_DIR="${REPO_ROOT}/external/verl_gkd/verl"
+CUDA_TOOLCHAIN="${CUDA_TOOLCHAIN:-/inspire/hdd/global_user/mengweicheng-240108120092/lzy/envs/cuda128-toolchain}"
+VERL_GKD_DIR="${VERL_GKD_DIR:-${REPO_ROOT}/external/verl_gkd_compatible/verl}"
 
 # ── defaults ──────────────────────────────────────────────────────────────
 STAGE="all"
 QWEN35_08B_PATH="${MODEL_ROOT}/Qwen3.5-0.8B"
 QWEN35_4B_PATH="${MODEL_ROOT}/Qwen3.5-4B"
+VLLM_GPU=0
+TEACHER_GPU=0
+TRAIN_GPU_LIST="1,2"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -41,6 +46,9 @@ while [[ $# -gt 0 ]]; do
         --qwen35-08b-path)  QWEN35_08B_PATH="${2:?--qwen35-08b-path needs a path}"; shift 2 ;;
         --qwen35-4b-path)   QWEN35_4B_PATH="${2:?--qwen35-4b-path needs a path}"; shift 2 ;;
         --env-path)         GKD_ENV="${2:?--env-path needs a value}"; PYTHON="${GKD_ENV}/bin/python"; shift 2 ;;
+        --vllm-gpu)         VLLM_GPU="${2:?--vllm-gpu needs a GPU index}"; shift 2 ;;
+        --teacher-gpu)      TEACHER_GPU="${2:?--teacher-gpu needs a GPU index}"; shift 2 ;;
+        --train-gpus)       TRAIN_GPU_LIST="${2:?--train-gpus needs two or more comma-separated indices}"; shift 2 ;;
         *) echo "Unknown arg: $1"; exit 1 ;;
     esac
 done
@@ -58,7 +66,6 @@ fatal() {
 PROBE_A_EXIT=-1
 PROBE_B_EXIT=-1
 PROBE_C_EXIT=-1
-PROBE_C_BLOCKER=false
 
 log "════════════════════════════════════════════════════════"
 log "  Qwen3.5 Probe — Gate 4"
@@ -67,12 +74,27 @@ log "  Stage:    ${STAGE}"
 log "  Output:   ${OUTPUT_DIR}"
 log "  Model 08B: ${QWEN35_08B_PATH}"
 log "  Model 4B:  ${QWEN35_4B_PATH}"
+log "  vLLM GPU:   ${VLLM_GPU}"
+log "  GKD GPUs:   teacher=${TEACHER_GPU}, train=${TRAIN_GPU_LIST}"
 log "════════════════════════════════════════════════════════"
 log ""
 
 # ── preamble ──────────────────────────────────────────────────────────────
 if [[ ! -x "${PYTHON}" ]]; then
     fatal "Python not found at ${PYTHON}. Run setup_vaopd_gkd_cu128.sh --execute first."
+fi
+
+if [[ -x "${CUDA_TOOLCHAIN}/bin/nvcc" ]]; then
+    export CUDA_HOME="${CUDA_TOOLCHAIN}"
+    export CUDA_PATH="${CUDA_TOOLCHAIN}"
+    export PATH="${CUDA_TOOLCHAIN}/bin:${PATH}"
+    for _candidate in "${CUDA_TOOLCHAIN}/lib" "${CUDA_TOOLCHAIN}/targets/x86_64-linux/lib"; do
+        if [[ -f "${_candidate}/libcudart.so" ]]; then
+            export LIBRARY_PATH="${_candidate}${LIBRARY_PATH:+:${LIBRARY_PATH}}"
+            export LD_LIBRARY_PATH="${_candidate}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+            break
+        fi
+    done
 fi
 
 log "=== Environment ==="
@@ -91,13 +113,15 @@ log ""
 # ═══════════════════════════════════════════════════════════════════════════
 run_probe_a() {
     log "=== Probe A: Config-Only Load (CPU-safe) ==="
-    log "    AutoConfig + AutoTokenizer + AutoProcessor (no weight loading for 4B)"
+    log "    Required 0.8B: AutoConfig + tokenizer/processor + AutoModelForCausalLM weights"
 
     # Only test 0.8B config on CPU; 4B is too heavy for config-only on CPU
     local models_to_test=("${QWEN35_08B_PATH}")
-    if [[ "${STAGE}" == "all" ]] || [[ "${STAGE}" == "config" ]]; then
-        # Also check 4B config — don't load weights, just config
+    if [[ -d "${QWEN35_4B_PATH}" ]]; then
+        # Optional 4B config check; Gate 4 requires the 0.8B weight load.
         models_to_test+=("${QWEN35_4B_PATH}")
+    else
+        log "  Optional 4B config: SKIP (path not found)"
     fi
 
     local all_ok=true
@@ -115,6 +139,7 @@ run_probe_a() {
         "${PYTHON}" -c "
 import sys
 model_id = '${model_path}'
+required_weight_load = model_id == '${QWEN35_08B_PATH}'
 print(f'Loading config from {model_id}...')
 
 # AutoConfig
@@ -134,6 +159,18 @@ try:
     print(f'  AutoProcessor: {type(proc).__name__}')
 except Exception as e:
     print(f'  AutoProcessor: not available — {e}')
+
+if required_weight_load:
+    from transformers import AutoModelForCausalLM
+    model = AutoModelForCausalLM.from_pretrained(
+        model_id,
+        trust_remote_code=True,
+        torch_dtype='auto',
+        low_cpu_mem_usage=True,
+        device_map='cpu',
+    )
+    print(f'  AutoModelForCausalLM: {type(model).__name__} (weights loaded on CPU)')
+    del model
 
 print(f'  Probe A config for {model_id}: PASS')
 " 2>&1 | tee -a "${PROBE_LOG}"
@@ -172,8 +209,10 @@ run_probe_b() {
         fatal "Model not found at ${QWEN35_08B_PATH}. GPU node has no internet — prepare model on CPU node first to NFS."
     fi
 
+    local probe_b_process_log="${OUTPUT_DIR}/probe_b_process.log"
+    local probe_b_pid
     set +e
-    "${PYTHON}" -c "
+    setsid env CUDA_VISIBLE_DEVICES="${VLLM_GPU}" "${PYTHON}" -c "
 import torch
 import sys
 
@@ -206,8 +245,15 @@ try:
 except Exception as e:
     print(f'  Probe B: FAIL — {e}')
     sys.exit(1)
-" 2>&1 | tee -a "${PROBE_LOG}"
+" > "${probe_b_process_log}" 2>&1 &
+    probe_b_pid=$!
+    wait "${probe_b_pid}"
     PROBE_B_EXIT=$?
+    # vLLM 0.11 may leave EngineCore alive when initialization fails.
+    kill -TERM -- "-${probe_b_pid}" 2>/dev/null || true
+    sleep 1
+    kill -KILL -- "-${probe_b_pid}" 2>/dev/null || true
+    cat "${probe_b_process_log}" | tee -a "${PROBE_LOG}"
     set -e
 
     log "Probe B exit code: ${PROBE_B_EXIT}"
@@ -223,112 +269,58 @@ except Exception as e:
 # ═══════════════════════════════════════════════════════════════════════════
 # Probe C: GKD/Megatron actor model provider (GPU required)
 # ═══════════════════════════════════════════════════════════════════════════
+
+
+# Probe C exercises the real actor build/load path. Registry grep or module
+# introspection alone is insufficient evidence of architecture support.
 run_probe_c() {
-    log "=== Probe C: GKD/Megatron Actor Load Qwen3.5-0.8B (GPU required) ==="
+    log "=== Probe C: Real GKD/Megatron Actor Load Qwen3.5-0.8B (GPU required) ==="
+    log "    Runs one complete GKD optimizer step; success is stronger than actor-load-only."
 
     if ! command -v nvidia-smi &>/dev/null; then
-        log "  SKIP: nvidia-smi not found — Probe C requires GPU."
+        PROBE_C_EXIT=1
+        log "Probe C: FAIL — nvidia-smi not found"
         return
     fi
-
     if [[ ! -d "${VERL_GKD_DIR}" ]]; then
-        log "  SKIP: verl GKD checkout not found at ${VERL_GKD_DIR}"
+        PROBE_C_EXIT=1
+        log "Probe C: FAIL — compatible verl checkout not found at ${VERL_GKD_DIR}"
+        log "Run: bash scripts/setup/prepare_gkd_compatible_checkout.sh"
+        return
+    fi
+    if [[ ! -d "${QWEN35_08B_PATH}" ]]; then
+        PROBE_C_EXIT=1
+        log "Probe C: FAIL — model not found at ${QWEN35_08B_PATH}"
+        return
+    fi
+    if [[ ",${TRAIN_GPU_LIST}," == *",${TEACHER_GPU},"* ]]; then
+        PROBE_C_EXIT=1
+        log "Probe C: FAIL — teacher GPU ${TEACHER_GPU} overlaps train GPUs ${TRAIN_GPU_LIST}"
+        return
+    fi
+    local train_gpu_count
+    train_gpu_count=$(echo "${TRAIN_GPU_LIST}" | tr ',' '\n' | wc -l)
+    if [[ ${train_gpu_count} -lt 2 ]]; then
+        PROBE_C_EXIT=1
+        log "Probe C: FAIL — GKD needs at least two train GPUs, got ${TRAIN_GPU_LIST}"
         return
     fi
 
-    if [[ ! -d "${QWEN35_08B_PATH}" ]]; then
-        fatal "Model not found at ${QWEN35_08B_PATH}. GPU node has no internet — prepare model on CPU node first to NFS."
-    fi
-
-    # First: grep for qwen support in the GKD verl checkout
-    log "--- Scanning for Qwen support in verl GKD checkout ---"
     set +e
-    grep -R -n "qwen" "${VERL_GKD_DIR}/verl/verl" "${VERL_GKD_DIR}/verl/recipe/gkd" \
-        -i 2>/dev/null | head -100 | tee -a "${PROBE_LOG}" || true
-    set -e
-    log ""
-
-    # Try introspection of the actual checkout
-    log "--- Attempting Megatron model provider introspection ---"
-    set +e
-    "${PYTHON}" -c "
-import sys
-sys.path.insert(0, '${VERL_GKD_DIR}')
-
-model_id = '${QWEN35_08B_PATH}'
-print(f'Attempting Megatron model provider load for {model_id}...')
-print()
-
-# Step 1: list available model registrations
-print('=== Checking model registry ===')
-try:
-    # Try common paths in the GKD verl checkout
-    import importlib, pkgutil
-
-    # Check if there's a megatron models module
-    try:
-        from verl.models.megatron import registry
-        supported = registry.get_supported_models()
-        print(f'  Supported Megatron models: {sorted(supported)}')
-
-        qwen35_supported = any('qwen3_5' in m.lower() or 'qwen35' in m.lower() for m in supported)
-        if qwen35_supported:
-            print('  Qwen3.5 variant FOUND in Megatron registry')
-        else:
-            print('  Qwen3.5 NOT found in Megatron registry')
-    except ImportError as e:
-        print(f'  Registry import failed: {e}')
-
-    # Step 2: try to find ModelLayerSpec
-    print()
-    print('=== Checking ModelLayerSpec ===')
-    try:
-        from verl.models.megatron.layers import get_model_layer_spec
-        for arch in ['qwen3_5', 'qwen35', 'qwen3.5']:
-            try:
-                spec = get_model_layer_spec(arch)
-                print(f'  ModelLayerSpec for \"{arch}\": FOUND')
-            except (ValueError, KeyError, NotImplementedError) as e:
-                print(f'  ModelLayerSpec for \"{arch}\": MISSING — {e}')
-    except ImportError as e:
-        print(f'  layers import failed: {e}')
-
-except Exception as e:
-    print(f'  Introspection error: {e}')
-
-print()
-print('=== Probe C Summary ===')
-# Check if any qwen3_5 model registration was found
-found_qwen35 = False
-try:
-    from verl.models.megatron.registry import get_supported_models
-    found_qwen35 = any('qwen3_5' in m.lower() or 'qwen35' in m.lower() for m in get_supported_models())
-except:
-    pass
-
-if found_qwen35:
-    print('Qwen3.5 Megatron support: PRESENT — Probe C may pass')
-    print('Proceed to full actor model load test.')
-else:
-    print('Qwen3.5 Megatron support: ABSENT — EXPECTED BLOCKER')
-    print('This means GKD/Megatron does not yet support Qwen3.5 architecture.')
-    print('Do NOT attempt to patch Megatron model layers without explicit approval.')
-    print('Gate 4 cannot pass until Qwen3.5 Megatron support is added upstream.')
-    print('Ref: verl/models/megatron/layers/ — custom ModelLayerSpec needed for Qwen3.5.')
-" 2>&1 | tee -a "${PROBE_LOG}"
-    PROBE_C_EXIT=$?
+    VERL_GKD_DIR="${VERL_GKD_DIR}" \
+        bash "${REPO_ROOT}/scripts/hpc/run_gkd_text_smoke.sh" \
+        --steps 1 \
+        --model-path "${QWEN35_08B_PATH}" \
+        --teacher-gpu "${TEACHER_GPU}" \
+        --train-gpus "${TRAIN_GPU_LIST}" \
+        2>&1 | tee -a "${PROBE_LOG}"
+    PROBE_C_EXIT=${PIPESTATUS[0]}
     set -e
 
-    # If the Python script found qwen3_5 support, it's not a blocker
-    # If not, it's an expected blocker — check the output
-    if grep -q "PRESENT" "${PROBE_LOG}" 2>/dev/null; then
-        PROBE_C_BLOCKER=false
-        log "Probe C: Qwen3.5 Megatron support PRESENT — Gate 4 may proceed"
+    if [[ ${PROBE_C_EXIT} -eq 0 ]]; then
+        log "Probe C: PASS — Qwen3.5 Megatron actor loaded and completed one update"
     else
-        PROBE_C_BLOCKER=true
-        PROBE_C_EXIT=0  # expected blocker, not a script error
-        log "Probe C: EXPECTED BLOCKER — Qwen3.5 Megatron support is absent"
-        log "Gate 4 not passed. Do NOT attempt to patch Megatron model layers."
+        log "Probe C: FAIL — inspect the nested GKD smoke traceback above"
     fi
     log ""
 }
@@ -365,25 +357,33 @@ log "  Probe complete."
 log "  Results:  ${PROBE_LOG}"
 log ""
 _probe_a_label() {
-    if [[ ${PROBE_A_EXIT} -eq 0 ]]; then echo "PASS"; else echo "NOT RUN"; fi
+    if [[ ${PROBE_A_EXIT} -eq 0 ]]; then echo "PASS"; elif [[ ${PROBE_A_EXIT} -eq -1 ]]; then echo "NOT RUN"; else echo "FAIL"; fi
 }
 _probe_b_label() {
     if [[ ${PROBE_B_EXIT} -eq 0 ]]; then echo "PASS"; elif [[ ${PROBE_B_EXIT} -eq -1 ]]; then echo "NOT RUN"; else echo "FAIL"; fi
 }
 _probe_c_label() {
-    if ${PROBE_C_BLOCKER}; then echo "EXPECTED BLOCKER"; elif [[ ${PROBE_C_EXIT} -eq 0 ]]; then echo "PASS"; else echo "NOT RUN"; fi
+    if [[ ${PROBE_C_EXIT} -eq 0 ]]; then echo "PASS"; elif [[ ${PROBE_C_EXIT} -eq -1 ]]; then echo "NOT RUN"; else echo "FAIL"; fi
 }
 log "  Probe A (Config):    $(_probe_a_label)"
 log "  Probe B (vLLM):      $(_probe_b_label)"
 log "  Probe C (Megatron):  $(_probe_c_label)"
 log ""
-if ${PROBE_C_BLOCKER}; then
-    log "  Gate 4: NOT PASSED (expected blocker — Qwen3.5 Megatron support absent)"
-    log "  This is a known gap. Do not proceed to Gate 5 without explicit approval."
+GATE4_OK=false
+case "${STAGE}" in
+    config)   [[ ${PROBE_A_EXIT} -eq 0 ]] && GATE4_OK=true ;;
+    vllm)     [[ ${PROBE_B_EXIT} -eq 0 ]] && GATE4_OK=true ;;
+    megatron) [[ ${PROBE_C_EXIT} -eq 0 ]] && GATE4_OK=true ;;
+    all)      [[ ${PROBE_A_EXIT} -eq 0 && ${PROBE_B_EXIT} -eq 0 && ${PROBE_C_EXIT} -eq 0 ]] && GATE4_OK=true ;;
+esac
+if ${GATE4_OK}; then
+    log "  Gate 4 requested stage(s): PASS"
 else
-    log "  Gate 4 status: check probe results above"
+    log "  Gate 4 requested stage(s): FAIL"
 fi
 log "════════════════════════════════════════════════════════"
 
-# Exit 0 even on expected blocker (it's not a script error, it's a finding)
-exit 0
+if ${GATE4_OK}; then
+    exit 0
+fi
+exit 1

@@ -80,10 +80,13 @@ bash scripts/setup/prepare_gkd_compatible_checkout.sh
 **Pass criteria**:
 - **Probe A** (Transformers load): `AutoModelForCausalLM.from_pretrained("Qwen/Qwen3.5-0.8B")` succeeds
 - **Probe B** (vLLM serve): vLLM can load and serve Qwen3.5-0.8B, single inference passes
-- **Probe C** (Megatron actor): GKD actor model provider loads Qwen3.5-0.8B without `qwen3_5 architecture unsupported` or `ModelLayerSpec missing` errors
+- **Probe C** (Megatron actor): a one-step GKD smoke using Qwen3.5-0.8B loads the real Megatron actor and completes one optimizer update
 
 **Failure — Expected blocker**:
-If Probe C fails with architecture-not-supported errors, this is documented as an **expected gap** in the GKD Megatron model provider. Do NOT attempt to patch Megatron model layers without explicit approval — this is a non-trivial engineering task (custom `ModelLayerSpec`, TP-aware attention, etc.).
+If Probe C fails with architecture-not-supported errors, stop and preserve the
+traceback. Do not infer support from registry grep/introspection: the probe now
+uses the actual actor build/load path. Do NOT patch Megatron model layers
+without explicit approval — this is a non-trivial engineering task.
 
 ---
 
