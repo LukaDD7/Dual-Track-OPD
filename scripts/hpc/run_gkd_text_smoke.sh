@@ -150,14 +150,24 @@ if [[ "${GKD_LAYOUT}" != "integrated" || "${_VERL_HEAD}" != "${GKD_COMPAT_COMMIT
 fi
 echo "[OK] Integrated GKD/verl compatibility pin verified: ${_VERL_HEAD}"
 
-# Apply only the two compatibility edits required by the integrated GKD pin.
+# Apply runtime patches required by the integrated GKD pin.
 # Do not suppress patcher failures: an unknown source revision must fail before
 # any GPU process starts.
 _PATCH_DIR="${REPO_ROOT}/scripts/hpc"
+
+# B16: fix asyncio.get_running_loop in vllm_rollout __init__
 "${PYTHON}" "${_PATCH_DIR}/patch_gkd_b16_event_loop.py" \
     "${VERL_GKD_DIR}/verl/workers/rollout/vllm_rollout/vllm_rollout.py"
+
+# B10: safe router_replay access in base megatron_workers
 "${PYTHON}" "${_PATCH_DIR}/patch_gkd_b10_router_replay.py" \
     "${VERL_GKD_DIR}/verl/workers/megatron_workers.py"
+
+# B17: initialise vLLM engine in GKD rollout worker + fix model path
+#      (the GKD recipe expects an in-process engine, but vLLMAsyncRollout
+#       only initialises via ZMQ ExternalZeroMQDistributedExecutor).
+"${PYTHON}" "${_PATCH_DIR}/patch_gkd_b17_recipe_engine.py" \
+    "${GKD_RECIPE_DIR}/megatron_workers.py"
 
 echo ""
 
@@ -304,7 +314,7 @@ GKD_OVERRIDES=(
 )
 
 echo "=== Hydra/config preflight (no Ray, no GPU allocation) ==="
-PYTHONPATH="${VERL_GKD_DIR}:${PYTHONPATH:-}" "${PYTHON}" \
+PYTHONPATH="${_PATCH_DIR}:${VERL_GKD_DIR}:${PYTHONPATH:-}" "${PYTHON}" \
     "${REPO_ROOT}/scripts/hpc/validate_gkd_smoke_config.py" \
     --config-dir "${GKD_RECIPE_DIR}/config" \
     -- "${GKD_OVERRIDES[@]}"
@@ -403,7 +413,7 @@ echo ""
 
 # ── 2. Ray (isolated GPUs) ────────────────────────────────────────────────
 # Set PYTHONPATH before Ray starts so workers inherit it
-export PYTHONPATH="${VERL_GKD_DIR}:${PYTHONPATH:-}"
+export PYTHONPATH="${_PATCH_DIR}:${VERL_GKD_DIR}:${PYTHONPATH:-}"
 echo "=== Starting Ray (GPUs ${TRAIN_GPU_LIST}) ==="
 CUDA_VISIBLE_DEVICES="${TRAIN_GPU_LIST}" "${RAY}" start --head --num-gpus="$(echo "${TRAIN_GPU_LIST}" | tr ',' '\n' | wc -l)" --disable-usage-stats
 sleep 3

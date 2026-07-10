@@ -127,6 +127,38 @@ applies this patch because the underlying B14 bridge is structurally invalid.
 `patches/verl/recipe_gkd_bugfixes.patch` for diagnosis and comparison. They are
 not the recommended Gate 2 execution path after B16.
 
+### B17. `'NoneType' object has no attribute 'llm_engine'` — inference engine not initialised
+
+**Symptom**: `sync_rollout_weights()` fails on the GKD rollout worker:
+```
+self.rollout.inference_engine.llm_engine.model_executor.driver_worker.worker.model_runner.model
+AttributeError: 'NoneType' object has no attribute 'llm_engine'
+```
+
+**Root cause**: `vLLMAsyncRollout.__init__()` sets `self.inference_engine = None` and
+only initialises it via ZMQ messages sent by `ExternalZeroMQDistributedExecutor`.
+The GKD recipe owns the rollout worker directly — there is no external executor.
+Additionally, the model access path `llm_engine.model_executor.driver_worker...`
+is from an older vLLM version; the compatible checkout's `WorkerWrapperBase`
+exposes `.worker.model_runner.model` instead.
+
+**Fix**: Two-part runtime patch (`patch_gkd_b17_recipe_engine.py`):
+1. In `init_model` of the GKD rollout worker, call `init_engine_sync(self.rollout)`
+   after `_build_rollout()` — builds `VllmConfig` from the rollout config and sends
+   `init_worker` / `init_device` / `load_model` via ZMQ loopback.
+2. Fix the model path in `sync_rollout_weights` from
+   `inference_engine.llm_engine.model_executor.driver_worker.worker.model_runner.model`
+   to `inference_engine.worker.model_runner.model`.
+
+The engine init logic lives in `scripts/hpc/gkd_vllm_helpers.py` (importable by
+the recipe after `scripts/hpc/` is added to `PYTHONPATH`).
+
+**Note**: This fix only addresses `sync_rollout_weights`. The next call,
+`generate_sequences()`, still raises `NotImplementedError` in `vLLMAsyncRollout`
+and will require a separate fix (B18).
+
+**Commit**: pending
+
 ### B16. Missing `vllm_server_0_0` after B15
 
 **Symptom**: the scoped event loop reaches `ServerAdapter.update_weights()`,
