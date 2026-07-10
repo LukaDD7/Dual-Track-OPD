@@ -117,6 +117,17 @@ if [[ ! -d "${MODEL_PATH}" ]]; then
 fi
 
 echo "[OK] Environment checks passed"
+
+# Ensure recipe.gkd symlinks exist (files were refactored to megatron/ subdir
+# but imports still reference recipe.gkd.* — upstream bug at recipe commit ba24641)
+_RECIPE_GKD="${VERL_GKD_DIR}/recipe/gkd"
+for _link_target in ray_trainer.py teacher_utils.py teacher; do
+    _link_path="${_RECIPE_GKD}/${_link_target}"
+    if [[ ! -e "${_link_path}" ]]; then
+        ln -sf "megatron/${_link_target}" "${_link_path}"
+    fi
+done
+
 echo ""
 
 # ── quick version check ───────────────────────────────────────────────────
@@ -313,6 +324,7 @@ export CUDA_VISIBLE_DEVICES="${TRAIN_GPU_LIST}"
 
 TRAIN_LOG="${OUTPUT_DIR}/train.log"
 cd "${GKD_RECIPE_DIR}"
+export PYTHONPATH="${VERL_GKD_DIR}:${PYTHONPATH:-}"
 set +e
 "${PYTHON}" -m recipe.gkd.megatron.main_gkd \
     --config-path="${GKD_RECIPE_DIR}/config" \
