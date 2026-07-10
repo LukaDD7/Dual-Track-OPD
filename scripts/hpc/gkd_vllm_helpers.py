@@ -44,12 +44,18 @@ def _build_vllm_engine_args(
             max_new_tokens=int(getattr(cfg, "response_length", 512)),
         )
 
+    # max_model_len defaults to None on RolloutConfig, so `getattr`'s third
+    # argument never fires.  Compute a sensible value when it is unset.
+    _max_model_len = getattr(cfg, "max_model_len", None)
+    if _max_model_len is None:
+        _max_model_len = getattr(cfg, "prompt_length", 512) + getattr(cfg, "response_length", 512)
+
     args: dict[str, Any] = {
         "dtype": str(getattr(cfg, "dtype", "bfloat16")),
         "load_format": str(getattr(cfg, "load_format", "auto")),
         "skip_tokenizer_init": False,
         "trust_remote_code": bool(getattr(mc, "trust_remote_code", False)),
-        "max_model_len": int(getattr(cfg, "max_model_len", getattr(cfg, "prompt_length", 512) + getattr(cfg, "response_length", 512))),
+        "max_model_len": int(_max_model_len),
         "max_num_seqs": int(getattr(cfg, "max_num_seqs", 256)),
         "enable_chunked_prefill": bool(getattr(cfg, "enable_chunked_prefill", False)),
         "max_num_batched_tokens": int(getattr(cfg, "max_num_batched_tokens", 8192)),
