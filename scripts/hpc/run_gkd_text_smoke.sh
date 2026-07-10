@@ -288,6 +288,22 @@ echo "=== Starting Ray (GPUs ${TRAIN_GPU_LIST}) ==="
 CUDA_VISIBLE_DEVICES="${TRAIN_GPU_LIST}" "${RAY}" start --head --num-gpus="$(echo "${TRAIN_GPU_LIST}" | tr ',' '\n' | wc -l)" --disable-usage-stats
 sleep 3
 echo "[OK] Ray started"
+
+# Wait for Ray dashboard before submitting jobs
+echo -n "  Waiting for Ray dashboard..."
+for i in $(seq 1 30); do
+    if curl -s http://127.0.0.1:8265/api/version >/dev/null 2>&1; then
+        echo " OK"
+        break
+    fi
+    if [[ $i -eq 30 ]]; then
+        echo " TIMEOUT"
+        echo "FATAL: Ray dashboard not ready after 30s"
+        exit 1
+    fi
+    echo -n "."
+    sleep 1
+done
 echo ""
 
 # ── 3. Run GKD text smoke ─────────────────────────────────────────────────
@@ -390,7 +406,7 @@ else
 fi
 
 # Check for training steps in log
-_STEP_COUNT=$(grep -c 'global_step\|step.*/' "${TRAIN_LOG}" 2>/dev/null || echo 0)
+_STEP_COUNT=$(grep -c 'global_step\|step.*/' "${TRAIN_LOG}" 2>/dev/null) || _STEP_COUNT=0
 if [[ "${_STEP_COUNT}" -ge $(( NUM_STEPS / 2 )) ]]; then
     echo "  Steps found in log: ${_STEP_COUNT} (≥ ${NUM_STEPS}/2) ✓"
     STEPS_OK=true
