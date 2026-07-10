@@ -37,6 +37,14 @@ If a gate fails, stop and report — do NOT attempt to patch around it without e
 
 **Script**: `scripts/hpc/run_gkd_text_smoke.sh`
 
+**Backend pin**: verl `d8e97e1724e348658c670b9160f1393d4fb20678`,
+using its integrated `recipe/gkd`. Prepare it without touching the newer
+checkout:
+
+```bash
+bash scripts/setup/prepare_gkd_compatible_checkout.sh
+```
+
 **Pass criteria**:
 - Teacher server starts and responds to health check
 - Ray cluster initializes with correct GPU count

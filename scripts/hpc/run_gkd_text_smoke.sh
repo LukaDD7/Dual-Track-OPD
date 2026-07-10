@@ -25,8 +25,29 @@ MODEL_ROOT="${MODEL_ROOT:-/inspire/hdd/global_user/mengweicheng-240108120092/lzy
 GKD_ENV="${GKD_ENV:-/inspire/hdd/global_user/mengweicheng-240108120092/lzy/envs/vaopd-gkd-cu128}"
 PYTHON="${GKD_ENV}/bin/python"
 RAY="${GKD_ENV}/bin/ray"
-VERL_GKD_DIR="${REPO_ROOT}/external/verl_gkd/verl"
-GKD_RECIPE_DIR="${VERL_GKD_DIR}/recipe/gkd/megatron"
+GKD_COMPAT_COMMIT="d8e97e1724e348658c670b9160f1393d4fb20678"
+DEFAULT_COMPAT_VERL="${REPO_ROOT}/external/verl_gkd_compatible/verl"
+DEFAULT_PATCHED_VERL="${REPO_ROOT}/external/verl_gkd/verl"
+if [[ -z "${VERL_GKD_DIR:-}" ]]; then
+    if [[ -d "${DEFAULT_COMPAT_VERL}" ]]; then
+        VERL_GKD_DIR="${DEFAULT_COMPAT_VERL}"
+    else
+        VERL_GKD_DIR="${DEFAULT_PATCHED_VERL}"
+    fi
+fi
+
+# The known-compatible revision contains GKD inside the verl tree.  Newer verl
+# revisions use a split recipe repository and removed the synchronous/in-process
+# vLLM rollout that this GKD trainer calls.
+if [[ -f "${VERL_GKD_DIR}/recipe/gkd/main_gkd.py" ]]; then
+    GKD_RECIPE_DIR="${VERL_GKD_DIR}/recipe/gkd"
+    GKD_MAIN_MODULE="recipe.gkd.main_gkd"
+    GKD_LAYOUT="integrated"
+else
+    GKD_RECIPE_DIR="${VERL_GKD_DIR}/recipe/gkd/megatron"
+    GKD_MAIN_MODULE="recipe.gkd.megatron.main_gkd"
+    GKD_LAYOUT="split"
+fi
 
 # ── defaults ──────────────────────────────────────────────────────────────
 TEACHER_GPU=0
@@ -87,6 +108,7 @@ echo "  Teacher GPU:    ${TEACHER_GPU}"
 echo "  Train GPUs:     ${TRAIN_GPU_LIST}"
 echo "  Output dir:     ${OUTPUT_DIR}"
 echo "  GKD recipe:     ${GKD_RECIPE_DIR}"
+echo "  GKD layout:     ${GKD_LAYOUT}"
 echo "  Synthetic data: ${SYNTHETIC_DATA}"
 echo "══════════════════════════════════════════════════════════════"
 echo ""
@@ -118,22 +140,15 @@ fi
 
 echo "[OK] Environment checks passed"
 
-# B15 compatibility: the server-side B14 bridge calls async
-# ServerAdapter.update_weights() from a synchronous Ray worker.  Python 3.12
-# does not create an implicit event loop in that thread.  Apply the tracked,
-# strict, idempotent compatibility edit before launching expensive GPU work.
-"${PYTHON}" "${REPO_ROOT}/scripts/hpc/patch_gkd_b15_event_loop.py" \
-    "${GKD_RECIPE_DIR}/megatron_workers.py"
-
-# Ensure recipe.gkd symlinks exist (files were refactored to megatron/ subdir
-# but imports still reference recipe.gkd.* — upstream bug at recipe commit ba24641)
-_RECIPE_GKD="${VERL_GKD_DIR}/recipe/gkd"
-for _link_target in ray_trainer.py teacher_utils.py teacher; do
-    _link_path="${_RECIPE_GKD}/${_link_target}"
-    if [[ ! -e "${_link_path}" ]]; then
-        ln -sf "megatron/${_link_target}" "${_link_path}"
-    fi
-done
+_VERL_HEAD="$(git -C "${VERL_GKD_DIR}" rev-parse HEAD 2>/dev/null || true)"
+if [[ "${GKD_LAYOUT}" != "integrated" || "${_VERL_HEAD}" != "${GKD_COMPAT_COMMIT}" ]]; then
+    echo "FATAL: unsupported GKD/verl combination: layout=${GKD_LAYOUT} HEAD=${_VERL_HEAD:-unknown}" >&2
+    echo "The split recipe calls synchronous generation, but newer verl exposes only ServerAdapter." >&2
+    echo "Prepare the non-destructive compatible worktree first:" >&2
+    echo "  bash scripts/setup/prepare_gkd_compatible_checkout.sh" >&2
+    exit 1
+fi
+echo "[OK] Integrated GKD/verl compatibility pin verified: ${_VERL_HEAD}"
 
 echo ""
 
@@ -341,7 +356,7 @@ TRAIN_LOG="${OUTPUT_DIR}/train.log"
 cd "${GKD_RECIPE_DIR}"
 export PYTHONPATH="${VERL_GKD_DIR}:${PYTHONPATH:-}"
 set +e
-"${PYTHON}" -m recipe.gkd.megatron.main_gkd \
+"${PYTHON}" -m "${GKD_MAIN_MODULE}" \
     --config-path="${GKD_RECIPE_DIR}/config" \
     --config-name=on_policy_distill_trainer \
     "data.train_files=${TRAIN_PARQUET}" \

@@ -116,19 +116,36 @@ ServerAdapter's `update_weights()` is an async coroutine and needs an event loop
 3. Restructure the sync_rollout_weights to not call async ServerAdapter methods directly — perhaps the weight sync should happen via NCCL broadcast + IPC (as ServerAdapter expects) rather than calling update_weights from the rollout worker
 4. Check how the base verl code handles weight sync with ServerAdapter — there may be a different sync mechanism (`sync_rollout_weights` may not be needed with ServerAdapter at all)
 
-**Implemented compatibility fix**: `scripts/hpc/patch_gkd_b15_event_loop.py`
-strictly replaces the implicit-loop lookup with a scoped Python 3.12
-`asyncio.Runner`. The smoke launcher applies it idempotently before any GPU
-process starts and refuses to modify an unrecognized backend revision. This is
-the narrowest change consistent with the existing B14 bridge; the real GPU
-smoke must still verify Ray ObjectRef and ZMQ behavior under the scoped loop.
+**Superseded compatibility experiment**:
+`scripts/hpc/patch_gkd_b15_event_loop.py` replaced the implicit-loop lookup
+with a scoped Python 3.12 `asyncio.Runner`. It successfully exposed B16, proving
+that the event loop was only the first symptom. The Gate 2 launcher no longer
+applies this patch because the underlying B14 bridge is structurally invalid.
 
-**Reproducibility warning**: B6--B14 currently exist only as commits in the two
-server-side detached checkouts. Their commit objects/diffs are not present in
-this repository, so a fresh setup cannot reproduce the state required by this
-B15 patch. Export both backend commit series with `git format-patch` (or commit
-their combined diffs under `patches/verl/`) before treating Gate 2 as
-reproducible.
+**Archived patches**: the B6--B14 server-side commits are now preserved in
+`patches/verl/verl_gkd_bugfixes.patch` and
+`patches/verl/recipe_gkd_bugfixes.patch` for diagnosis and comparison. They are
+not the recommended Gate 2 execution path after B16.
+
+### B16. Missing `vllm_server_0_0` after B15
+
+**Symptom**: the scoped event loop reaches `ServerAdapter.update_weights()`,
+which then fails to find the named Ray actor `vllm_server_0_0`.
+
+**Root cause**: B14 was not a valid compatibility bridge. The split GKD trainer
+owns a rollout worker and calls both synchronous weight loading and synchronous
+`generate_sequences()`. At verl `bcb638`, vLLM SPMD/sync rollout has been
+removed; `ServerAdapter` is only a client for an independently launched async
+vLLM server. Starting the named actor alone would not fix the pipeline because
+the next GKD call reaches `ServerAdapter.generate_sequences()`, which
+unconditionally raises `NotImplementedError` for synchronous generation.
+
+**Resolution**: run the text smoke against verl `d8e97e17`, the upstream commit
+that integrated this GKD recipe together with its matching in-process vLLM
+rollout. `scripts/setup/prepare_gkd_compatible_checkout.sh` creates a detached
+worktree at that revision alongside the existing patched checkout. It does not
+delete or rewrite the latter. The smoke launcher now fails fast on the invalid
+split-recipe/new-ServerAdapter combination.
 
 **Key files involved**:
 - `external/verl_gkd/verl/recipe/gkd/megatron/megatron_workers.py` (lines ~782-850) — GKD rollout worker sync_rollout_weights
@@ -146,7 +163,8 @@ reproducible.
 
 ## Fresh Environment Setup
 
-All bug fixes are archived as format-patch files. After a fresh `git clone` + `git submodule update`:
+The abandoned split-recipe compatibility attempt is archived as format-patch
+files. To reconstruct it for diagnosis after a fresh clone:
 
 ```bash
 # Apply verl checkout patches (5 commits: B6, B8, B10, B11, B12)
@@ -156,7 +174,13 @@ git -C external/verl_gkd/verl am ../../../patches/verl/verl_gkd_bugfixes.patch
 git -C external/verl_gkd/verl/recipe am ../../../../../patches/verl/recipe_gkd_bugfixes.patch
 ```
 
-B15 (event loop) is applied at runtime by `scripts/hpc/patch_gkd_b15_event_loop.py`.
+B15 can be reproduced with `scripts/hpc/patch_gkd_b15_event_loop.py`, but this
+path still ends at B16 and must not be used for Gate 2. For Gate 2, prepare the
+integrated compatible checkout instead:
+
+```bash
+bash scripts/setup/prepare_gkd_compatible_checkout.sh
+```
 
 ## How to Reproduce
 
@@ -165,7 +189,8 @@ cd /inspire/hdd/global_user/mengweicheng-240108120092/lzy/projects/Dual-Track-OP
 bash scripts/hpc/run_gkd_text_smoke.sh --teacher-gpu 1 --train-gpus 2,3 --steps 10
 ```
 
-GPU node already has all fixes applied (NFS shared). No git pull needed.
+The smoke automatically selects `external/verl_gkd_compatible/verl` and rejects
+the incompatible split-recipe checkout before allocating GPUs.
 
 ---
 
