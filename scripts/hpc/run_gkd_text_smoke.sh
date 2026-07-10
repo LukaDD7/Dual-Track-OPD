@@ -288,42 +288,33 @@ echo "=== Starting Ray (GPUs ${TRAIN_GPU_LIST}) ==="
 CUDA_VISIBLE_DEVICES="${TRAIN_GPU_LIST}" "${RAY}" start --head --num-gpus="$(echo "${TRAIN_GPU_LIST}" | tr ',' '\n' | wc -l)" --disable-usage-stats
 sleep 3
 echo "[OK] Ray started"
-
-# Wait for Ray dashboard before submitting jobs
-echo -n "  Waiting for Ray dashboard..."
-for i in $(seq 1 30); do
-    if curl -s http://127.0.0.1:8265/api/version >/dev/null 2>&1; then
-        echo " OK"
-        break
-    fi
-    if [[ $i -eq 30 ]]; then
-        echo " TIMEOUT"
-        echo "FATAL: Ray dashboard not ready after 30s"
-        exit 1
-    fi
-    echo -n "."
-    sleep 1
-done
 echo ""
 
-# ── 3. Run GKD text smoke ─────────────────────────────────────────────────
+# ── 3. Run GKD text smoke (direct, no ray job submit) ────────────────────
 echo "=== Running GKD text smoke (${NUM_STEPS} steps) ==="
 echo "    Train data: ${TRAIN_PARQUET}"
 echo "    Val data:   ${VAL_PARQUET}"
 echo ""
 
-RUNTIME_ENV="${GKD_RECIPE_DIR}/config/runtime_env.yaml"
-export NCCL_DEBUG_FILE="${OUTPUT_DIR}/nccl_debug.log"
+# Export env vars from runtime_env.yaml (replicated to avoid ray dashboard dependency)
+export TORCH_NCCL_AVOID_RECORD_STREAMS="1"
+export CUDA_LAUNCH_BLOCKING="0"
+export NVTE_DEBUG="1"
+export NVTE_DEBUG_LEVEL="2"
+export NVTE_FLASH_ATTN="1"
+export NVTE_FUSED_ATTN="0"
+export NVTE_UNFUSED_ATTN="0"
+export RAY_DEBUG="legacy"
 export NCCL_DEBUG="WARN"
+export NCCL_DEBUG_FILE="${OUTPUT_DIR}/nccl_debug.log"
+export VLLM_USE_V1="1"
+export VERL_VLLM_DISTRIBUTED_BACKEND="ray"
 export CUDA_VISIBLE_DEVICES="${TRAIN_GPU_LIST}"
 
-# Submit ray job WITHOUT --no-wait so we block until completion
 TRAIN_LOG="${OUTPUT_DIR}/train.log"
+cd "${GKD_RECIPE_DIR}"
 set +e
-"${RAY}" job submit \
-    --runtime-env="${RUNTIME_ENV}" \
-    --working-dir "${GKD_RECIPE_DIR}" \
-    -- "${PYTHON}" -m recipe.gkd.megatron.main_gkd \
+"${PYTHON}" -m recipe.gkd.megatron.main_gkd \
     --config-path="${GKD_RECIPE_DIR}/config" \
     --config-name=on_policy_distill_trainer \
     "data.train_files=${TRAIN_PARQUET}" \
@@ -372,16 +363,8 @@ set +e
     > "${TRAIN_LOG}" 2>&1
 VERL_EXIT=$?
 set -e
+cd "${REPO_ROOT}"
 
-# ── capture ray job logs ─────────────────────────────────────────────────
-echo ""
-echo "=== Ray job logs ==="
-# Try to get the last job ID and fetch its logs
-JOB_ID=$("${RAY}" job list 2>/dev/null | grep -oP 'raysubmit_[^\s]+' | head -1 || true)
-if [[ -n "${JOB_ID}" ]]; then
-    "${RAY}" job logs "${JOB_ID}" > "${OUTPUT_DIR}/ray_job_logs.txt" 2>/dev/null || true
-    echo "Ray job logs saved to ${OUTPUT_DIR}/ray_job_logs.txt"
-fi
 
 # ── cleanup ───────────────────────────────────────────────────────────────
 echo ""
