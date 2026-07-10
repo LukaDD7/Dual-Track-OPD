@@ -118,6 +118,13 @@ fi
 
 echo "[OK] Environment checks passed"
 
+# B15 compatibility: the server-side B14 bridge calls async
+# ServerAdapter.update_weights() from a synchronous Ray worker.  Python 3.12
+# does not create an implicit event loop in that thread.  Apply the tracked,
+# strict, idempotent compatibility edit before launching expensive GPU work.
+"${PYTHON}" "${REPO_ROOT}/scripts/hpc/patch_gkd_b15_event_loop.py" \
+    "${GKD_RECIPE_DIR}/megatron_workers.py"
+
 # Ensure recipe.gkd symlinks exist (files were refactored to megatron/ subdir
 # but imports still reference recipe.gkd.* — upstream bug at recipe commit ba24641)
 _RECIPE_GKD="${VERL_GKD_DIR}/recipe/gkd"

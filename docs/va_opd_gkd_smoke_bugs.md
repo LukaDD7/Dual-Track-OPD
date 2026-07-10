@@ -93,7 +93,7 @@ The GKD recipe was designed for an older verl version; our verl checkout is newe
 
 ---
 
-## Current Bug (UNFIXED)
+## Current Bug (FIX PREPARED; GPU VALIDATION PENDING)
 
 ### B15. `RuntimeError: There is no current event loop in thread 'MainThread'`
 
@@ -115,6 +115,20 @@ ServerAdapter's `update_weights()` is an async coroutine and needs an event loop
 2. Run the weight update in a separate thread with its own event loop
 3. Restructure the sync_rollout_weights to not call async ServerAdapter methods directly — perhaps the weight sync should happen via NCCL broadcast + IPC (as ServerAdapter expects) rather than calling update_weights from the rollout worker
 4. Check how the base verl code handles weight sync with ServerAdapter — there may be a different sync mechanism (`sync_rollout_weights` may not be needed with ServerAdapter at all)
+
+**Implemented compatibility fix**: `scripts/hpc/patch_gkd_b15_event_loop.py`
+strictly replaces the implicit-loop lookup with a scoped Python 3.12
+`asyncio.Runner`. The smoke launcher applies it idempotently before any GPU
+process starts and refuses to modify an unrecognized backend revision. This is
+the narrowest change consistent with the existing B14 bridge; the real GPU
+smoke must still verify Ray ObjectRef and ZMQ behavior under the scoped loop.
+
+**Reproducibility warning**: B6--B14 currently exist only as commits in the two
+server-side detached checkouts. Their commit objects/diffs are not present in
+this repository, so a fresh setup cannot reproduce the state required by this
+B15 patch. Export both backend commit series with `git format-patch` (or commit
+their combined diffs under `patches/verl/`) before treating Gate 2 as
+reproducible.
 
 **Key files involved**:
 - `external/verl_gkd/verl/recipe/gkd/megatron/megatron_workers.py` (lines ~782-850) — GKD rollout worker sync_rollout_weights
