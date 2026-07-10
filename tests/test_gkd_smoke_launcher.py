@@ -173,3 +173,14 @@ def test_smoke_applies_locked_tensordict_patch_before_ray():
 
     assert "patch_gkd_b23_locked_tensordict.py" in source
     assert source.index("patch_gkd_b23_locked_tensordict.py") < source.index("=== Starting Ray")
+
+
+def test_training_epochs_cover_requested_steps_instead_of_stopping_at_32():
+    source = SMOKE.read_text(encoding="utf-8")
+
+    assert "TRAIN_BATCH_SIZE=4" in source
+    assert "pyarrow.parquet" in source
+    assert "_STEPS_PER_EPOCH=$(( _TRAIN_ROW_COUNT / TRAIN_BATCH_SIZE ))" in source
+    assert "_TOTAL_EPOCHS=$(( (NUM_STEPS + _STEPS_PER_EPOCH - 1) / _STEPS_PER_EPOCH ))" in source
+    assert '"trainer.total_epochs=${_TOTAL_EPOCHS}"' in source
+    assert '"trainer.total_epochs=1"' not in source

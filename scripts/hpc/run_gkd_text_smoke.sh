@@ -54,6 +54,7 @@ fi
 TEACHER_GPU=0
 TRAIN_GPU_LIST="1,2,3,4"
 NUM_STEPS=10
+TRAIN_BATCH_SIZE=4
 MODEL_PATH="${MODEL_ROOT}/Qwen3-0.6B"
 SYNTHETIC_DATA=true
 RUN_BACKGROUND=false
@@ -304,6 +305,29 @@ else
 fi
 echo ""
 
+# Derive enough epochs to supply the requested optimizer steps.  The synthetic
+# dataset has 128 rows and batch size 4 (32 steps/epoch), so a hard-coded single
+# epoch silently truncates a 200-step Gate 3 run at step 32.
+_TRAIN_ROW_COUNT=$("${PYTHON}" - "${TRAIN_PARQUET}" <<'PY'
+import sys
+import pyarrow.parquet as pq
+
+print(pq.ParquetFile(sys.argv[1]).metadata.num_rows)
+PY
+)
+if [[ ! "${_TRAIN_ROW_COUNT}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "FATAL: could not determine positive train row count: ${_TRAIN_ROW_COUNT}" >&2
+    exit 1
+fi
+_STEPS_PER_EPOCH=$(( _TRAIN_ROW_COUNT / TRAIN_BATCH_SIZE ))
+if [[ ${_STEPS_PER_EPOCH} -lt 1 ]]; then
+    echo "FATAL: train dataset (${_TRAIN_ROW_COUNT}) is smaller than batch size (${TRAIN_BATCH_SIZE})" >&2
+    exit 1
+fi
+_TOTAL_EPOCHS=$(( (NUM_STEPS + _STEPS_PER_EPOCH - 1) / _STEPS_PER_EPOCH ))
+echo "[OK] Training horizon: rows=${_TRAIN_ROW_COUNT}, batch=${TRAIN_BATCH_SIZE}, steps/epoch=${_STEPS_PER_EPOCH}, epochs=${_TOTAL_EPOCHS}"
+echo ""
+
 # Resource pools are disjoint in the official GKD recipe.
 _TRAIN_GPU_COUNT=$(echo "${TRAIN_GPU_LIST}" | tr ',' '\n' | wc -l)
 _POOL_GPUS=$(( _TRAIN_GPU_COUNT / 2 ))
@@ -319,7 +343,7 @@ GKD_OVERRIDES=(
     "data.train_files=${TRAIN_PARQUET}"
     "data.val_files=${VAL_PARQUET}"
     "data.prompt_key=prompt"
-    "data.train_batch_size=4"
+    "data.train_batch_size=${TRAIN_BATCH_SIZE}"
     "data.max_prompt_length=512"
     "data.max_response_length=512"
     "data.filter_overlong_prompts=True"
@@ -370,7 +394,7 @@ GKD_OVERRIDES=(
     "trainer.test_freq=-1"
     "trainer.val_before_train=False"
     "trainer.total_training_steps=${NUM_STEPS}"
-    "trainer.total_epochs=1"
+    "trainer.total_epochs=${_TOTAL_EPOCHS}"
 )
 
 echo "=== Hydra/config preflight (no Ray, no GPU allocation) ==="

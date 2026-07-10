@@ -302,6 +302,21 @@ split microbatches remain writable while the recipe adds KL masks, loss buffers,
 and teacher tensors. The runtime patch upgrades both pristine source and the
 earlier scoped B23 form.
 
+### B24. A 200-step Gate 3 run exits cleanly at step 32
+
+**Symptom**: training metrics are healthy through step 32, then the process
+ends without a traceback and the teacher GPU is cleaned up.
+
+**Root cause**: the synthetic dataset contains 128 rows and uses train batch
+size 4, giving exactly 32 batches per epoch. The launcher requested
+`total_training_steps=200` but also hard-coded `total_epochs=1`, so the data
+iterator exhausted first.
+
+**Resolution**: read the parquet row count, compute steps per epoch and set
+`total_epochs=ceil(requested_steps / steps_per_epoch)`. The explicit
+`total_training_steps` remains the exact stopping condition; a 200-step run now
+uses seven available epochs instead of ending after one.
+
 **Key files involved**:
 - `external/verl_gkd/verl/recipe/gkd/megatron/megatron_workers.py` (lines ~782-850) — GKD rollout worker sync_rollout_weights
 - `external/verl_gkd/verl/verl/workers/rollout/vllm_rollout/vllm_rollout.py` (line 155) — ServerAdapter.update_weights
