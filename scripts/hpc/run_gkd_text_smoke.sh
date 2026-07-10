@@ -302,6 +302,14 @@ echo "[OK] Ray started"
 echo ""
 
 # ── 3. Run GKD text smoke (direct, no ray job submit) ────────────────────
+# GKD splits GPUs: actor_pool + rollout_pool = separate Ray resource pools.
+# Each pool gets floor(n_gpus / 2), minimum 1.  With 2 train GPUs: 1+1=2 total.
+_TRAIN_GPU_COUNT=$(echo "${TRAIN_GPU_LIST}" | tr ',' '\n' | wc -l)
+_POOL_GPUS=$(( _TRAIN_GPU_COUNT / 2 ))
+if [[ ${_POOL_GPUS} -lt 1 ]]; then
+    _POOL_GPUS=1
+fi
+
 echo "=== Running GKD text smoke (${NUM_STEPS} steps) ==="
 echo "    Train data: ${TRAIN_PARQUET}"
 echo "    Val data:   ${VAL_PARQUET}"
@@ -359,9 +367,9 @@ set +e
     "trainer.logger=['console']" \
     "trainer.project_name=gkd_smoke" \
     "trainer.experiment_name=${RUN_ID}" \
-    "trainer.n_gpus_per_node=$(echo "${TRAIN_GPU_LIST}" | tr ',' '\n' | wc -l)" \
+    "trainer.n_gpus_per_node=${_POOL_GPUS}" \
     "trainer.nnodes=1" \
-    "rollout.n_gpus_per_node=$(echo "${TRAIN_GPU_LIST}" | tr ',' '\n' | wc -l)" \
+    "rollout.n_gpus_per_node=${_POOL_GPUS}" \
     "rollout.nnodes=1" \
     "trainer.save_freq=-1" \
     "trainer.test_freq=5" \
