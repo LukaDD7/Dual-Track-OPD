@@ -57,6 +57,8 @@ NUM_STEPS=10
 MODEL_PATH="${MODEL_ROOT}/Qwen3-0.6B"
 SYNTHETIC_DATA=true
 RUN_BACKGROUND=false
+GKD_TEACHER_GPU_MEMORY_UTILIZATION="${GKD_TEACHER_GPU_MEMORY_UTILIZATION:-0.35}"
+TEACHER_WARMUP_TIMEOUT_SECONDS="${TEACHER_WARMUP_TIMEOUT_SECONDS:-1200}"
 
 # ── fixed paths ───────────────────────────────────────────────────────────
 OUTPUT_DIR="${REPO_ROOT}/runs/gkd_smoke/${RUN_ID}"
@@ -194,6 +196,11 @@ _PATCH_DIR="${REPO_ROOT}/scripts/hpc"
 # B10: safe router_replay access in base megatron_workers
 "${PYTHON}" "${_PATCH_DIR}/patch_gkd_b10_router_replay.py" \
     "${VERL_GKD_DIR}/verl/workers/megatron_workers.py"
+
+# B20: the upstream teacher hard-codes 0.7, which reserves ~98 GiB on H200
+# even for this 0.6B smoke model.  Make the fraction configurable.
+"${PYTHON}" "${_PATCH_DIR}/patch_gkd_teacher_memory.py" \
+    "${GKD_RECIPE_DIR}/teacher/vllm_engine.py"
 
 echo ""
 
@@ -361,6 +368,7 @@ echo "=== Starting GKD teacher server (GPU ${TEACHER_GPU}) ==="
 
 export PROXY_FRONTEND_PORT=${TEACHER_PORT}
 export PROXY_BACKEND_PORT=${TEACHER_PROXY_PORT}
+export GKD_TEACHER_GPU_MEMORY_UTILIZATION
 
 cd "${GKD_RECIPE_DIR}/teacher"
 
@@ -406,11 +414,12 @@ CUDA_VISIBLE_DEVICES="${TEACHER_GPU}" nohup "${PYTHON}" -u worker.py \
     > "${OUTPUT_DIR}/worker.log" 2>&1 &
 WORKER_PID=$!
 
-# Wait for frontend — fatal on timeout
+# Wait for the worker's post-engine-init marker.  The proxy owns the frontend
+# port, so checking that port alone produces a false positive when vLLM dies.
 WORKER_READY=false
-echo -n "  Waiting for teacher frontend..."
+echo -n "  Waiting for teacher engine..."
 for i in $(seq 1 180); do
-    if ss -Hltn "sport = :${TEACHER_PORT}" 2>/dev/null | grep -q .; then
+    if grep -q '^worker started\.\.\.' "${OUTPUT_DIR}/worker.log" 2>/dev/null; then
         echo " OK"
         WORKER_READY=true
         break
@@ -429,7 +438,59 @@ if ! ${WORKER_READY}; then
     echo " TIMEOUT"
     echo "=== worker.log (last 30 lines) ==="
     tail -30 "${OUTPUT_DIR}/worker.log" 2>/dev/null || true
-    echo "FATAL: Teacher worker not ready after 180s"
+    echo "FATAL: Teacher engine not ready after 180s"
+    exit 1
+fi
+
+# Exercise the full REQ -> proxy -> teacher -> REP path before Ray starts.
+# This also completes any first-use vLLM/FlashInfer JIT under an explicit,
+# observable timeout instead of poisoning the training client's REQ socket.
+echo "  Warming up teacher inference (timeout ${TEACHER_WARMUP_TIMEOUT_SECONDS}s)..."
+if ! TEACHER_WARMUP_TIMEOUT_SECONDS="${TEACHER_WARMUP_TIMEOUT_SECONDS}" \
+    "${PYTHON}" - "${TEACHER_PORT}" <<'PY'
+import os
+import sys
+
+import zmq
+from utils import deserialize, serialize
+
+port = int(sys.argv[1])
+timeout_ms = int(os.environ["TEACHER_WARMUP_TIMEOUT_SECONDS"]) * 1000
+context = zmq.Context()
+socket = context.socket(zmq.REQ)
+socket.setsockopt(zmq.LINGER, 0)
+socket.setsockopt(zmq.RCVTIMEO, timeout_ms)
+socket.setsockopt(zmq.SNDTIMEO, 10_000)
+socket.connect(f"tcp://127.0.0.1:{port}")
+try:
+    socket.send(
+        serialize(
+            {
+                "prompt_token_ids": [[1, 2, 3, 4]],
+                "max_tokens": 1,
+                "temperature": 1.0,
+                "only_response": True,
+            }
+        )
+    )
+    response = deserialize(socket.recv())
+    if not isinstance(response, dict) or response.get("status") != "ok":
+        raise RuntimeError(f"teacher warmup returned {response!r}")
+    for key in ("responses", "teacher_topk_logprobs", "teacher_topk_indices"):
+        if key not in response or len(response[key]) != 1:
+            raise RuntimeError(f"teacher warmup invalid {key}: {response!r}")
+    print("[OK] Teacher end-to-end inference warmup passed")
+finally:
+    socket.close()
+    context.term()
+PY
+then
+    echo "=== worker.log (last 100 lines) ==="
+    tail -100 "${OUTPUT_DIR}/worker.log" 2>/dev/null || true
+    echo "=== proxy.log (last 30 lines) ==="
+    tail -30 "${OUTPUT_DIR}/proxy.log" 2>/dev/null || true
+    kill ${WORKER_PID} ${PROXY_PID} 2>/dev/null || true
+    echo "FATAL: Teacher end-to-end warmup failed"
     exit 1
 fi
 
@@ -494,6 +555,8 @@ echo "=== Smoke Validation ==="
 
 EXIT_OK=false
 STEPS_OK=false
+TEACHER_OK=false
+LOSS_OK=false
 
 if [[ ${VERL_EXIT} -eq 0 ]]; then
     echo "  Exit code: 0 ✓"
@@ -502,20 +565,31 @@ else
     echo "  Exit code: ${VERL_EXIT} ✗"
 fi
 
-# Check for training steps in log
-_STEP_COUNT=$(grep -c 'global_step\|step.*/' "${TRAIN_LOG}" 2>/dev/null) || _STEP_COUNT=0
-if [[ "${_STEP_COUNT}" -ge $(( NUM_STEPS / 2 )) ]]; then
-    echo "  Steps found in log: ${_STEP_COUNT} (≥ ${NUM_STEPS}/2) ✓"
+# Count completed optimizer updates, not tqdm progress: skipped teacher batches
+# increment global_steps and the progress bar without training the actor.
+_STEP_COUNT=$(grep -c 'INFO: update actor done\.' "${TRAIN_LOG}" 2>/dev/null) || _STEP_COUNT=0
+if [[ "${_STEP_COUNT}" -ge "${NUM_STEPS}" ]]; then
+    echo "  Actor updates in log: ${_STEP_COUNT} (≥ ${NUM_STEPS}) ✓"
     STEPS_OK=true
 else
-    echo "  Steps found in log: ${_STEP_COUNT} (need ≥ $(( NUM_STEPS / 2 ))) ✗"
+    echo "  Actor updates in log: ${_STEP_COUNT} (need ≥ ${NUM_STEPS}) ✗"
 fi
 
-# Check for loss
-if grep -q 'loss\|kl_loss\|distill_loss' "${TRAIN_LOG}" 2>/dev/null; then
-    echo "  Loss/kl_loss found in log ✓"
+# Any teacher failure invalidates on-policy distillation, even if the recipe
+# exits zero after incrementing its progress counter for skipped batches.
+_TEACHER_SKIP_COUNT=$(grep -c 'Error in getting teacher knowledge\. Skip this batch\.' "${TRAIN_LOG}" 2>/dev/null) || _TEACHER_SKIP_COUNT=0
+if [[ "${_TEACHER_SKIP_COUNT}" -eq 0 ]]; then
+    echo "  Teacher batch skips: 0 ✓"
+    TEACHER_OK=true
 else
-    echo "  WARNING: No loss/kl_loss found in log"
+    echo "  Teacher batch skips: ${_TEACHER_SKIP_COUNT} ✗"
+fi
+
+if grep -q 'actor/kl_loss' "${TRAIN_LOG}" 2>/dev/null; then
+    echo "  actor/kl_loss found in log ✓"
+    LOSS_OK=true
+else
+    echo "  actor/kl_loss not found in log ✗"
 fi
 
 echo ""
@@ -527,7 +601,7 @@ echo "  Log dir:    ${OUTPUT_DIR}"
 echo "  Train log:  ${TRAIN_LOG}"
 echo "══════════════════════════════════════════════════════════════"
 
-if ${EXIT_OK} && ${STEPS_OK}; then
+if ${EXIT_OK} && ${STEPS_OK} && ${TEACHER_OK} && ${LOSS_OK}; then
     echo "SMOKE PASSED ✓"
     exit 0
 else

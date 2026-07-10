@@ -4,6 +4,7 @@ from pathlib import Path
 SMOKE = Path("scripts/hpc/run_gkd_text_smoke.sh")
 VALIDATOR = Path("scripts/hpc/validate_gkd_smoke_config.py")
 PREPARE = Path("scripts/setup/prepare_gkd_compatible_checkout.sh")
+TEACHER_PATCH = Path("scripts/hpc/patch_gkd_teacher_memory.py")
 
 
 def test_smoke_uses_official_gkd_namespaces_and_explicit_upstream_defaults():
@@ -52,3 +53,38 @@ def test_smoke_exports_complete_cuda_jit_environment_before_ray():
     assert 'export LIBRARY_PATH="${CUDA_RUNTIME_LIB}' in source
     assert 'export LD_LIBRARY_PATH="${CUDA_RUNTIME_LIB}' in source
     assert source.index('export CUDA_HOME="${CUDA_TOOLCHAIN}"') < source.index("=== Starting Ray")
+
+
+def test_teacher_readiness_requires_engine_and_end_to_end_inference():
+    source = SMOKE.read_text(encoding="utf-8")
+
+    assert "patch_gkd_teacher_memory.py" in source
+    assert "GKD_TEACHER_GPU_MEMORY_UTILIZATION" in source
+    assert "grep -q '^worker started\\.\\.\\.'" in source
+    assert "Teacher end-to-end inference warmup passed" in source
+    assert source.index("Teacher end-to-end inference warmup passed") < source.index("=== Starting Ray")
+
+
+def test_smoke_rejects_skipped_teacher_batches_as_fake_progress():
+    source = SMOKE.read_text(encoding="utf-8")
+
+    assert "INFO: update actor done\\." in source
+    assert "Teacher batch skips" in source
+    assert "actor/kl_loss" in source
+    assert "${EXIT_OK} && ${STEPS_OK} && ${TEACHER_OK} && ${LOSS_OK}" in source
+
+
+def test_teacher_memory_patch_is_idempotent():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("patch_gkd_teacher_memory", TEACHER_PATCH)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+
+    original = "import argparse\n\nvalue = gpu_memory_utilization=0.7,\n"
+    patched, status = module.patch_source(original)
+    assert status == "ok"
+    assert "import os" in patched
+    assert "GKD_TEACHER_GPU_MEMORY_UTILIZATION" in patched
+    assert module.patch_source(patched) == (patched, "skip")

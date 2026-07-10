@@ -235,6 +235,24 @@ runtime-library directory, and adds it to both `LIBRARY_PATH` (build-time link)
 and `LD_LIBRARY_PATH` (runtime load). H200 JIT compilation is constrained with
 `TORCH_CUDA_ARCH_LIST=9.0`.
 
+### B20. Dead teacher is reported ready; all ten batches are skipped
+
+**Symptom**: tqdm reaches `10/10` in roughly the 600-second teacher timeout,
+but every batch says `Teacher request failed` and `Skip this batch`; there are
+no actor updates, KL loss, or gradient norms.
+
+**Root cause**: the teacher hard-coded `gpu_memory_utilization=0.7` (~98 GiB on
+H200) and failed when only 76.53 GiB was free. The proxy continued owning the
+frontend port, so the launcher's port-only readiness check accepted a dead
+worker. The recipe then increments `global_steps` for every skipped batch,
+creating fake `10/10` progress. After the first REQ timeout, reuse of the same
+ZMQ socket also produced `Operation cannot be accomplished in current state`.
+
+**Resolution**: make teacher memory utilization configurable (0.35 for the
+0.6B smoke), require the worker's post-engine-init marker, and perform a real
+end-to-end teacher inference before Ray starts. Smoke validation now counts
+`update actor done` events and fails on any teacher skip or missing loss.
+
 **Key files involved**:
 - `external/verl_gkd/verl/recipe/gkd/megatron/megatron_workers.py` (lines ~782-850) — GKD rollout worker sync_rollout_weights
 - `external/verl_gkd/verl/verl/workers/rollout/vllm_rollout/vllm_rollout.py` (line 155) — ServerAdapter.update_weights
