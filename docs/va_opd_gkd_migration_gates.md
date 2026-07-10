@@ -38,8 +38,10 @@ If a gate fails, stop and report — do NOT attempt to patch around it without e
 **Script**: `scripts/hpc/run_gkd_text_smoke.sh`
 
 **Backend pin**: verl `d8e97e1724e348658c670b9160f1393d4fb20678`,
-using its integrated `recipe/gkd`. Prepare it without touching the newer
-checkout:
+using its integrated `recipe/gkd`, plus the synchronous vLLM rollout restored
+from `ab0705220a95952219111409d8f971872002c193`. The GKD merge retained a
+sync-generation call even though the rollout had been removed two days earlier.
+Prepare the managed compatibility worktree without touching the newer checkout:
 
 ```bash
 bash scripts/setup/prepare_gkd_compatible_checkout.sh

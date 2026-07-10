@@ -3,6 +3,7 @@ from pathlib import Path
 
 SMOKE = Path("scripts/hpc/run_gkd_text_smoke.sh")
 VALIDATOR = Path("scripts/hpc/validate_gkd_smoke_config.py")
+PREPARE = Path("scripts/setup/prepare_gkd_compatible_checkout.sh")
 
 
 def test_smoke_uses_official_gkd_namespaces_and_explicit_upstream_defaults():
@@ -28,4 +29,14 @@ def test_same_override_array_drives_preflight_and_training():
     validator = VALIDATOR.read_text(encoding="utf-8")
     assert '"actor_rollout_ref.rollout.n"' in validator
     assert '"actor_rollout_ref.actor.ppo_mini_batch_size"' in validator
-    assert 'rollout_cls.__name__ != "vLLMAsyncRollout"' in validator
+    assert 'rollout_cls.__name__ != "vLLMRollout"' in validator
+    assert '"raise NotImplementedError" in generate_source' in validator
+
+
+def test_compatible_checkout_restores_sync_rollout_from_pre_retirement_commit():
+    source = PREPARE.read_text(encoding="utf-8")
+
+    assert 'GKD_SYNC_ROLLOUT_COMMIT="ab0705220a95952219111409d8f971872002c193"' in source
+    assert "vllm_rollout/vllm_rollout_spmd.py" in source
+    assert "verl/workers/rollout/base.py" in source
+    assert "recipe/gkd/megatron_workers.py" in source

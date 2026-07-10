@@ -155,19 +155,9 @@ echo "[OK] Integrated GKD/verl compatibility pin verified: ${_VERL_HEAD}"
 # any GPU process starts.
 _PATCH_DIR="${REPO_ROOT}/scripts/hpc"
 
-# B16: fix asyncio.get_running_loop in vllm_rollout __init__
-"${PYTHON}" "${_PATCH_DIR}/patch_gkd_b16_event_loop.py" \
-    "${VERL_GKD_DIR}/verl/workers/rollout/vllm_rollout/vllm_rollout.py"
-
 # B10: safe router_replay access in base megatron_workers
 "${PYTHON}" "${_PATCH_DIR}/patch_gkd_b10_router_replay.py" \
     "${VERL_GKD_DIR}/verl/workers/megatron_workers.py"
-
-# B17: initialise vLLM engine in GKD rollout worker + fix model path
-#      (the GKD recipe expects an in-process engine, but vLLMAsyncRollout
-#       only initialises via ZMQ ExternalZeroMQDistributedExecutor).
-"${PYTHON}" "${_PATCH_DIR}/patch_gkd_b17_recipe_engine.py" \
-    "${GKD_RECIPE_DIR}/megatron_workers.py"
 
 echo ""
 
@@ -279,9 +269,9 @@ GKD_OVERRIDES=(
     "actor_rollout_ref.actor.megatron.expert_model_parallel_size=1"
     "actor_rollout_ref.actor.megatron.expert_tensor_parallel_size=1"
     "actor_rollout_ref.rollout.name=vllm"
-    # The integrated commit registers its in-process vLLM class as "async"
-    # even though GKD calls generate_sequences synchronously.
-    "actor_rollout_ref.rollout.mode=async"
+    # GKD calls generate_sequences synchronously and requires the restored
+    # SPMD rollout from the pre-retirement verl revision.
+    "actor_rollout_ref.rollout.mode=sync"
     "actor_rollout_ref.rollout.gpu_memory_utilization=0.45"
     "actor_rollout_ref.rollout.temperature=1.0"
     "actor_rollout_ref.rollout.top_p=0.99"

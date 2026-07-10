@@ -44,8 +44,8 @@ def main() -> int:
 
     rollout = cfg.actor_rollout_ref.rollout
     actor = cfg.actor_rollout_ref.actor
-    if rollout.name != "vllm" or rollout.mode != "async":
-        raise SystemExit("compatible integrated GKD requires rollout name=vllm, mode=async")
+    if rollout.name != "vllm" or rollout.mode != "sync":
+        raise SystemExit("compatible integrated GKD requires rollout name=vllm, mode=sync")
     if int(rollout.n) != 1:
         raise SystemExit("text smoke requires exactly one rollout per prompt")
     if int(actor.micro_batch_size) <= 0 or int(actor.ppo_mini_batch_size) <= 0:
@@ -57,8 +57,16 @@ def main() -> int:
     from verl.workers.rollout import get_rollout_class
 
     rollout_cls = get_rollout_class(str(rollout.name), str(rollout.mode))
-    if rollout_cls.__name__ != "vLLMAsyncRollout" or not hasattr(rollout_cls, "generate_sequences"):
-        raise SystemExit(f"expected integrated in-process vLLMAsyncRollout, got {rollout_cls}")
+    if rollout_cls.__name__ != "vLLMRollout":
+        raise SystemExit(f"expected restored synchronous vLLMRollout, got {rollout_cls}")
+
+    # Avoid another false-positive preflight: BaseRollout and the retired async
+    # wrapper both expose generate_sequences but only raise NotImplementedError.
+    import inspect
+
+    generate_source = inspect.getsource(rollout_cls.generate_sequences)
+    if "raise NotImplementedError" in generate_source:
+        raise SystemExit("selected vLLM rollout does not implement synchronous generation")
 
     summary = {
         "rollout_class": f"{rollout_cls.__module__}.{rollout_cls.__name__}",

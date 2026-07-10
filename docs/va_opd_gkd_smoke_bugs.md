@@ -173,11 +173,29 @@ the next GKD call reaches `ServerAdapter.generate_sequences()`, which
 unconditionally raises `NotImplementedError` for synchronous generation.
 
 **Resolution**: run the text smoke against verl `d8e97e17`, the upstream commit
-that integrated this GKD recipe together with its matching in-process vLLM
-rollout. `scripts/setup/prepare_gkd_compatible_checkout.sh` creates a detached
-worktree at that revision alongside the existing patched checkout. It does not
-delete or rewrite the latter. The smoke launcher now fails fast on the invalid
-split-recipe/new-ServerAdapter combination.
+that integrated this GKD recipe, and restore the synchronous vLLM rollout from
+`ab070522` (the parent of the commit that retired SPMD rollout).
+`scripts/setup/prepare_gkd_compatible_checkout.sh` creates a detached managed
+worktree at the GKD revision and restores only the three rollout files. It does
+not delete or rewrite the newer checkout.
+
+### B18. `vLLMAsyncRollout.generate_sequences()` raises `NotImplementedError`
+
+**Symptom**: weight sync succeeds, then the first rollout fails at
+`vllm_rollout.py:271` because the async server wrapper intentionally does not
+implement batch synchronous generation.
+
+**Root cause**: `d8e97e17` merged GKD after `fd893c78` retired sync/SPMD vLLM,
+but the GKD YAML and trainer still use `rollout.mode=sync` and call
+`generate_sequences()` directly. The earlier compatibility launcher changed the
+mode to `async`; its preflight only checked that a method with that name existed,
+so it accepted the explicit `raise NotImplementedError` stub.
+
+**Resolution**: restore `vllm_rollout_spmd.py`, its import, and the `vllm/sync`
+registry entry from `ab070522`; keep GKD itself pinned to `d8e97e17`; and use
+`actor_rollout_ref.rollout.mode=sync`. The preflight now selects `vLLMRollout`
+and rejects any `generate_sequences` implementation containing the explicit
+stub before Ray or GPU processes start.
 
 ### B17. `actor_rollout_ref.rollout.n` missing in integrated GKD
 
@@ -195,9 +213,9 @@ shims and which controlled the actual recipe.
 **Resolution**: the smoke now maintains one override array modeled on upstream
 `recipe/gkd/run_moonlight_dsv3_training.sh`. It adds only the two explicitly
 documented base-worker shims (`rollout.n=1`, `ppo_mini_batch_size=4`) and the
-`mode=async` registry-name compatibility required by the integrated commit.
+restored `mode=sync` rollout required by the GKD trainer.
 The exact same array is Hydra-composed and validated before teacher/Ray startup,
-including lookup of the in-process `vLLMAsyncRollout` class. Missing or stale
+including lookup of the in-process `vLLMRollout` class. Missing or stale
 config now fails before GPU allocation.
 
 **Key files involved**:
