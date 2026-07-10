@@ -253,6 +253,20 @@ ZMQ socket also produced `Operation cannot be accomplished in current state`.
 end-to-end teacher inference before Ray starts. Smoke validation now counts
 `update actor done` events and fails on any teacher skip or missing loss.
 
+### B21. Teacher uses removed `LLM.generate(prompt_token_ids=...)` keyword
+
+**Symptom**: the new end-to-end warmup reaches the healthy teacher engine but
+returns `LLM.generate() got an unexpected keyword argument 'prompt_token_ids'`.
+
+**Root cause**: the integrated GKD teacher uses an older vLLM API. In vLLM
+0.11, `generate` accepts tokenized requests through its `prompts` argument,
+with each request represented as `{"prompt_token_ids": [...]}`.
+
+**Resolution**: the teacher compatibility patch wraps each token-id list as a
+token prompt and passes the list positionally to `LLM.generate`. The patch
+upgrades both pristine sources and files that already contain the B20 memory
+fix, avoiding an incorrect idempotent skip.
+
 **Key files involved**:
 - `external/verl_gkd/verl/recipe/gkd/megatron/megatron_workers.py` (lines ~782-850) — GKD rollout worker sync_rollout_weights
 - `external/verl_gkd/verl/verl/workers/rollout/vllm_rollout/vllm_rollout.py` (line 155) — ServerAdapter.update_weights

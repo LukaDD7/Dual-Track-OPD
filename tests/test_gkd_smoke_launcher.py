@@ -82,9 +82,36 @@ def test_teacher_memory_patch_is_idempotent():
     assert spec.loader is not None
     spec.loader.exec_module(module)
 
-    original = "import argparse\n\nvalue = gpu_memory_utilization=0.7,\n"
+    original = (
+        "import argparse\n\n"
+        "value = gpu_memory_utilization=0.7,\n"
+        "outputs = self.llm.generate("
+        "prompt_token_ids=prompt_token_ids, sampling_params=sampling_params)\n"
+    )
     patched, status = module.patch_source(original)
     assert status == "ok"
     assert "import os" in patched
     assert "GKD_TEACHER_GPU_MEMORY_UTILIZATION" in patched
+    assert '[{"prompt_token_ids": token_ids} for token_ids in prompt_token_ids]' in patched
     assert module.patch_source(patched) == (patched, "skip")
+
+
+def test_teacher_patch_upgrades_generate_after_memory_patch_was_already_applied():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("patch_gkd_teacher_memory", TEACHER_PATCH)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+
+    partially_patched = (
+        "import argparse\nimport os\n\n"
+        'value = gpu_memory_utilization=float(os.environ.get('
+        '"GKD_TEACHER_GPU_MEMORY_UTILIZATION", "0.7")),\n'
+        "outputs = self.llm.generate("
+        "prompt_token_ids=prompt_token_ids, sampling_params=sampling_params)\n"
+    )
+    patched, status = module.patch_source(partially_patched)
+    assert status == "ok"
+    assert module.OLD_GENERATE not in patched
+    assert module.GENERATE_MARKER in patched
