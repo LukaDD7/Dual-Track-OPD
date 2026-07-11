@@ -160,9 +160,59 @@ def fc_opd_post_rollout_hook(
             (valid & response_mask.unsqueeze(1)).float().sum().cpu().item()
             / response_mask.unsqueeze(1).expand_as(valid).float().sum().clamp_min(1.0).cpu().item()
         )
+    if _is_plain_gkd:
+        metrics.update(
+            _gkd_eos_diagnostics(
+                teacher_topk_indices=verl_tensors.teacher_topk_indices,
+                teacher_topk_log_probs=verl_tensors.teacher_topk_log_probs,
+                responses=responses,
+                response_mask=response_mask,
+                eos_token_id=getattr(tokenizer, "eos_token_id", None),
+            )
+        )
     for key, value in output.metrics.items():
         metrics[f"fc_opd/{key}"] = float(value.detach().cpu().item())
     return batch, metrics
+
+
+def _gkd_eos_diagnostics(
+    *,
+    teacher_topk_indices: torch.Tensor,
+    teacher_topk_log_probs: torch.Tensor,
+    responses: torch.Tensor,
+    response_mask: torch.Tensor,
+    eos_token_id: int | None,
+) -> dict[str, float]:
+    """Expose teacher support coverage and EOS feedback-loop indicators."""
+
+    valid = response_mask.bool()
+    full_ids = teacher_topk_indices[:, 0]
+    full_log_probs = teacher_topk_log_probs[:, 0].float()
+    mass = full_log_probs.exp().sum(dim=-1)
+    diagnostics = {
+        "fc_opd/teacher_topk_mass_mean": float(mass[valid].mean().cpu().item()) if valid.any() else 0.0,
+    }
+    if eos_token_id is None:
+        return diagnostics
+    eos_matches = full_ids.eq(int(eos_token_id))
+    eos_in_topk = eos_matches.any(dim=-1)
+    eos_prob = torch.where(eos_matches, full_log_probs.exp(), torch.zeros_like(full_log_probs)).sum(dim=-1)
+    first_valid = valid.float().argmax(dim=1)
+    rows = torch.arange(valid.shape[0], device=valid.device)
+    has_valid = valid.any(dim=1)
+    diagnostics.update(
+        {
+            "fc_opd/teacher_eos_in_topk_ratio": float(eos_in_topk[valid].float().mean().cpu().item()) if valid.any() else 0.0,
+            "fc_opd/teacher_eos_prob_lower_bound_mean": float(eos_prob[valid].mean().cpu().item()) if valid.any() else 0.0,
+            "fc_opd/teacher_first_eos_prob_lower_bound_mean": float(
+                eos_prob[rows[has_valid], first_valid[has_valid]].mean().cpu().item()
+            ) if has_valid.any() else 0.0,
+            "fc_opd/rollout_first_token_eos_ratio": float(
+                responses[rows[has_valid], first_valid[has_valid]].eq(int(eos_token_id)).float().mean().cpu().item()
+            ) if has_valid.any() else 0.0,
+        }
+    )
+    return diagnostics
 
 
 def _fc_opd_config(config: Any) -> Mapping[str, Any]:

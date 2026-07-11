@@ -41,6 +41,22 @@ def fc_opd_batch_denominator(batch: Mapping[str, Any], response_mask: torch.Tens
     return active.sum().clamp_min(1.0)
 
 
+def fc_opd_global_normalizer(local_denominator: torch.Tensor) -> tuple[torch.Tensor, int]:
+    """Return the actor-DP global denominator and gradient compensation.
+
+    FSDP averages gradients across data-parallel ranks.  Each rank therefore
+    optimizes ``local_loss_sum * world_size / global_token_count`` so the
+    averaged gradient equals the gradient of the true global token mean.
+    """
+
+    denominator = local_denominator.detach().float().clone()
+    if not torch.distributed.is_available() or not torch.distributed.is_initialized():
+        return denominator.clamp_min(1.0), 1
+    world_size = torch.distributed.get_world_size()
+    torch.distributed.all_reduce(denominator, op=torch.distributed.ReduceOp.SUM)
+    return denominator.clamp_min(1.0), world_size
+
+
 def compute_verl_fc_opd_actor_loss(
     *,
     student_logits: torch.Tensor,

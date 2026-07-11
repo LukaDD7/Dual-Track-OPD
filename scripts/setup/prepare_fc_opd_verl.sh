@@ -43,9 +43,12 @@ apply_patch_if_needed \
 
 "${PYTHON_BIN}" "${REPO_ROOT}/scripts/hpc/patch_verl_pure_distill_modes.py" \
     "${VERL_DIR}/verl/workers/actor/dp_actor.py"
+"${PYTHON_BIN}" "${REPO_ROOT}/scripts/hpc/patch_verl_fc_opd_global_norm.py" \
+    "${VERL_DIR}/verl/workers/actor/dp_actor.py"
 
 grep -q '"gkd", "gkd_forward"' "${VERL_DIR}/verl/workers/actor/dp_actor.py"
 grep -q '"va_opd_jsd"' "${VERL_DIR}/verl/workers/actor/dp_actor.py"
+grep -q 'fc_opd_global_normalizer' "${VERL_DIR}/verl/workers/actor/dp_actor.py"
 
 echo "FC/VA-OPD verl backend: PASS"
 echo "  upstream: $(git -C "${VERL_DIR}" rev-parse HEAD)"

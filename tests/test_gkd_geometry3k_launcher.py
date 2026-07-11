@@ -33,3 +33,13 @@ def test_backend_overlay_treats_gkd_and_jsd_as_pure_distillation():
     prepare = PREPARE.read_text(encoding="utf-8")
     assert "patch_verl_pure_distill_modes.py" in prepare
     assert "--recount" in prepare
+    assert "patch_verl_fc_opd_global_norm.py" in prepare
+    assert "fc_opd_global_normalizer" in patch
+
+
+def test_launcher_defaults_to_official_topk_and_exposes_eos_diagnostic():
+    source = LAUNCHER.read_text(encoding="utf-8")
+    assert "TOP_K=256" in source
+    assert "IGNORE_EOS=false" in source
+    assert "--diagnostic-ignore-eos" in source
+    assert "actor_rollout_ref.rollout.ignore_eos=${IGNORE_EOS}" in source

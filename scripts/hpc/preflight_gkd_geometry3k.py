@@ -122,6 +122,7 @@ def main() -> None:
     parser.add_argument("--learning-rate", type=float, required=True)
     parser.add_argument("--temperature", type=float, required=True)
     parser.add_argument("--top-p", type=float, required=True)
+    parser.add_argument("--ignore-eos", choices=("true", "false"), required=True)
     parser.add_argument("--save-freq", type=int, required=True)
     parser.add_argument("--teacher-port", type=int, required=True)
     parser.add_argument("--run-dir", type=Path, required=True)
@@ -206,6 +207,7 @@ def main() -> None:
         "learning_rate": args.learning_rate,
         "temperature": args.temperature,
         "top_p": args.top_p,
+        "ignore_eos": args.ignore_eos == "true",
         "save_freq": args.save_freq,
         "teacher_port": args.teacher_port,
         "run_dir": str(args.run_dir.resolve()),

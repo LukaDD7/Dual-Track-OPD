@@ -6,8 +6,15 @@ import torch
 from dual_track_opd.fc_opd.verl_actor_loss import (
     compute_verl_fc_opd_actor_loss,
     fc_opd_batch_denominator,
+    fc_opd_global_normalizer,
     has_fc_opd_tensors,
 )
+
+
+def test_fc_opd_global_normalizer_falls_back_to_local_without_distributed() -> None:
+    denominator, world_size = fc_opd_global_normalizer(torch.tensor(7.0))
+    assert torch.equal(denominator, torch.tensor(7.0))
+    assert world_size == 1
 
 
 def test_va_opd_actor_loss_uses_rollout_weight_denominator() -> None:

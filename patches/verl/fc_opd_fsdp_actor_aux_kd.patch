@@ -1,12 +1,13 @@
 --- a/verl/workers/actor/dp_actor.py
 +++ b/verl/workers/actor/dp_actor.py
-@@ -39,6 +39,11 @@
+@@ -39,6 +39,12 @@
  from verl.utils.ulysses import gather_outputs_and_unpad, ulysses_pad, ulysses_pad_and_slice_inputs
  from verl.workers.actor import BasePPOActor
  from verl.workers.config import ActorConfig
 +from dual_track_opd.fc_opd.verl_actor_loss import (
 +    compute_verl_fc_opd_actor_loss,
 +    fc_opd_batch_denominator,
++    fc_opd_global_normalizer,
 +    has_fc_opd_tensors,
 +)
  
@@ -154,7 +155,7 @@
                  self.actor_optimizer.zero_grad()
  
                  for micro_batch in micro_batches:
-@@ -656,6 +741,30 @@
+@@ -656,6 +741,33 @@
                          metrics["actor/kl_loss"] += kl_loss.detach().item() * loss_scale_factor
                          micro_batch_metrics["actor/kl_coef"] = self.config.kl_loss_coef
  
@@ -162,8 +163,10 @@
 +                    if fc_opd_loss_sum is not None:
 +                        if fc_opd_denominator is None:
 +                            raise RuntimeError("FC/VA-OPD denominator was not computed for this mini-batch")
-+                        denominator = fc_opd_denominator.to(fc_opd_loss_sum.device)
-+                        fc_opd_loss = fc_opd_loss_sum / denominator
++                        denominator, dp_world_size = fc_opd_global_normalizer(
++                            fc_opd_denominator.to(fc_opd_loss_sum.device)
++                        )
++                        fc_opd_loss = fc_opd_loss_sum * dp_world_size / denominator
 +                        # The actor multiplies policy_loss by loss_scale_factor below.
 +                        # Pure GKD/VA/VGG-OPD is the whole objective, so divide here
 +                        # to keep the actor's later scaling from shrinking the gradient.
@@ -177,6 +180,7 @@
 +                            fc_opd_loss.detach().item()
 +                        )
 +                        micro_batch_metrics["actor/fc_opd_denominator"] = denominator.detach().item()
++                        micro_batch_metrics["actor/fc_opd_dp_world_size"] = float(dp_world_size)
 +                        fc_opd_metrics = outputs.get("fc_opd_metrics")
 +                        if fc_opd_metrics is not None:
 +                            for key, value in fc_opd_metrics.items():

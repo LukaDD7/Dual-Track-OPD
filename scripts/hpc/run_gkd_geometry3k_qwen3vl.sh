@@ -29,7 +29,7 @@ TRAIN_GPU_LIST="1,2,3,4"
 STEPS=10
 TRAIN_BATCH_SIZE=4
 ROLLOUT_N=1
-TOP_K=32
+TOP_K=256
 MAX_PROMPT_LENGTH=6144
 MAX_RESPONSE_LENGTH=1024
 GPU_MEMORY_UTILIZATION=0.45
@@ -43,6 +43,7 @@ PREPARE_DATA=true
 PREFLIGHT_ONLY=false
 BACKGROUND=false
 ALLOW_BUSY_GPUS=false
+IGNORE_EOS=false
 
 usage() {
     cat <<'EOF'
@@ -59,7 +60,8 @@ Usage: bash scripts/hpc/run_gkd_geometry3k_qwen3vl.sh [options]
   --val-data PATH                     Prepared validation parquet
   --batch-size N                      Prompt batch size (default: 4)
   --rollout-n N                       Current-policy siblings per prompt (default: 1)
-  --top-k N                           Teacher sparse support (default: 32)
+  --top-k N                           Teacher sparse support (default: 256, official parity)
+  --diagnostic-ignore-eos             Force max-length rollouts to test EOS-collapse causality
   --save-freq N                       Checkpoint interval; 0 means final step
   --name TAG                          Run-name suffix
   --skip-data-prepare                 Require prepared parquets to exist
@@ -88,6 +90,7 @@ while [[ $# -gt 0 ]]; do
         --skip-data-prepare) PREPARE_DATA=false; shift ;;
         --preflight-only) PREFLIGHT_ONLY=true; shift ;;
         --allow-busy-gpus) ALLOW_BUSY_GPUS=true; shift ;;
+        --diagnostic-ignore-eos) IGNORE_EOS=true; shift ;;
         --background) BACKGROUND=true; shift ;;
         -h|--help) usage; exit 0 ;;
         *) echo "Unknown argument: $1" >&2; usage >&2; exit 2 ;;
@@ -167,6 +170,7 @@ echo "  Teacher:         ${TEACHER_MODEL}"
 echo "  Teacher GPU:     ${TEACHER_GPU}"
 echo "  Train GPUs:      ${TRAIN_GPU_LIST}"
 echo "  Batch × rollout: ${TRAIN_BATCH_SIZE} × ${ROLLOUT_N}"
+echo "  Ignore EOS:      ${IGNORE_EOS} (diagnostic only)"
 echo "  Train data:      ${TRAIN_DATA}"
 echo "  Run dir:         ${RUN_DIR}"
 echo "══════════════════════════════════════════════════════════════"
@@ -208,6 +212,7 @@ echo "=== CPU-safe config/data/model preflight ==="
     --learning-rate "${LEARNING_RATE}" \
     --temperature "${TEMPERATURE}" \
     --top-p "${TOP_P}" \
+    --ignore-eos "${IGNORE_EOS}" \
     --save-freq "${SAVE_FREQ}" \
     --teacher-port "${TEACHER_PORT}" \
     --config-reference "${CONFIG_REFERENCE}" \
@@ -329,6 +334,7 @@ CUDA_VISIBLE_DEVICES="${TRAIN_GPU_LIST}" "${PYTHON}" -m verl.trainer.main_ppo \
     "actor_rollout_ref.rollout.temperature=${TEMPERATURE}" \
     "actor_rollout_ref.rollout.top_p=${TOP_P}" \
     "actor_rollout_ref.rollout.top_k=-1" \
+    "actor_rollout_ref.rollout.ignore_eos=${IGNORE_EOS}" \
     "actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=4" \
     "actor_rollout_ref.rollout.agent.num_workers=${TRAIN_GPU_COUNT}" \
     "actor_rollout_ref.ref.fsdp_config.param_offload=false" \
@@ -373,7 +379,7 @@ set -e
 # PPO trainer emits one consolidated metrics line per completed actor update.
 UPDATE_COUNT=$(grep -c "training/global_step:" "${TRAIN_LOG}" 2>/dev/null || true)
 LOSS_COUNT=$(grep -c "actor/fc_opd_loss" "${TRAIN_LOG}" 2>/dev/null || true)
-FINITE_GRAD_COUNT=$(grep -E "actor/grad_norm[^,}]*[=:][[:space:]]*[0-9]" "${TRAIN_LOG}" 2>/dev/null | grep -Evc "nan|inf" || true)
+FINITE_GRAD_COUNT=$(grep -E "actor/grad_norm:[[:space:]]*[0-9]" "${TRAIN_LOG}" 2>/dev/null | grep -Evc "nan|inf" || true)
 
 "${PYTHON}" "${REPO_ROOT}/scripts/hpc/finalize_gkd_geometry3k_run.py" \
     --manifest "${RUN_DIR}/run_manifest.json" \

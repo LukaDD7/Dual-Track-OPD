@@ -20,7 +20,7 @@ data:
 distillation:
   conditions: [full]
   divergence: forward_kl
-  teacher_top_k: 32
+  teacher_top_k: 256
   renormalize_top_k: true
   include_tail: false
   replace_policy_gradient: true
@@ -32,6 +32,7 @@ training:
   rollouts_per_prompt: 1
   temperature: 1.0
   top_p: 0.99
+  ignore_eos: false
   max_prompt_length: 6144
   max_response_length: 1024
   actor_strategy: fsdp2
