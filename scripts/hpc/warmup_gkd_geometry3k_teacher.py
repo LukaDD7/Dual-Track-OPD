@@ -100,6 +100,39 @@ def main() -> None:
                 diagnostics[name] = client.diagnose_generation_alignment(request, max_new_tokens=4)
             except TeacherServiceError as exc:
                 diagnostics[name] = {"error": str(exc)}
+        baseline_failure = None
+        for name, result in diagnostics.items():
+            if "error" in result:
+                if name == "exact_current":
+                    baseline_failure = f"baseline teacher diagnostic failed: {result['error']}"
+                print(f"Teacher prompt variant {name}: ERROR {result['error']}")
+                continue
+
+            top1_match = bool(result.get("native_forced_top1_match"))
+            top10_overlap = float(result.get("native_forced_top10_overlap_ratio", 0.0))
+            top1_logprob_diff = float(result.get("native_forced_top1_logprob_diff", 1.0))
+            alignment_ok = top1_match and top10_overlap >= 0.90 and top1_logprob_diff <= 0.02
+            result["alignment_gate_passed"] = alignment_ok
+            result["alignment_gate_thresholds"] = {
+                "require_top1_match": True,
+                "minimum_top10_overlap_ratio": 0.90,
+                "maximum_top1_logprob_diff": 0.02,
+            }
+            print(
+                f"Teacher prompt variant {name}: "
+                f"raw_eos={float(result['native_first_eos_probability']):.4f} "
+                f"processed_eos={float(result['processed_first_eos_probability']):.4f} "
+                f"generated={result.get('generated_text', '')!r} "
+                f"top1_match={top1_match} top10_overlap={top10_overlap:.3f} "
+                f"top1_logprob_diff={top1_logprob_diff:.4f} alignment_ok={alignment_ok}"
+            )
+            if name == "exact_current" and not alignment_ok:
+                baseline_failure = (
+                    "baseline teacher native/forced alignment failed: "
+                    f"top1_match={top1_match}, top10_overlap={top10_overlap:.3f}, "
+                    f"top1_logprob_diff={top1_logprob_diff:.4f}"
+                )
+
         diagnostic = {
             "question": question,
             "max_first_eos_probability": args.max_first_eos_prob,
@@ -109,17 +142,8 @@ def main() -> None:
             args.diagnostic_output.parent.mkdir(parents=True, exist_ok=True)
             args.diagnostic_output.write_text(json.dumps(diagnostic, indent=2) + "\n", encoding="utf-8")
             print(f"Teacher alignment diagnostic: {args.diagnostic_output}")
-        for name, result in diagnostics.items():
-            if "error" in result:
-                if name == "exact_current":
-                    raise RuntimeError(f"baseline teacher diagnostic failed: {result['error']}")
-                continue
-            if not result.get("native_forced_top1_match"):
-                raise RuntimeError(f"{name}: teacher native/forced top-1 token differs")
-            if float(result.get("native_forced_top10_overlap_ratio", 0.0)) < 0.90:
-                raise RuntimeError(f"{name}: teacher native/forced top-10 overlap is too low")
-            if float(result.get("native_forced_top1_logprob_diff", 1.0)) > 0.02:
-                raise RuntimeError(f"{name}: teacher native/forced top-1 log-prob differs too much")
+        if baseline_failure is not None:
+            raise RuntimeError(baseline_failure)
 
         baseline = diagnostics["exact_current"]
         first_eos_prob = float(baseline["native_first_eos_probability"])
@@ -127,7 +151,8 @@ def main() -> None:
             viable = [
                 name
                 for name, result in diagnostics.items()
-                if "native_first_eos_probability" in result
+                if result.get("alignment_gate_passed")
+                and "native_first_eos_probability" in result
                 and float(result["native_first_eos_probability"]) <= args.max_first_eos_prob
             ]
             msg = (
