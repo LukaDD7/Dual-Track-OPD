@@ -379,7 +379,7 @@ set -e
 # PPO trainer emits one consolidated metrics line per completed actor update.
 UPDATE_COUNT=$(grep -c "training/global_step:" "${TRAIN_LOG}" 2>/dev/null || true)
 LOSS_COUNT=$(grep -c "actor/fc_opd_loss" "${TRAIN_LOG}" 2>/dev/null || true)
-FINITE_GRAD_COUNT=$(grep -E "actor/grad_norm:[[:space:]]*[0-9]" "${TRAIN_LOG}" 2>/dev/null | grep -Evc "nan|inf" || true)
+FINITE_GRAD_COUNT=$(grep -cE "actor/grad_norm:[[:space:]]*[0-9]" "${TRAIN_LOG}" 2>/dev/null || true)
 
 "${PYTHON}" "${REPO_ROOT}/scripts/hpc/finalize_gkd_geometry3k_run.py" \
     --manifest "${RUN_DIR}/run_manifest.json" \
