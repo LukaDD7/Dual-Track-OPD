@@ -5,7 +5,8 @@ from __future__ import annotations
 import re
 from typing import Any, Mapping, Sequence
 
-ANSWER_RE = re.compile(r"\\boxed\{([^}]*)\}", re.IGNORECASE)
+from .answer_extraction import extract_final_answer_candidate
+
 LETTER_RE = re.compile(r"\b([A-D])\b", re.IGNORECASE)
 NUMBER_RE = re.compile(r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)")
 
@@ -44,8 +45,7 @@ def verify_geometry3k_response(
 
 
 def extract_answer(response_text: str) -> str | None:
-    match = ANSWER_RE.search(response_text or "")
-    candidate = match.group(1).strip() if match else (response_text or "").strip()
+    candidate = extract_final_answer_candidate(response_text)
     if not candidate:
         return None
     letter = LETTER_RE.search(candidate)
