@@ -12,6 +12,7 @@ from dual_track_opd.fc_opd.teacher_protocol import (
 )
 from dual_track_opd.fc_opd.teacher_transformers import (
     TransformersTeacherScorer,
+    inject_image_placeholders,
     response_prediction_logits,
 )
 
@@ -207,4 +208,21 @@ def test_transformers_teacher_uses_exact_rollout_prompt_for_full_condition(tmp_p
     )
 
     scorer._prepare_prompt(request)
-    assert scorer.processor.messages == list(prompt)
+    assert scorer.processor.messages[0]["content"][0]["type"] == "image"
+    assert scorer.processor.messages[0]["content"][1] == {
+        "type": "text",
+        "text": "\nExact rollout wording",
+    }
+
+
+def test_teacher_image_placeholder_conversion_matches_verl_contract():
+    messages = [{"role": "user", "content": "before<image>after"}]
+    converted = inject_image_placeholders(messages, ["/tmp/image.png"])
+    assert converted == [{
+        "role": "user",
+        "content": [
+            {"type": "text", "text": "before"},
+            {"type": "image", "image": "/tmp/image.png"},
+            {"type": "text", "text": "after"},
+        ],
+    }]

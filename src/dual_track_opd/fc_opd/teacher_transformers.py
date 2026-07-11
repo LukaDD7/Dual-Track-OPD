@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import re
 from typing import Any, Sequence
 
 import torch
@@ -33,6 +34,48 @@ def response_prediction_logits(full_logits: torch.Tensor, num_response_tokens: i
     if full_logits.shape[1] <= num_response_tokens:
         raise ValueError("full_logits must include at least one prompt position before the response")
     return full_logits[:, -num_response_tokens - 1 : -1, :]
+
+
+def inject_image_placeholders(
+    messages: Sequence[dict[str, Any]],
+    image_paths: Sequence[str],
+) -> list[dict[str, Any]]:
+    """Mirror verl RLHFDataset's ``<image>`` → structured-content conversion."""
+
+    output: list[dict[str, Any]] = []
+    image_offset = 0
+    for original in messages:
+        message = dict(original)
+        content = message.get("content")
+        if isinstance(content, str):
+            content_list: list[dict[str, Any]] = []
+            for segment in filter(None, re.split("(<image>)", content)):
+                if segment == "<image>":
+                    if image_offset >= len(image_paths):
+                        raise ValueError("prompt contains more <image> placeholders than supplied images")
+                    content_list.append({"type": "image", "image": str(image_paths[image_offset])})
+                    image_offset += 1
+                else:
+                    content_list.append({"type": "text", "text": segment})
+            message["content"] = content_list
+        elif isinstance(content, list):
+            normalized_content = []
+            for item in content:
+                normalized = dict(item)
+                if normalized.get("type") == "image":
+                    if image_offset >= len(image_paths):
+                        raise ValueError("structured prompt contains more images than supplied inputs")
+                    normalized["image"] = str(image_paths[image_offset])
+                    normalized.pop("bytes", None)
+                    image_offset += 1
+                normalized_content.append(normalized)
+            message["content"] = normalized_content
+        output.append(message)
+    if image_offset != len(image_paths):
+        raise ValueError(
+            f"prompt consumed {image_offset} image placeholders but {len(image_paths)} images were supplied"
+        )
+    return output
 
 
 class TransformersTeacherScorer(TeacherScorer):
@@ -147,7 +190,7 @@ class TransformersTeacherScorer(TeacherScorer):
         # histories.  Other FC-OPD text conditions still use their deliberate
         # condition-specific rendering.
         messages = (
-            list(request.prompt)
+            inject_image_placeholders(list(request.prompt), rendered.image_paths)
             if request.prompt is not None and request.condition in {Condition.FULL, Condition.DEGRADED}
             else list(rendered.messages)
         )
