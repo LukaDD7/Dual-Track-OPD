@@ -194,10 +194,13 @@ class TransformersTeacherScorer(TeacherScorer):
             if request.prompt is not None and request.condition in {Condition.FULL, Condition.DEGRADED}
             else list(rendered.messages)
         )
+        template_kwargs = dict(request.chat_template_kwargs or {})
+        add_generation_prompt = bool(template_kwargs.pop("add_generation_prompt", True))
         prompt_text = self.processor.apply_chat_template(
             messages,
             tokenize=False,
-            add_generation_prompt=True,
+            add_generation_prompt=add_generation_prompt,
+            **template_kwargs,
         )
         images = None
         if rendered.image_paths:
@@ -381,6 +384,13 @@ class TransformersTeacherScorer(TeacherScorer):
         _overlap_ratio = _overlap / (_n_tokens * _k)
         ids_match = _overlap_ratio >= 0.95
         max_logprob_diff = _max_diff if _overlap > 0 else None
+        head_k = min(10, _k)
+        head_overlap = 0
+        for _t in range(_n_tokens):
+            head_overlap += len(set(native_indices[_t, :head_k].tolist()) & set(forced_indices[_t, :head_k].tolist()))
+        head_overlap_ratio = head_overlap / (_n_tokens * head_k)
+        top1_match = bool(torch.equal(native_indices[:, 0], forced_indices[:, 0]))
+        top1_logprob_diff = float((native_values[:, 0] - forced_values[:, 0]).abs().max().cpu().item())
 
         eos_raw = getattr(self.tokenizer, "eos_token_id", None)
         eos_ids = [] if eos_raw is None else ([int(eos_raw)] if isinstance(eos_raw, int) else [int(x) for x in eos_raw])
@@ -391,6 +401,7 @@ class TransformersTeacherScorer(TeacherScorer):
         return {
             "request_id": request.request_id,
             "condition": request.condition.value,
+            "chat_template_kwargs": request.chat_template_kwargs,
             "prompt_length": prompt_length,
             "prompt_input_ids_tail": prompt_inputs["input_ids"][0, -32:].detach().cpu().tolist(),
             "image_grid_thw": (
@@ -409,6 +420,9 @@ class TransformersTeacherScorer(TeacherScorer):
             "forced_topk_log_probs": [list(row) for row in forced.topk_log_probs],
             "native_forced_topk_ids_match": ids_match,
             "native_forced_max_logprob_diff": max_logprob_diff,
+            "native_forced_top10_overlap_ratio": head_overlap_ratio,
+            "native_forced_top1_match": top1_match,
+            "native_forced_top1_logprob_diff": top1_logprob_diff,
         }
     @torch.inference_mode()
     def _score_batched(

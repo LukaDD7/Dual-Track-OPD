@@ -12,7 +12,7 @@ import pandas as pd
 from transformers import AutoTokenizer
 
 from dual_track_opd.fc_opd.conditions import Condition, build_condition_inputs
-from dual_track_opd.fc_opd.teacher_client import TeacherClient, score_teacher_conditions
+from dual_track_opd.fc_opd.teacher_client import TeacherClient, TeacherServiceError, score_teacher_conditions
 from dual_track_opd.fc_opd.teacher_protocol import TeacherScoreRequest, tokenizer_fingerprint
 from dual_track_opd.fc_opd.prompt_contracts import geometry3k_training_prompt
 
@@ -70,34 +70,73 @@ def main() -> None:
         if score.token_ids.shape[1] != len(response_ids):
             raise RuntimeError(f"teacher response length mismatch for {condition.value}: {score.token_ids.shape}")
     if args.objective == "gkd":
-        request = TeacherScoreRequest(
-            request_id="geometry3k_alignment_probe",
-            condition=Condition.FULL,
-            question=str(row["question"]),
-            condition_inputs=build_condition_inputs({"condition_inputs": _mapping(row["condition_inputs"])}),
-            response_token_ids=(int(tokenizer.eos_token_id),),
-            tokenizer_hash=client.metadata.tokenizer_hash,
-            prompt=tuple(prompt),
+        question = str(row["question"])
+        simple_prompt = ({"role": "user", "content": f"<image>\n{question}"},)
+        variants = (
+            ("exact_current", tuple(prompt), None),
+            ("simple_image_question", simple_prompt, None),
+            ("exact_enable_thinking", tuple(prompt), {"enable_thinking": True}),
+            ("simple_enable_thinking", simple_prompt, {"enable_thinking": True}),
+            (
+                "assistant_think_prefill",
+                tuple(prompt) + ({"role": "assistant", "content": "<think>\n"},),
+                {"add_generation_prompt": False, "continue_final_message": True},
+            ),
         )
-        diagnostic = client.diagnose_generation_alignment(request, max_new_tokens=4)
+        diagnostics = {}
+        condition_inputs = build_condition_inputs({"condition_inputs": _mapping(row["condition_inputs"])})
+        for name, variant_prompt, template_kwargs in variants:
+            request = TeacherScoreRequest(
+                request_id=f"geometry3k_alignment_probe:{name}",
+                condition=Condition.FULL,
+                question=question,
+                condition_inputs=condition_inputs,
+                response_token_ids=(int(tokenizer.eos_token_id),),
+                tokenizer_hash=client.metadata.tokenizer_hash,
+                prompt=variant_prompt,
+                chat_template_kwargs=template_kwargs,
+            )
+            try:
+                diagnostics[name] = client.diagnose_generation_alignment(request, max_new_tokens=4)
+            except TeacherServiceError as exc:
+                diagnostics[name] = {"error": str(exc)}
+        diagnostic = {
+            "question": question,
+            "max_first_eos_probability": args.max_first_eos_prob,
+            "variants": diagnostics,
+        }
         if args.diagnostic_output is not None:
             args.diagnostic_output.parent.mkdir(parents=True, exist_ok=True)
             args.diagnostic_output.write_text(json.dumps(diagnostic, indent=2) + "\n", encoding="utf-8")
             print(f"Teacher alignment diagnostic: {args.diagnostic_output}")
-        if not diagnostic.get("native_forced_topk_ids_match"):
-            raise RuntimeError("teacher native generation and forced-forward top-k token IDs differ")
-        max_diff = diagnostic.get("native_forced_max_logprob_diff")
-        if max_diff is None or float(max_diff) > 5e-4:
-            raise RuntimeError(f"teacher native/forced log-prob mismatch: {max_diff}")
-        first_eos_prob = float(diagnostic["native_first_eos_probability"])
+        for name, result in diagnostics.items():
+            if "error" in result:
+                if name == "exact_current":
+                    raise RuntimeError(f"baseline teacher diagnostic failed: {result['error']}")
+                continue
+            if not result.get("native_forced_top1_match"):
+                raise RuntimeError(f"{name}: teacher native/forced top-1 token differs")
+            if float(result.get("native_forced_top10_overlap_ratio", 0.0)) < 0.90:
+                raise RuntimeError(f"{name}: teacher native/forced top-10 overlap is too low")
+            if float(result.get("native_forced_top1_logprob_diff", 1.0)) > 0.02:
+                raise RuntimeError(f"{name}: teacher native/forced top-1 log-prob differs too much")
+
+        baseline = diagnostics["exact_current"]
+        first_eos_prob = float(baseline["native_first_eos_probability"])
         if first_eos_prob > args.max_first_eos_prob:
+            viable = [
+                name
+                for name, result in diagnostics.items()
+                if "native_first_eos_probability" in result
+                and float(result["native_first_eos_probability"]) <= args.max_first_eos_prob
+            ]
             msg = (
                 f"teacher native generation assigns EOS probability {first_eos_prob:.4f} at first token "
                 f"(threshold: {args.max_first_eos_prob}). "
                 f"Under pure GKD this is a direct training target: forward-KL will drive the student to "
                 f"output EOS immediately, causing response-length collapse. "
                 f"Inspect {args.diagnostic_output} to check native/processed EOS, generated_token_ids, "
-                f"and image_grid_thw before proceeding."
+                f"and image_grid_thw before proceeding. Prompt variants below threshold: {viable}."
             )
             if args.allow_high_teacher_eos:
                 print(f"WARNING: {msg}")

@@ -150,9 +150,11 @@ def test_teacher_request_round_trips_exact_rollout_prompt():
         response_token_ids=(1, 2),
         tokenizer_hash="hash",
         prompt=({"role": "user", "content": "<image>\nExact question"},),
+        chat_template_kwargs={"enable_thinking": True},
     )
     restored = TeacherScoreRequest.from_dict(request.to_dict())
     assert restored.prompt == request.prompt
+    assert restored.chat_template_kwargs == {"enable_thinking": True}
 
 
 def test_teacher_causal_slice_uses_positions_before_response_tokens():

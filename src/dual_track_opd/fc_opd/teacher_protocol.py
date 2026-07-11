@@ -109,6 +109,7 @@ class TeacherScoreRequest:
     # Exact chat messages used by the rollout.  FULL/DEGRADED GKD must reuse
     # these messages instead of reconstructing a semantically similar prompt.
     prompt: tuple[dict[str, Any], ...] | None = None
+    chat_template_kwargs: dict[str, Any] | None = None
 
     def __post_init__(self) -> None:
         if not self.request_id or not self.question.strip() or not self.tokenizer_hash:
@@ -131,6 +132,7 @@ class TeacherScoreRequest:
             "tokenizer_hash": self.tokenizer_hash,
             "response_text": self.response_text,
             "prompt": None if self.prompt is None else _serialize_prompt_value(list(self.prompt)),
+            "chat_template_kwargs": self.chat_template_kwargs,
         }
 
     @classmethod
@@ -185,6 +187,11 @@ class TeacherScoreRequest:
                 else tuple(
                     dict(message) for message in _deserialize_prompt_value(value["prompt"])
                 )
+            ),
+            chat_template_kwargs=(
+                None
+                if value.get("chat_template_kwargs") is None
+                else dict(value["chat_template_kwargs"])
             ),
         )
 
