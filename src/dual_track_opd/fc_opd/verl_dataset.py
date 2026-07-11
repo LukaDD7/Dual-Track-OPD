@@ -17,7 +17,7 @@ from transformers import PreTrainedTokenizer, ProcessorMixin
 
 from verl.utils.dataset.rl_dataset import RLHFDataset
 
-from .prompt_contracts import geometry3k_training_prompt
+from dual_track_opd.fc_opd.prompt_contracts import geometry3k_training_prompt
 
 
 class FCOPDDataset(RLHFDataset):
