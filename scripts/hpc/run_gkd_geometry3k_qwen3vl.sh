@@ -280,7 +280,8 @@ fi
 echo "=== Teacher end-to-end image warmup ==="
 "${PYTHON}" "${REPO_ROOT}/scripts/hpc/warmup_gkd_geometry3k_teacher.py" \
     --data "${TRAIN_DATA}" --student-model "${STUDENT_MODEL}" \
-    --teacher-url "http://127.0.0.1:${TEACHER_PORT}" --objective "${OBJECTIVE}"
+    --teacher-url "http://127.0.0.1:${TEACHER_PORT}" --objective "${OBJECTIVE}" \
+    --diagnostic-output "${RUN_DIR}/teacher_alignment_diagnostic.json"
 
 echo "=== Starting Ray on GPUs ${TRAIN_GPU_LIST} ==="
 CUDA_VISIBLE_DEVICES="${TRAIN_GPU_LIST}" "${RAY}" start --head \

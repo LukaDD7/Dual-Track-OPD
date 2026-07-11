@@ -44,7 +44,7 @@ def _handler_for(scorer: TeacherScorer) -> type[BaseHTTPRequestHandler]:
                 self._write_json(HTTPStatus.NOT_FOUND, {"error": "not_found"})
 
         def do_POST(self) -> None:
-            if self.path != "/score":
+            if self.path not in {"/score", "/diagnose"}:
                 self._write_json(HTTPStatus.NOT_FOUND, {"error": "not_found"})
                 return
             try:
@@ -52,6 +52,18 @@ def _handler_for(scorer: TeacherScorer) -> type[BaseHTTPRequestHandler]:
                 if content_length <= 0:
                     raise ValueError("request body is empty")
                 body = json.loads(self.rfile.read(content_length))
+                if self.path == "/diagnose":
+                    raw_request = body.get("request")
+                    if not isinstance(raw_request, dict):
+                        raise ValueError("diagnose request must be a mapping")
+                    diagnose = getattr(scorer, "diagnose_generation_alignment", None)
+                    if not callable(diagnose):
+                        raise RuntimeError("teacher backend does not support generation diagnostics")
+                    request = TeacherScoreRequest.from_dict(raw_request)
+                    result = diagnose(request, max_new_tokens=int(body.get("max_new_tokens", 4)))
+                    self._write_json(HTTPStatus.OK, result)
+                    return
+
                 raw_requests = body.get("requests")
                 if not isinstance(raw_requests, list) or not raw_requests:
                     raise ValueError("requests must be a non-empty list")

@@ -87,6 +87,21 @@ class TeacherClient:
             validate_score_response(response, self.metadata)
         return responses
 
+    def diagnose_generation_alignment(
+        self,
+        request: TeacherScoreRequest,
+        *,
+        max_new_tokens: int = 4,
+    ) -> dict[str, Any]:
+        raw = self._request_json(
+            "POST",
+            "/diagnose",
+            {"request": request.to_dict(), "max_new_tokens": max_new_tokens},
+        )
+        if not isinstance(raw, dict):
+            raise TeacherServiceError("teacher service returned an invalid diagnostic payload")
+        return dict(raw)
+
 
 def score_teacher_conditions(
     response_token_ids: Sequence[int],
@@ -96,6 +111,7 @@ def score_teacher_conditions(
     teacher_client: TeacherClient,
     *,
     response_text: str | None = None,
+    prompt: Sequence[Mapping[str, Any]] | None = None,
     request_prefix: str = "score",
 ) -> dict[Condition, TeacherTopK]:
     """Score one student response under multiple teacher conditions."""
@@ -109,6 +125,7 @@ def score_teacher_conditions(
             response_token_ids=tuple(int(item) for item in response_token_ids),
             tokenizer_hash=teacher_client.metadata.tokenizer_hash,
             response_text=response_text,
+            prompt=None if prompt is None else tuple(dict(message) for message in prompt),
         )
         for condition in conditions
     ]

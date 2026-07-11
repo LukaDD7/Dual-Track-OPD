@@ -25,6 +25,7 @@ def test_launcher_uses_real_qwen3vl_geometry3k_defaults_and_teacher_warmup():
     assert "train-00000-of-00001.parquet" in source
     assert "warmup_gkd_geometry3k_teacher.py" in source
     assert source.index("Teacher end-to-end image warmup") < source.index("Starting Ray")
+    assert "teacher_alignment_diagnostic.json" in source
 
 
 def test_backend_overlay_treats_gkd_and_jsd_as_pure_distillation():

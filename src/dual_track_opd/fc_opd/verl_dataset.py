@@ -17,6 +17,8 @@ from transformers import PreTrainedTokenizer, ProcessorMixin
 
 from verl.utils.dataset.rl_dataset import RLHFDataset
 
+from .prompt_contracts import geometry3k_training_prompt
+
 
 class FCOPDDataset(RLHFDataset):
     """RLHFDataset that normalises FC-OPD fields into ``extra_info``.
@@ -60,17 +62,7 @@ class FCOPDDataset(RLHFDataset):
         def _clean(row: dict) -> dict:
             question = str(row.get("question", "")).strip()
             if question:
-                row["prompt"] = [{
-                    "role": "user",
-                    "content": (
-                        f"<image>\n{question}\n\n"
-                        "You FIRST think about the reasoning process as an "
-                        "internal monologue and then provide the final answer. "
-                        "The reasoning process MUST BE enclosed within "
-                        "<think> </think> tags. "
-                        "The final answer MUST BE put in \\boxed{}."
-                    ),
-                }]
+                row["prompt"] = geometry3k_training_prompt(question)
             return row
         return dataframe.map(_clean)
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any, Sequence
 
 import torch
@@ -267,6 +268,72 @@ class TransformersTeacherScorer(TeacherScorer):
             sampled_token_log_probs=tuple(float(item) for item in sampled_lp[0].cpu().tolist()),
         )
         return response
+
+    @torch.inference_mode()
+    def diagnose_generation_alignment(
+        self,
+        request: TeacherScoreRequest,
+        *,
+        max_new_tokens: int = 4,
+    ) -> dict[str, Any]:
+        """Compare native generation scores with one-pass forced scoring."""
+
+        prompt_inputs = self._prepare_prompt(request)
+        generated = self.model.generate(
+            **prompt_inputs,
+            max_new_tokens=max_new_tokens,
+            do_sample=False,
+            return_dict_in_generate=True,
+            output_scores=True,
+        )
+        prompt_length = int(prompt_inputs["input_ids"].shape[1])
+        generated_ids = tuple(int(item) for item in generated.sequences[0, prompt_length:].tolist())
+        if not generated_ids or not generated.scores:
+            raise RuntimeError("teacher native generate returned no diagnostic tokens/scores")
+
+        native_log_probs = torch.stack(
+            [torch.log_softmax(score[0].float(), dim=-1) for score in generated.scores[: len(generated_ids)]],
+            dim=0,
+        )
+        k = min(self.top_k, int(native_log_probs.shape[-1]))
+        native_values, native_indices = torch.topk(native_log_probs, k=k, dim=-1)
+        forced_request = replace(
+            request,
+            response_token_ids=generated_ids,
+            response_text=self.tokenizer.decode(list(generated_ids), skip_special_tokens=False),
+        )
+        forced = self._score_one(forced_request)
+        forced_indices = torch.tensor(forced.topk_token_ids, device=native_indices.device)
+        forced_values = torch.tensor(forced.topk_log_probs, device=native_values.device)
+        ids_match = bool(torch.equal(native_indices, forced_indices))
+        max_logprob_diff = (
+            float((native_values - forced_values).abs().max().cpu().item()) if ids_match else None
+        )
+
+        eos_raw = getattr(self.tokenizer, "eos_token_id", None)
+        eos_ids = [] if eos_raw is None else ([int(eos_raw)] if isinstance(eos_raw, int) else [int(x) for x in eos_raw])
+        first_eos_prob = float(native_log_probs[0, eos_ids].exp().sum().cpu().item()) if eos_ids else 0.0
+        return {
+            "request_id": request.request_id,
+            "condition": request.condition.value,
+            "prompt_length": prompt_length,
+            "prompt_input_ids_tail": prompt_inputs["input_ids"][0, -32:].detach().cpu().tolist(),
+            "image_grid_thw": (
+                None
+                if prompt_inputs.get("image_grid_thw") is None
+                else prompt_inputs["image_grid_thw"].detach().cpu().tolist()
+            ),
+            "generated_token_ids": list(generated_ids),
+            "generated_text": self.tokenizer.decode(list(generated_ids), skip_special_tokens=False),
+            "eos_token_ids": eos_ids,
+            "native_first_eos_probability": first_eos_prob,
+            "native_topk_token_ids": native_indices.detach().cpu().tolist(),
+            "native_topk_log_probs": native_values.detach().cpu().tolist(),
+            "forced_topk_token_ids": [list(row) for row in forced.topk_token_ids],
+            "forced_topk_log_probs": [list(row) for row in forced.topk_log_probs],
+            "native_forced_topk_ids_match": ids_match,
+            "native_forced_max_logprob_diff": max_logprob_diff,
+        }
     @torch.inference_mode()
     def _score_batched(
         self,

@@ -62,6 +62,25 @@ def test_health_metadata_and_deterministic_scoring():
     assert all(len(row) == 4 for row in first.topk_token_ids)
 
 
+def test_teacher_diagnostic_endpoint_round_trips_backend_result():
+    class DiagnosticSyntheticTeacher(SyntheticTeacherScorer):
+        def diagnose_generation_alignment(self, request, *, max_new_tokens=4):
+            return {
+                "request_id": request.request_id,
+                "max_new_tokens": max_new_tokens,
+                "native_forced_topk_ids_match": True,
+            }
+
+    scorer = DiagnosticSyntheticTeacher(vocab_size=32, top_k=4, tokenizer_hash="same")
+    with running_teacher_server(scorer) as server:
+        client = TeacherClient(_url(server), expected_tokenizer_hash="same")
+        result = client.diagnose_generation_alignment(_request(Condition.FULL, "same"), max_new_tokens=3)
+
+    assert result["request_id"] == "request"
+    assert result["max_new_tokens"] == 3
+    assert result["native_forced_topk_ids_match"] is True
+
+
 def test_four_conditions_return_nonidentical_scores():
     scorer = SyntheticTeacherScorer(vocab_size=32, top_k=4, tokenizer_hash="same")
     with running_teacher_server(scorer) as server:
