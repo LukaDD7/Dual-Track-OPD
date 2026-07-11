@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 from dataclasses import dataclass
@@ -11,6 +12,45 @@ from .conditions import Condition, ConditionInputs
 
 
 PROTOCOL_VERSION = "fc-opd-teacher-v2-exact-prompt"
+
+_BYTES_MARKER = "__fc_opd_bytes_b64__"
+
+
+def _is_pil_image(obj: object) -> bool:
+    try:
+        from PIL.Image import Image
+
+        return isinstance(obj, Image)
+    except ImportError:
+        return False
+
+
+def _serialize_prompt_value(obj: object) -> object:
+    """Recursively convert bytes/PIL.Image → {__fc_opd_bytes_b64__: <base64>} for JSON safety."""
+    if isinstance(obj, bytes):
+        return {_BYTES_MARKER: base64.b64encode(obj).decode("ascii")}
+    if _is_pil_image(obj):
+        from io import BytesIO
+
+        buf = BytesIO()
+        obj.save(buf, format="PNG")
+        return {_BYTES_MARKER: base64.b64encode(buf.getvalue()).decode("ascii")}
+    if isinstance(obj, dict):
+        return {str(k): _serialize_prompt_value(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_serialize_prompt_value(v) for v in obj]
+    return obj
+
+
+def _deserialize_prompt_value(obj: object) -> object:
+    """Recursively restore {__fc_opd_bytes_b64__: <base64>} → bytes."""
+    if isinstance(obj, dict):
+        if _BYTES_MARKER in obj and len(obj) == 1:
+            return base64.b64decode(obj[_BYTES_MARKER])
+        return {str(k): _deserialize_prompt_value(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_deserialize_prompt_value(v) for v in obj]
+    return obj
 
 
 class FingerprintTokenizer(Protocol):
@@ -90,7 +130,7 @@ class TeacherScoreRequest:
             "response_token_ids": list(self.response_token_ids),
             "tokenizer_hash": self.tokenizer_hash,
             "response_text": self.response_text,
-            "prompt": None if self.prompt is None else list(self.prompt),
+            "prompt": None if self.prompt is None else _serialize_prompt_value(list(self.prompt)),
         }
 
     @classmethod
@@ -142,7 +182,9 @@ class TeacherScoreRequest:
             prompt=(
                 None
                 if value.get("prompt") is None
-                else tuple(dict(message) for message in value["prompt"])
+                else tuple(
+                    dict(message) for message in _deserialize_prompt_value(value["prompt"])
+                )
             ),
         )
 
