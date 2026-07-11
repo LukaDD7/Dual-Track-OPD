@@ -10,7 +10,10 @@ from dual_track_opd.fc_opd.teacher_protocol import (
     tokenizer_fingerprint,
     validate_score_response,
 )
-from dual_track_opd.fc_opd.teacher_transformers import TransformersTeacherScorer
+from dual_track_opd.fc_opd.teacher_transformers import (
+    TransformersTeacherScorer,
+    response_prediction_logits,
+)
 
 
 class TinyTokenizer:
@@ -127,3 +130,81 @@ def test_transformers_backend_retokenization_gate_without_loading_a_model(caplog
     # tokenizer round-trip mismatch is logged, never silently substituted.
     assert tuple(request.response_token_ids) == (ord("A"),)
     assert "Teacher tokenizer round-trip mismatch" in caplog.text
+
+
+def test_teacher_request_round_trips_exact_rollout_prompt():
+    from dual_track_opd.fc_opd.conditions import Condition, ConditionInputs, ImageInput
+    from dual_track_opd.fc_opd.teacher_protocol import TeacherScoreRequest
+
+    request = TeacherScoreRequest(
+        request_id="id",
+        condition=Condition.FULL,
+        question="question",
+        condition_inputs=ConditionInputs(
+            full_image=ImageInput("/tmp/full.png"),
+            degraded_image=ImageInput("/tmp/blur.png", {"type": "gaussian_blur", "sigma": 2.0}),
+            free_caption="caption",
+            task_evidence="evidence",
+        ),
+        response_token_ids=(1, 2),
+        tokenizer_hash="hash",
+        prompt=({"role": "user", "content": "<image>\nExact question"},),
+    )
+    restored = TeacherScoreRequest.from_dict(request.to_dict())
+    assert restored.prompt == request.prompt
+
+
+def test_teacher_causal_slice_uses_positions_before_response_tokens():
+    import torch
+
+    full = torch.arange(1 * 8 * 3).reshape(1, 8, 3)
+    # Three response tokens occupy input positions 5, 6, 7.  Their predictors
+    # are logits positions 4, 5, 6; position 7 predicts a token after response.
+    actual = response_prediction_logits(full, num_response_tokens=3)
+    assert torch.equal(actual, full[:, 4:7, :])
+
+
+def test_transformers_teacher_uses_exact_rollout_prompt_for_full_condition(tmp_path):
+    import torch
+    from PIL import Image
+    from dual_track_opd.fc_opd.conditions import Condition, ConditionInputs, ImageInput
+    from dual_track_opd.fc_opd.teacher_protocol import TeacherScoreRequest
+
+    image_path = tmp_path / "image.png"
+    Image.new("RGB", (2, 2)).save(image_path)
+
+    class FakeProcessor:
+        def __init__(self):
+            self.messages = None
+
+        def apply_chat_template(self, messages, **kwargs):
+            self.messages = messages
+            return "rendered"
+
+        def __call__(self, **kwargs):
+            return {
+                "input_ids": torch.tensor([[1, 2]]),
+                "attention_mask": torch.ones((1, 2), dtype=torch.long),
+            }
+
+    scorer = object.__new__(TransformersTeacherScorer)
+    scorer.processor = FakeProcessor()
+    scorer.device = torch.device("cpu")
+    prompt = ({"role": "user", "content": "<image>\nExact rollout wording"},)
+    request = TeacherScoreRequest(
+        request_id="id",
+        condition=Condition.FULL,
+        question="a differently reconstructed question",
+        condition_inputs=ConditionInputs(
+            full_image=ImageInput(str(image_path)),
+            degraded_image=ImageInput(str(image_path), {"type": "gaussian_blur", "sigma": 2.0}),
+            free_caption="caption",
+            task_evidence="evidence",
+        ),
+        response_token_ids=(1,),
+        tokenizer_hash="hash",
+        prompt=prompt,
+    )
+
+    scorer._prepare_prompt(request)
+    assert scorer.processor.messages == list(prompt)

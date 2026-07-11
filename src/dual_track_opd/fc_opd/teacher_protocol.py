@@ -10,7 +10,7 @@ from typing import Any, Mapping, Protocol, Sequence
 from .conditions import Condition, ConditionInputs
 
 
-PROTOCOL_VERSION = "fc-opd-teacher-v1"
+PROTOCOL_VERSION = "fc-opd-teacher-v2-exact-prompt"
 
 
 class FingerprintTokenizer(Protocol):
@@ -66,6 +66,9 @@ class TeacherScoreRequest:
     response_token_ids: tuple[int, ...]
     tokenizer_hash: str
     response_text: str | None = None
+    # Exact chat messages used by the rollout.  FULL/DEGRADED GKD must reuse
+    # these messages instead of reconstructing a semantically similar prompt.
+    prompt: tuple[dict[str, Any], ...] | None = None
 
     def __post_init__(self) -> None:
         if not self.request_id or not self.question.strip() or not self.tokenizer_hash:
@@ -73,6 +76,10 @@ class TeacherScoreRequest:
         if not self.response_token_ids or any(token_id < 0 for token_id in self.response_token_ids):
             raise ValueError("response_token_ids must contain non-negative token IDs")
         self.condition_inputs.validate()
+        if self.prompt is not None and (
+            not self.prompt or any(not isinstance(message, Mapping) for message in self.prompt)
+        ):
+            raise ValueError("prompt must be a non-empty sequence of message mappings")
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -83,6 +90,7 @@ class TeacherScoreRequest:
             "response_token_ids": list(self.response_token_ids),
             "tokenizer_hash": self.tokenizer_hash,
             "response_text": self.response_text,
+            "prompt": None if self.prompt is None else list(self.prompt),
         }
 
     @classmethod
@@ -131,6 +139,11 @@ class TeacherScoreRequest:
             response_token_ids=tuple(int(item) for item in value["response_token_ids"]),
             tokenizer_hash=str(value["tokenizer_hash"]),
             response_text=None if value.get("response_text") is None else str(value["response_text"]),
+            prompt=(
+                None
+                if value.get("prompt") is None
+                else tuple(dict(message) for message in value["prompt"])
+            ),
         )
 
 

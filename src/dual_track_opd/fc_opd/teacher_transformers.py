@@ -6,6 +6,7 @@ from typing import Any, Sequence
 
 import torch
 
+from .conditions import Condition
 from .teacher_protocol import (
     TeacherMetadata,
     TeacherScoreRequest,
@@ -14,6 +15,23 @@ from .teacher_protocol import (
 )
 from .teacher_prompts import render_teacher_prompt
 from .teacher_scorer import TeacherScorer
+
+
+def response_prediction_logits(full_logits: torch.Tensor, num_response_tokens: int) -> torch.Tensor:
+    """Return causal-LM logits that predict each appended response token.
+
+    The final ``T`` input positions contain the response tokens themselves.
+    Logits at those positions predict the *following* tokens, so scoring the
+    response requires the preceding ``T`` positions: ``[-T-1:-1]``.
+    """
+
+    if full_logits.ndim != 3:
+        raise ValueError("full_logits must have shape [batch, sequence, vocab]")
+    if num_response_tokens < 1:
+        raise ValueError("num_response_tokens must be positive")
+    if full_logits.shape[1] <= num_response_tokens:
+        raise ValueError("full_logits must include at least one prompt position before the response")
+    return full_logits[:, -num_response_tokens - 1 : -1, :]
 
 
 class TransformersTeacherScorer(TeacherScorer):
@@ -122,8 +140,18 @@ class TransformersTeacherScorer(TeacherScorer):
             request.question,
             request.condition_inputs,
         )
+        # For image-preserving GKD, use the exact rollout messages.  Rebuilding
+        # them from ``question`` used to add a "Question:\n" prefix that the
+        # student never saw, so teacher and student conditioned on different
+        # histories.  Other FC-OPD text conditions still use their deliberate
+        # condition-specific rendering.
+        messages = (
+            list(request.prompt)
+            if request.prompt is not None and request.condition in {Condition.FULL, Condition.DEGRADED}
+            else list(rendered.messages)
+        )
         prompt_text = self.processor.apply_chat_template(
-            list(rendered.messages),
+            messages,
             tokenize=False,
             add_generation_prompt=True,
         )
@@ -209,10 +237,8 @@ class TransformersTeacherScorer(TeacherScorer):
             model_inputs["position_ids"] = position_ids
 
         outputs = self.model(**model_inputs, use_cache=False)
-        # Qwen3-VL merges image tokens, so input/output position counts differ.
-        # Response logits are always the *last* N positions of the output.
         _n_resp = response_ids.shape[1]
-        response_logits = outputs.logits[:, -_n_resp:]
+        response_logits = response_prediction_logits(outputs.logits, _n_resp)
         log_probs = torch.log_softmax(response_logits.float(), dim=-1)
         values, indices = torch.topk(log_probs, k=self.top_k, dim=-1)
         topk_mass = values.exp().sum(dim=-1)
@@ -241,7 +267,6 @@ class TransformersTeacherScorer(TeacherScorer):
             sampled_token_log_probs=tuple(float(item) for item in sampled_lp[0].cpu().tolist()),
         )
         return response
-
     @torch.inference_mode()
     def _score_batched(
         self,

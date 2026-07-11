@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import Iterable, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -120,7 +120,10 @@ def score_teacher_conditions(
 
 
 def score_teacher_conditions_multi_sample(
-    samples: Sequence[tuple[Sequence[int], str, ConditionInputs]],
+    samples: Sequence[
+        tuple[Sequence[int], str, ConditionInputs]
+        | tuple[Sequence[int], str, ConditionInputs, Sequence[Mapping[str, Any]] | None]
+    ],
     conditions: Iterable[Condition | str],
     teacher_client: TeacherClient,
     *,
@@ -140,7 +143,12 @@ def score_teacher_conditions_multi_sample(
         raise ValueError("response_texts must match samples length")
 
     requests: list[TeacherScoreRequest] = []
-    for idx, (token_ids, question, condition_inputs) in enumerate(samples):
+    for idx, sample in enumerate(samples):
+        if len(sample) == 3:
+            token_ids, question, condition_inputs = sample
+            prompt = None
+        else:
+            token_ids, question, condition_inputs, prompt = sample
         for condition in conditions:
             requests.append(
                 TeacherScoreRequest(
@@ -151,6 +159,7 @@ def score_teacher_conditions_multi_sample(
                     response_token_ids=tuple(int(t) for t in token_ids),
                     tokenizer_hash=teacher_client.metadata.tokenizer_hash,
                     response_text=texts[idx],
+                    prompt=None if prompt is None else tuple(dict(message) for message in prompt),
                 )
             )
 

@@ -129,6 +129,27 @@ def test_verl_sparse_kd_backpropagates_to_current_logits():
     assert student.grad.abs().sum().item() > 0
 
 
+def test_verl_sparse_kd_keeps_gradient_for_very_unlikely_teacher_token():
+    student = torch.tensor([[[0.0, -30.0]]], requires_grad=True)
+    teacher_ids = torch.tensor([[[[1]]]], dtype=torch.long)
+    teacher_log_probs = torch.zeros((1, 1, 1, 1))
+    weights = torch.ones((1, 1, 1))
+    response_mask = torch.ones((1, 1), dtype=torch.bool)
+
+    output = compute_verl_sparse_topk_kd(
+        student,
+        teacher_ids,
+        teacher_log_probs,
+        weights,
+        response_mask,
+        include_tail=False,
+    )
+    output.per_token_loss.sum().backward()
+
+    assert student.grad is not None
+    assert student.grad[0, 0, 1].item() < -0.9
+
+
 def test_verl_sparse_kd_validates_condition_weight_shape():
     student = torch.zeros((1, 2, 2))
     teacher_ids = torch.zeros((1, 1, 2, 2), dtype=torch.long)

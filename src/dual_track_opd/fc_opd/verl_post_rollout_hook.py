@@ -184,6 +184,14 @@ def _build_teacher_scorer(
     injected = _optional_callable(fc_config, "teacher_scorer", "teacher_scorer_fqn")
     if injected is not None:
         return injected
+    loss_mode = str(_config_get(fc_config, "loss_mode", "forward"))
+    if loss_mode in {"gkd", "gkd_forward"}:
+        missing_prompt = [sample.sample_uid for sample in samples if not sample.prompt]
+        if missing_prompt:
+            raise ValueError(
+                "GKD teacher scoring requires the exact rollout prompt; missing for "
+                + ", ".join(missing_prompt)
+            )
     # Support both legacy teacher_url (single) and teacher_urls (comma-separated list).
     teacher_urls_str = _config_get(fc_config, "teacher_urls", None)
     if teacher_urls_str is None:
@@ -203,7 +211,7 @@ def _build_teacher_scorer(
     # chunk so response_text indexing stays trivially aligned.
     num_teachers = len(teacher_urls)
     sample_tuples = [
-        (sample.rollout_token_ids, sample.question, sample.condition_inputs)
+        (sample.rollout_token_ids, sample.question, sample.condition_inputs, sample.prompt)
         for sample in samples
     ]
     response_texts = [sample.rollout_text for sample in samples]

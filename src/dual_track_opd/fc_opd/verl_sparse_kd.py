@@ -99,8 +99,10 @@ def compute_verl_sparse_topk_kd(
             tail_mass = tail_mass / total_mass.clamp_min(eps)
 
     teacher_log_mass = topk_mass.clamp_min(eps).log()
-    # Clamp student log-probs to avoid -inf when mass is near zero.
-    _student_sel = student_selected.clamp_min(-15.0)
+    # log_softmax is evaluated in fp32 and is finite for the validated finite
+    # logits above.  Do not clamp: clamping at -15 creates a zero-gradient dead
+    # zone exactly when a teacher top-k token needs the strongest correction.
+    _student_sel = student_selected
     per_condition = torch.sum(topk_mass * (teacher_log_mass - _student_sel), dim=-1)
 
     if tail_mass is not None:
