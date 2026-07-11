@@ -328,13 +328,21 @@ class TransformersTeacherScorer(TeacherScorer):
             do_sample=False,
             return_dict_in_generate=True,
             output_scores=True,
+            output_logits=True,
         )
         prompt_length = int(prompt_inputs["input_ids"].shape[1])
         generated_ids = tuple(int(item) for item in generated.sequences[0, prompt_length:].tolist())
         if not generated_ids or not generated.scores:
             raise RuntimeError("teacher native generate returned no diagnostic tokens/scores")
 
+        raw_logits = getattr(generated, "logits", None)
+        if not raw_logits:
+            raise RuntimeError("teacher generate did not return raw logits; output_logits is required")
         native_log_probs = torch.stack(
+            [torch.log_softmax(logits[0].float(), dim=-1) for logits in raw_logits[: len(generated_ids)]],
+            dim=0,
+        )
+        processed_log_probs = torch.stack(
             [torch.log_softmax(score[0].float(), dim=-1) for score in generated.scores[: len(generated_ids)]],
             dim=0,
         )
@@ -356,6 +364,9 @@ class TransformersTeacherScorer(TeacherScorer):
         eos_raw = getattr(self.tokenizer, "eos_token_id", None)
         eos_ids = [] if eos_raw is None else ([int(eos_raw)] if isinstance(eos_raw, int) else [int(x) for x in eos_raw])
         first_eos_prob = float(native_log_probs[0, eos_ids].exp().sum().cpu().item()) if eos_ids else 0.0
+        processed_first_eos_prob = (
+            float(processed_log_probs[0, eos_ids].exp().sum().cpu().item()) if eos_ids else 0.0
+        )
         return {
             "request_id": request.request_id,
             "condition": request.condition.value,
@@ -370,6 +381,7 @@ class TransformersTeacherScorer(TeacherScorer):
             "generated_text": self.tokenizer.decode(list(generated_ids), skip_special_tokens=False),
             "eos_token_ids": eos_ids,
             "native_first_eos_probability": first_eos_prob,
+            "processed_first_eos_probability": processed_first_eos_prob,
             "native_topk_token_ids": native_indices.detach().cpu().tolist(),
             "native_topk_log_probs": native_values.detach().cpu().tolist(),
             "forced_topk_token_ids": [list(row) for row in forced.topk_token_ids],
