@@ -33,6 +33,11 @@ def main() -> None:
     parser.add_argument("--objective", choices=("gkd", "va_opd", "va_opd_jsd"), required=True)
     parser.add_argument("--diagnostic-output", type=Path)
     parser.add_argument("--max-first-eos-prob", type=float, default=0.20)
+    parser.add_argument(
+        "--allow-high-teacher-eos",
+        action="store_true",
+        help="override the first-token EOS probability gate (known-risk: likely EOS collapse under pure GKD)",
+    )
     args = parser.parse_args()
 
     row = pd.read_parquet(args.data).iloc[0].to_dict()
@@ -86,12 +91,18 @@ def main() -> None:
             raise RuntimeError(f"teacher native/forced log-prob mismatch: {max_diff}")
         first_eos_prob = float(diagnostic["native_first_eos_probability"])
         if first_eos_prob > args.max_first_eos_prob:
-            print(
-                f"WARNING: teacher native generation assigns EOS probability {first_eos_prob:.4f} at first token "
-                f"(threshold: {args.max_first_eos_prob}). This is a training-dynamics concern (may cause EOS collapse "
-                f"under pure GKD), not a protocol correctness issue. Training will proceed; monitor "
-                f"fc_opd/rollout_first_token_eos_ratio in the training metrics."
+            msg = (
+                f"teacher native generation assigns EOS probability {first_eos_prob:.4f} at first token "
+                f"(threshold: {args.max_first_eos_prob}). "
+                f"Under pure GKD this is a direct training target: forward-KL will drive the student to "
+                f"output EOS immediately, causing response-length collapse. "
+                f"Inspect {args.diagnostic_output} to check native/processed EOS, generated_token_ids, "
+                f"and image_grid_thw before proceeding."
             )
+            if args.allow_high_teacher_eos:
+                print(f"WARNING: {msg}")
+            else:
+                raise RuntimeError(f"{msg}  Re-run with --allow-high-teacher-eos to override.")
     print(f"Teacher warmup: PASS conditions={[condition.value for condition in conditions]}")
 
 

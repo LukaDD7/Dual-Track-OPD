@@ -43,6 +43,7 @@ PREPARE_DATA=true
 PREFLIGHT_ONLY=false
 BACKGROUND=false
 ALLOW_BUSY_GPUS=false
+ALLOW_HIGH_TEACHER_EOS=false
 IGNORE_EOS=false
 
 usage() {
@@ -67,6 +68,7 @@ Usage: bash scripts/hpc/run_gkd_geometry3k_qwen3vl.sh [options]
   --skip-data-prepare                 Require prepared parquets to exist
   --preflight-only                    Validate data/models/backend without GPUs
   --allow-busy-gpus                   Override the stale-process safety check
+  --allow-high-teacher-eos            Override first-token EOS probability gate (known-risk)
   --background                        Relaunch under nohup
 EOF
 }
@@ -90,6 +92,7 @@ while [[ $# -gt 0 ]]; do
         --skip-data-prepare) PREPARE_DATA=false; shift ;;
         --preflight-only) PREFLIGHT_ONLY=true; shift ;;
         --allow-busy-gpus) ALLOW_BUSY_GPUS=true; shift ;;
+        --allow-high-teacher-eos) ALLOW_HIGH_TEACHER_EOS=true; shift ;;
         --diagnostic-ignore-eos) IGNORE_EOS=true; shift ;;
         --background) BACKGROUND=true; shift ;;
         -h|--help) usage; exit 0 ;;
@@ -278,10 +281,13 @@ if ! ${READY}; then
 fi
 
 echo "=== Teacher end-to-end image warmup ==="
+WARMUP_EXTRA=()
+if ${ALLOW_HIGH_TEACHER_EOS}; then WARMUP_EXTRA+=(--allow-high-teacher-eos); fi
 "${PYTHON}" "${REPO_ROOT}/scripts/hpc/warmup_gkd_geometry3k_teacher.py" \
     --data "${TRAIN_DATA}" --student-model "${STUDENT_MODEL}" \
     --teacher-url "http://127.0.0.1:${TEACHER_PORT}" --objective "${OBJECTIVE}" \
-    --diagnostic-output "${RUN_DIR}/teacher_alignment_diagnostic.json"
+    --diagnostic-output "${RUN_DIR}/teacher_alignment_diagnostic.json" \
+    "${WARMUP_EXTRA[@]}"
 
 echo "=== Starting Ray on GPUs ${TRAIN_GPU_LIST} ==="
 CUDA_VISIBLE_DEVICES="${TRAIN_GPU_LIST}" "${RAY}" start --head \
