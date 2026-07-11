@@ -1,9 +1,12 @@
 from dual_track_opd.fc_opd.prompt_contracts import geometry3k_training_prompt
 
 
-def test_geometry3k_training_prompt_preserves_image_and_format_contract():
+def test_geometry3k_training_prompt_uses_native_image_question_contract():
     prompt = geometry3k_training_prompt("Find x.")
-    assert prompt[0]["role"] == "user"
-    assert prompt[0]["content"].startswith("<image>\nFind x.")
-    assert "<think> </think>" in prompt[0]["content"]
-    assert "\\boxed{}" in prompt[0]["content"]
+    assert prompt == [{"role": "user", "content": "<image>\nFind x."}]
+
+
+def test_geometry3k_training_prompt_does_not_inject_reasoning_markup():
+    content = geometry3k_training_prompt("Find x.")[0]["content"]
+    assert "<think>" not in content
+    assert "\\boxed" not in content

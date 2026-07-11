@@ -72,9 +72,19 @@ def main() -> None:
     if args.objective == "gkd":
         question = str(row["question"])
         simple_prompt = ({"role": "user", "content": f"<image>\n{question}"},)
+        legacy_forced_reasoning_prompt = ({
+            "role": "user",
+            "content": (
+                f"<image>\n{question}\n\n"
+                "You FIRST think about the reasoning process as an internal monologue "
+                "and then provide the final answer. The reasoning process MUST BE "
+                "enclosed within <think> </think> tags. The final answer MUST BE put "
+                "in \\boxed{}."
+            ),
+        },)
         variants = (
             ("exact_current", tuple(prompt), None),
-            ("simple_image_question", simple_prompt, None),
+            ("legacy_forced_reasoning", legacy_forced_reasoning_prompt, None),
             ("exact_enable_thinking", tuple(prompt), {"enable_thinking": True}),
             ("simple_enable_thinking", simple_prompt, {"enable_thinking": True}),
             (

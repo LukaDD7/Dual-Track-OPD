@@ -5,8 +5,8 @@ The only reliable channel is ``extra_info``.  This dataset subclass ensures
 FC-OPD fields (question, choices, answer, condition_inputs) are always
 available inside ``extra_info``, regardless of the raw parquet layout.
 
-For VA-OPD: student prompts are cleaned to raw image + question (no XML
-format instructions, no answer choices).
+For VA-OPD: student prompts are normalized to the native Qwen3-VL-Instruct
+image + question contract.
 """
 
 from __future__ import annotations
@@ -50,14 +50,11 @@ class FCOPDDataset(RLHFDataset):
 
     @staticmethod
     def _clean_prompts(dataframe):
-        """Replace prompts with industry-standard Geometry3K format.
+        """Normalize prompts to the shared Qwen3-VL-Instruct contract.
 
-        Uses the canonical math-RL prompt template (EasyR1, veRL, GAO_grpo,
-        ARPO, MindSpeed-MM, Oumi all converge on this format):
-          - ``<think>`` tags for chain-of-thought reasoning
-          - ``\\boxed{}`` for the final answer (Qwen3 pre-training convention)
-
-        VA-OPD: student sees only the raw image + question, no answer choices.
+        Do not inject literal ``<think>`` or boxed-answer instructions here:
+        reasoning mode belongs to the model/chat template, and the same prompt
+        must reach student rollout and teacher forced-forward scoring.
         """
         def _clean(row: dict) -> dict:
             question = str(row.get("question", "")).strip()
