@@ -9,12 +9,16 @@ FC-OPD score diagnostics.
 - Student: local `Qwen3-VL-4B-Instruct`.
 - Teacher: local `Qwen3-VL-32B-Instruct`.
 - Data: real Geometry3K questions and images.
-- Rollouts: freshly sampled from the current student after weight sync.
+- Rollouts: freshly sampled from the current student after weight sync
+  (1 rollout per prompt, temperature 1.0, top-p 0.99).
 - Teacher target: immediate forced-scoring of those exact rollout token IDs
   under the full image and canonical question.
-- Objective: sparse forward KL, including the tail bucket. It replaces the
-  GRPO policy loss; reward/advantages are transport-only and do not contribute
-  to the actor gradient.
+- Objective: sparse forward KL(P_teacher || Q_student), teacher top-32
+  renormalized so the 32-token support sums to probability 1. The remaining
+  vocabulary tail is excluded from the loss. It replaces the GRPO policy loss;
+  reward/advantages are transport-only and do not contribute to the actor
+  gradient.
+- Learning rate: 1e-6.
 - Validation: a deterministic 200-row holdout, disjoint from training.
 
 The default config reference is

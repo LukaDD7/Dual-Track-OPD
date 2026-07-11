@@ -11,6 +11,7 @@
 #   bash scripts/hpc/run_gkd_text_smoke.sh                        # 10 steps, synthetic data
 #   bash scripts/hpc/run_gkd_text_smoke.sh --steps 200            # Gate 3 (200 steps)
 #   bash scripts/hpc/run_gkd_text_smoke.sh --teacher-gpu 0 --train-gpus 1,2,3,4
+#   bash scripts/hpc/run_gkd_text_smoke.sh --train-data train.parquet --val-data test.parquet
 #   bash scripts/hpc/run_gkd_text_smoke.sh --background
 
 set -euo pipefail
@@ -57,6 +58,8 @@ NUM_STEPS=10
 TRAIN_BATCH_SIZE=4
 MODEL_PATH="${MODEL_ROOT}/Qwen3-0.6B"
 SYNTHETIC_DATA=true
+TRAIN_DATA_PATH=""
+VAL_DATA_PATH=""
 RUN_BACKGROUND=false
 GKD_TEACHER_GPU_MEMORY_UTILIZATION="${GKD_TEACHER_GPU_MEMORY_UTILIZATION:-0.35}"
 TEACHER_WARMUP_TIMEOUT_SECONDS="${TEACHER_WARMUP_TIMEOUT_SECONDS:-1200}"
@@ -89,6 +92,8 @@ cleanup_teacher_processes() {
 
 trap cleanup_teacher_processes EXIT
 
+ORIGINAL_ARGS=("$@")
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --teacher-gpu)    TEACHER_GPU="${2:?--teacher-gpu needs a value}"; shift 2 ;;
@@ -96,6 +101,8 @@ while [[ $# -gt 0 ]]; do
         --steps)          NUM_STEPS="${2:?--steps needs a value}"; shift 2 ;;
         --model-path)     MODEL_PATH="${2:?--model-path needs a value}"; shift 2 ;;
         --synthetic-data) SYNTHETIC_DATA=true; shift ;;
+        --train-data)     TRAIN_DATA_PATH="${2:?--train-data needs a value}"; SYNTHETIC_DATA=false; shift 2 ;;
+        --val-data)       VAL_DATA_PATH="${2:?--val-data needs a value}"; shift 2 ;;
         --background)     RUN_BACKGROUND=true; shift ;;
         *) echo "Unknown arg: $1"; exit 1 ;;
     esac
@@ -106,7 +113,7 @@ mkdir -p "${OUTPUT_DIR}" "${DATA_DIR}"
 # ── background re-launch ──────────────────────────────────────────────────
 if ${RUN_BACKGROUND}; then
     RELAUNCH_ARGS=()
-    for arg in "$@"; do
+    for arg in "${ORIGINAL_ARGS[@]}"; do
         [[ "$arg" != "--background" ]] || continue
         RELAUNCH_ARGS+=("$arg")
     done
@@ -138,6 +145,18 @@ echo "  GKD layout:     ${GKD_LAYOUT}"
 echo "  Synthetic data: ${SYNTHETIC_DATA}"
 echo "══════════════════════════════════════════════════════════════"
 echo ""
+
+# ── validate data paths (early, before env checks) ───────────────────────────
+if ! ${SYNTHETIC_DATA}; then
+    if [[ -n "${TRAIN_DATA_PATH}" ]] && [[ ! -f "${TRAIN_DATA_PATH}" ]]; then
+        echo "FATAL: --train-data file not found: ${TRAIN_DATA_PATH}" >&2
+        exit 1
+    fi
+    if [[ -n "${VAL_DATA_PATH}" ]] && [[ ! -f "${VAL_DATA_PATH}" ]]; then
+        echo "FATAL: --val-data file not found: ${VAL_DATA_PATH}" >&2
+        exit 1
+    fi
+fi
 
 # ── verify env ────────────────────────────────────────────────────────────
 if [[ ! -x "${PYTHON}" ]]; then
@@ -249,8 +268,8 @@ import ray; print(f'ray={ray.__version__}')
 echo ""
 
 # ── generate synthetic data (text-only, no images) ────────────────────────
-TRAIN_PARQUET="${DATA_DIR}/train.parquet"
-VAL_PARQUET="${DATA_DIR}/val.parquet"
+TRAIN_PARQUET="${TRAIN_DATA_PATH:-${DATA_DIR}/train.parquet}"
+VAL_PARQUET="${VAL_DATA_PATH:-${DATA_DIR}/val.parquet}"
 
 if ${SYNTHETIC_DATA}; then
     echo "=== Generating synthetic text-only data ==="
@@ -304,9 +323,11 @@ print(f'Val data:   {len(val_df)} rows  → ${VAL_PARQUET}')
 "
     echo "[OK] Synthetic data generated"
 else
-    echo "Using existing data at ${DATA_DIR}"
+    echo "Using existing data:"
+    echo "  Train: ${TRAIN_PARQUET}"
+    echo "  Val:   ${VAL_PARQUET}"
     if [[ ! -f "${TRAIN_PARQUET}" ]] || [[ ! -f "${VAL_PARQUET}" ]]; then
-        echo "FATAL: Data not found. Use --synthetic-data or provide existing parquet files."
+        echo "FATAL: Data not found. Pass --train-data/--val-data or use --synthetic-data."
         exit 1
     fi
 fi

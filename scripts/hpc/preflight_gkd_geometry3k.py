@@ -120,6 +120,8 @@ def main() -> None:
     parser.add_argument("--max-response-length", type=int, required=True)
     parser.add_argument("--gpu-memory-utilization", type=float, required=True)
     parser.add_argument("--learning-rate", type=float, required=True)
+    parser.add_argument("--temperature", type=float, required=True)
+    parser.add_argument("--top-p", type=float, required=True)
     parser.add_argument("--save-freq", type=int, required=True)
     parser.add_argument("--teacher-port", type=int, required=True)
     parser.add_argument("--run-dir", type=Path, required=True)
@@ -139,6 +141,8 @@ def main() -> None:
         raise ValueError("sequence lengths and save frequency must be positive")
     if not 0.0 < args.gpu_memory_utilization < 1.0 or args.learning_rate <= 0:
         raise ValueError("GPU memory utilization must be in (0,1) and learning rate must be positive")
+    if args.temperature <= 0 or not 0.0 <= args.top_p <= 1.0:
+        raise ValueError("temperature must be positive and top_p must be in [0,1]")
     if args.train_batch_size % len(train_gpus):
         raise ValueError("train batch size must be divisible by the training GPU count")
 
@@ -200,6 +204,8 @@ def main() -> None:
         "max_response_length": args.max_response_length,
         "gpu_memory_utilization": args.gpu_memory_utilization,
         "learning_rate": args.learning_rate,
+        "temperature": args.temperature,
+        "top_p": args.top_p,
         "save_freq": args.save_freq,
         "teacher_port": args.teacher_port,
         "run_dir": str(args.run_dir.resolve()),

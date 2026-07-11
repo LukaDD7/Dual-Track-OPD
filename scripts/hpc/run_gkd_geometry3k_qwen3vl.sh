@@ -28,12 +28,14 @@ TEACHER_GPU=0
 TRAIN_GPU_LIST="1,2,3,4"
 STEPS=10
 TRAIN_BATCH_SIZE=4
-ROLLOUT_N=4
+ROLLOUT_N=1
 TOP_K=32
 MAX_PROMPT_LENGTH=6144
 MAX_RESPONSE_LENGTH=1024
 GPU_MEMORY_UTILIZATION=0.45
-LEARNING_RATE=2e-6
+LEARNING_RATE=1e-6
+TEMPERATURE=1.0
+TOP_P=0.99
 TEACHER_PORT=18080
 SAVE_FREQ=0
 NAME=""
@@ -56,7 +58,7 @@ Usage: bash scripts/hpc/run_gkd_geometry3k_qwen3vl.sh [options]
   --train-data PATH                   Prepared train parquet
   --val-data PATH                     Prepared validation parquet
   --batch-size N                      Prompt batch size (default: 4)
-  --rollout-n N                       Current-policy siblings per prompt (default: 4)
+  --rollout-n N                       Current-policy siblings per prompt (default: 1)
   --top-k N                           Teacher sparse support (default: 32)
   --save-freq N                       Checkpoint interval; 0 means final step
   --name TAG                          Run-name suffix
@@ -204,6 +206,8 @@ echo "=== CPU-safe config/data/model preflight ==="
     --max-response-length "${MAX_RESPONSE_LENGTH}" \
     --gpu-memory-utilization "${GPU_MEMORY_UTILIZATION}" \
     --learning-rate "${LEARNING_RATE}" \
+    --temperature "${TEMPERATURE}" \
+    --top-p "${TOP_P}" \
     --save-freq "${SAVE_FREQ}" \
     --teacher-port "${TEACHER_PORT}" \
     --config-reference "${CONFIG_REFERENCE}" \
@@ -322,6 +326,9 @@ CUDA_VISIBLE_DEVICES="${TRAIN_GPU_LIST}" "${PYTHON}" -m verl.trainer.main_ppo \
     "actor_rollout_ref.rollout.gpu_memory_utilization=${GPU_MEMORY_UTILIZATION}" \
     "actor_rollout_ref.rollout.max_model_len=$((MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH))" \
     "actor_rollout_ref.rollout.n=${ROLLOUT_N}" \
+    "actor_rollout_ref.rollout.temperature=${TEMPERATURE}" \
+    "actor_rollout_ref.rollout.top_p=${TOP_P}" \
+    "actor_rollout_ref.rollout.top_k=-1" \
     "actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=4" \
     "actor_rollout_ref.rollout.agent.num_workers=${TRAIN_GPU_COUNT}" \
     "actor_rollout_ref.ref.fsdp_config.param_offload=false" \
@@ -343,7 +350,7 @@ CUDA_VISIBLE_DEVICES="${TRAIN_GPU_LIST}" "${PYTHON}" -m verl.trainer.main_ppo \
     "+algorithm.fc_opd.loss_coef=1.0" \
     "+algorithm.fc_opd.loss_mode=${OBJECTIVE}" \
     "+algorithm.fc_opd.renormalize_topk=true" \
-    "+algorithm.fc_opd.include_tail=true" \
+    "+algorithm.fc_opd.include_tail=false" \
     "trainer.total_epochs=100" \
     "trainer.total_training_steps=${STEPS}" \
     "trainer.n_gpus_per_node=${TRAIN_GPU_COUNT}" \

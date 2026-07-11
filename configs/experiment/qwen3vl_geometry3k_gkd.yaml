@@ -22,14 +22,16 @@ distillation:
   divergence: forward_kl
   teacher_top_k: 32
   renormalize_top_k: true
-  include_tail: true
+  include_tail: false
   replace_policy_gradient: true
 
 training:
-  learning_rate: 2.0e-6
+  learning_rate: 1.0e-6
   steps: 10
   prompt_batch_size: 4
-  rollouts_per_prompt: 4
+  rollouts_per_prompt: 1
+  temperature: 1.0
+  top_p: 0.99
   max_prompt_length: 6144
   max_response_length: 1024
   actor_strategy: fsdp2
