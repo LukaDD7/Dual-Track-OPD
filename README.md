@@ -46,6 +46,9 @@ The intended workflow is:
 
 See [docs/hpc_workflow.md](docs/hpc_workflow.md).
 
+For the contract benchmark baseline using the reproduced Vision-OPD checkpoint,
+see [docs/project_benchmark_vision_opd.md](docs/project_benchmark_vision_opd.md).
+
 ## First Milestones
 
 1. Toy OPD loss: keep CPU tests green and validate weighted KL behavior.
@@ -55,4 +58,3 @@ See [docs/hpc_workflow.md](docs/hpc_workflow.md).
 ## Safety
 
 Do not commit secrets, `.env`, model weights, checkpoints, datasets, raw benchmark outputs, `outputs/`, `eval_runs/`, `wandb/`, `mlruns/`, or cache directories.
-
