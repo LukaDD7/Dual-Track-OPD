@@ -60,7 +60,7 @@ BASE_MODEL="${MODEL_ROOT}/Qwen3.5-4B"
 JUDGE_MODEL_PATH="${MODEL_ROOT}/Qwen3-VL-32B-Instruct"
 
 EVAL_PORT=8000
-VLLM_COMMON_ARGS="--trust-remote-code --enforce-eager --disable-custom-all-reduce"
+VLLM_COMMON_ARGS="--trust-remote-code --enforce-eager --disable-custom-all-reduce --gdn-prefill-backend triton"
 
 BENCH_ALL="vstar,zoombench,hrbench-4k,hrbench-8k,mme-realworld,mme-realworld-cn,mme-realworld-lite,mmstar,pope,pope_adv,pope_pop,pope_random,cv-bench,mmvp,visualprobe"
 
@@ -117,7 +117,8 @@ fi
 
 GPU_COUNT=$(nvidia-smi -L 2>/dev/null | wc -l)
 [ "${GPU_COUNT}" -ge 2 ] || die "Need ≥2 GPUs, found ${GPU_COUNT}"
-log "${GPU_COUNT} GPUs — GPU 0 (eval vLLM serve) + GPU 7 (judge in-process), GPUs 1-6 free"
+JUDGE_GPU=$((GPU_COUNT - 1))
+log "${GPU_COUNT} GPUs — GPU 0 (eval vLLM serve) + GPU ${JUDGE_GPU} (judge in-process)"
 
 # ---------------------------------------------------------------------------
 # Function: evaluate one model
@@ -138,7 +139,7 @@ evaluate_model() {
         ${VLLM_COMMON_ARGS} \
         --port "${EVAL_PORT}" &
     EVAL_PID=$!
-    wait_for_health "http://localhost:${EVAL_PORT}" "${model_id}" 300
+    wait_for_health "http://localhost:${EVAL_PORT}" "${model_id}" 900
 
     cd "${VOPD_ROOT}/eval"
     log "Running 15 benchmarks (judge loads 32B in-process on GPU 7)..."
@@ -148,8 +149,9 @@ evaluate_model() {
     env API_BASE="http://localhost:${EVAL_PORT}/v1/" \
         OPENAI_MODEL_ID="${model_id}" \
         MODEL_NAME="${model_name}" \
-        CUDA_VISIBLE_DEVICES=7 \
+        CUDA_VISIBLE_DEVICES=${JUDGE_GPU} \
         JUDGE_MODEL_PATH="${JUDGE_MODEL_PATH}" \
+        BENCHMARK="${BENCH_ALL}" \
         BENCHMARK="${BENCH_ALL}" \
         ${enable_thinking:+ENABLE_THINKING="${enable_thinking}"} \
         bash run_eval.sh

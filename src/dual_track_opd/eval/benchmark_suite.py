@@ -133,7 +133,6 @@ def _model_args(
             "base_url": api_base,
             "api_key": defaults.get("api_key", "EMPTY"),
             "timeout": 600,
-            "batch_size": defaults.get("batch_size", 1),
             "num_concurrent": defaults.get("workers", 8),
             "httpx_trust_env": "false",
         }
