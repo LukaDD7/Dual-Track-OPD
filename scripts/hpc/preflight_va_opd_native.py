@@ -17,6 +17,7 @@ import pandas as pd
 from PIL import Image
 
 EXPECTED_BACKEND_COMMIT = "e003163181731412595257a72ec173071efb125f"
+EXPECTED_VLLM_SOURCE_COMMIT = "4fd9d6a85c00ac0186aa9abbeff73fc2ac6c721e"
 EXPECTED_BACKEND_CHANGES = {
     "verl/experimental/agent_loop/agent_loop.py",
     "verl/trainer/distillation/losses.py",
@@ -225,9 +226,14 @@ def main() -> None:
 
     import torch
 
-    if not torch.__version__.startswith("2.10.0") or torch.version.cuda != "12.8":
-        raise RuntimeError(f"expected torch 2.10.0 CUDA 12.8, got torch={torch.__version__}, cuda={torch.version.cuda}")
-    expected_versions = {"vllm": "0.18.0", "transformers": "5.5.0", "tensordict": "0.10.0"}
+    if not torch.__version__.startswith("2.9.0") or torch.version.cuda != "12.8":
+        raise RuntimeError(f"expected torch 2.9.0 CUDA 12.8, got torch={torch.__version__}, cuda={torch.version.cuda}")
+    expected_versions = {
+        "vllm": "0.12.0+cu128",
+        "transformers": "4.57.3",
+        "tensordict": "0.10.0",
+        "flash-attn": "2.8.3",
+    }
     for package, expected in expected_versions.items():
         actual = package_version(package)
         if actual != expected:
@@ -236,6 +242,47 @@ def main() -> None:
     nvcc = shutil.which("nvcc")
     if nvcc and Path(nvcc).resolve().as_posix().startswith("/usr/") and not args.allow_system_nvcc:
         raise RuntimeError(f"system nvcc is forbidden for this pipeline: {Path(nvcc).resolve()}")
+
+    environment_manifest_path = env_prefix / "share/dual-track-opd/va_opd_environment_manifest.json"
+    if not environment_manifest_path.is_file():
+        raise FileNotFoundError(f"environment build manifest is missing: {environment_manifest_path}")
+    environment_manifest = json.loads(environment_manifest_path.read_text(encoding="utf-8"))
+    if environment_manifest.get("vllm_source_commit") != EXPECTED_VLLM_SOURCE_COMMIT:
+        raise RuntimeError(
+            "vLLM source provenance drift: expected "
+            f"{EXPECTED_VLLM_SOURCE_COMMIT}, got {environment_manifest.get('vllm_source_commit')}"
+        )
+    if environment_manifest.get("build_kind") != "cpu-source-build-cu128-h200-sm90":
+        raise RuntimeError(f"unexpected environment build kind: {environment_manifest.get('build_kind')!r}")
+    if environment_manifest.get("torch_cuda") != "12.8":
+        raise RuntimeError(f"environment manifest is not CUDA 12.8: {environment_manifest.get('torch_cuda')!r}")
+    if environment_manifest.get("torch_cuda_arch_list") != "9.0":
+        raise RuntimeError(
+            f"environment manifest was not built for H200 SM90: {environment_manifest.get('torch_cuda_arch_list')!r}"
+        )
+    if environment_manifest.get("verl_backend_commit") != EXPECTED_BACKEND_COMMIT:
+        raise RuntimeError(
+            "environment was built against the wrong verl backend: "
+            f"{environment_manifest.get('verl_backend_commit')!r}"
+        )
+    constraints_path = repo / "configs/environment/verl_va_opd_e003_cu128.constraints.txt"
+    if environment_manifest.get("constraints_sha256") != sha256_file(constraints_path):
+        raise RuntimeError("environment constraints hash differs from the checked-out project")
+    manifest_packages = mapping(environment_manifest.get("packages"))
+    for package, expected in {"torch": "2.9.0", **expected_versions}.items():
+        if manifest_packages.get(package) != expected:
+            raise RuntimeError(
+                f"environment manifest {package} drift: expected {expected}, got {manifest_packages.get(package)}"
+            )
+    vllm_wheel = Path(str(environment_manifest.get("vllm_wheel", ""))).expanduser()
+    if not vllm_wheel.is_file():
+        raise FileNotFoundError(f"source-built vLLM wheel is missing: {vllm_wheel}")
+    actual_wheel_sha256 = sha256_file(vllm_wheel)
+    if actual_wheel_sha256 != environment_manifest.get("vllm_wheel_sha256"):
+        raise RuntimeError(
+            "source-built vLLM wheel hash drift: expected "
+            f"{environment_manifest.get('vllm_wheel_sha256')}, got {actual_wheel_sha256}"
+        )
 
     student = model_summary(args.student_model.resolve())
     teacher = model_summary(args.teacher_model.resolve())
@@ -266,6 +313,9 @@ def main() -> None:
         "config_reference": str(config_reference),
         "config_reference_sha256": sha256_file(config_reference),
         "environment_prefix": str(env_prefix),
+        "environment_build_manifest": str(environment_manifest_path.resolve()),
+        "environment_build_manifest_sha256": sha256_file(environment_manifest_path),
+        "vllm_source_commit": environment_manifest["vllm_source_commit"],
         "python": sys.version,
         "packages": {
             name: package_version(name)

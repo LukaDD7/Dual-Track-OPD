@@ -5,7 +5,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 HPC_ROOT="${DTOPD_ROOT:-/inspire/hdd/global_user/mengweicheng-240108120092/lzy}"
-ENV_PREFIX="${VA_OPD_ENV_PREFIX:-${HPC_ROOT}/fc-opd-storage/envs/va-opd-verl-e003-cu128}"
+ENV_PREFIX="${VA_OPD_ENV_PREFIX:-${HPC_ROOT}/fc-opd-storage/envs/va-opd-verl-e003-cu128-v2}"
 VERL_DIR="${VERL_VA_OPD_DIR:-${HPC_ROOT}/fc-opd-storage/backends/verl-va-opd-e0031631}"
 STUDENT_MODEL="${VA_OPD_STUDENT_MODEL:-${HPC_ROOT}/models/Qwen3-VL-4B-Instruct}"
 TEACHER_MODEL="${VA_OPD_TEACHER_MODEL:-${HPC_ROOT}/models/Qwen3-VL-32B-Instruct}"

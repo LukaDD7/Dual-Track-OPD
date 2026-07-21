@@ -142,21 +142,24 @@ VA adapter 注册 `va_opd_k1`，先把每 token 的 k1 乘以固定 VA multiplie
 
 ### runtime
 
-采用仓库内 Vision-OPD 在相同 Qwen/H200/CUDA 12.8 家族上验证过的 torch/vLLM/transformers/Ray/TensorDict 兼容子集，而不是旧 verl 安装脚本里的 torch 2.8 / vLLM 0.11 组合。NumPy 没有照抄 Vision-OPD 的 1.26.4，因为所选 native verl commit 明确要求 `numpy>=2.0.0`；这里将它收敛到 2.2.6：
+不能把 Vision-OPD baseline 机器上的 `pip freeze` 当成可重建的依赖锁。该快照同时出现 vLLM 0.18.0 和 Transformers 5.5.0，但 vLLM 的发布 metadata 明确要求 Transformers `<5`；它只能说明那台机器经过增量/`--no-deps` 安装后曾运行 eval，不能证明 clean resolver 能建立相同环境。
+
+native VA-OPD 改为服从 exact verl backend 自己的版本边界。该 commit 声明 `vllm>=0.8.5,<=0.12.0`，因此选最新允许版本 0.12.0；vLLM 0.12.0 又精确要求 torch 2.9.0、torchvision 0.24.0、torchaudio 2.9.0、FlashInfer 0.5.3 和 Transformers `>=4.56,<5`。Transformers 固定为 4.57.3，与项目 teacher extra 和 Qwen3-VL 支持一致。NumPy 仍不照抄 Vision-OPD 的 1.26.4，因为 exact verl commit 要求 `numpy>=2.0.0`：
 
 - Python 3.12；
-- torch 2.10.0 + CUDA 12.8；
-- torchvision 0.25.0；
-- vLLM 0.18.0；
-- transformers 5.5.0；
+- torch 2.9.0 + CUDA 12.8；
+- torchvision 0.24.0；
+- torchaudio 2.9.0；
+- vLLM upstream 0.12.0（commit `4fd9d6a85c00ac0186aa9abbeff73fc2ac6c721e`，在 CPU 实例从源码构建，安装版本记录为 `0.12.0+cu128`）；
+- transformers 4.57.3；
 - Ray 2.53.0；
 - TensorDict 0.10.0；
-- FlashInfer 0.6.6；
+- FlashInfer 0.5.3；
 - NumPy 2.2.6；
 - PyArrow 22.0.0；
 - flash-attn 2.8.3（使用独立 conda CUDA 12.8 toolchain 构建）。
 
-这不是声称这些版本对所有机器全局最优，而是当前节点证据下变化最少、且解决旧 recipe 漂移最多的可审计组合。
+目标 driver 570 只能安全覆盖 CUDA 12.8，因此不采用可能含 CUDA 12.9/13 扩展的 vLLM 发布 wheel。setup 使用独立 conda `cuda-toolkit=12.8` 与 GCC/G++ 12，固定 H200 `TORCH_CUDA_ARCH_LIST=9.0`，构建 vLLM 和 flash-attn；禁止借用 `/usr/bin/nvcc`。这是 backend metadata、模型支持和目标 driver 三者交集中的最小可审计组合。
 
 ## 公平实验顺序
 

@@ -70,9 +70,11 @@ CPU CC 需要维护的 Git-safe readiness summary 模板位于 `docs/va_opd_serv
 ```bash
 export DTOPD_ROOT=/inspire/hdd/global_user/mengweicheng-240108120092/lzy
 export VA_OPD_PROJECT="$DTOPD_ROOT/Dual-track OPD"
-export VA_OPD_ENV_PREFIX="$DTOPD_ROOT/fc-opd-storage/envs/va-opd-verl-e003-cu128"
+export VA_OPD_ENV_PREFIX="$DTOPD_ROOT/fc-opd-storage/envs/va-opd-verl-e003-cu128-v2"
 export VERL_VA_OPD_DIR="$DTOPD_ROOT/fc-opd-storage/backends/verl-va-opd-e0031631"
 export VA_OPD_CUDA_TOOLCHAIN="$DTOPD_ROOT/fc-opd-storage/toolchains/cuda-12.8"
+export VA_OPD_VLLM_SOURCE="$DTOPD_ROOT/fc-opd-storage/backends/vllm-va-opd-v0120"
+export VA_OPD_WHEELHOUSE="$DTOPD_ROOT/fc-opd-storage/wheelhouse/va-opd-cu128-v2"
 export VA_OPD_STUDENT_MODEL="$DTOPD_ROOT/models/Qwen3-VL-4B-Instruct"
 export VA_OPD_TEACHER_MODEL="$DTOPD_ROOT/models/Qwen3-VL-32B-Instruct"
 export GEOMETRY3K_SOURCE="$DTOPD_ROOT/dataset/geometry3k/data/train-00000-of-00001.parquet"
@@ -90,6 +92,8 @@ for value in \
   "$VA_OPD_ENV_PREFIX" \
   "$VERL_VA_OPD_DIR" \
   "$VA_OPD_CUDA_TOOLCHAIN" \
+  "$VA_OPD_VLLM_SOURCE" \
+  "$VA_OPD_WHEELHOUSE" \
   "$VA_OPD_STUDENT_MODEL" \
   "$VA_OPD_TEACHER_MODEL" \
   "$GEOMETRY3K_SOURCE"; do
@@ -188,11 +192,13 @@ MAX_JOBS=16 bash scripts/hpc/setup_va_opd_native_env.sh \
 1. 创建 Python 3.12 prefix；
 2. clone/fetch exact verl commit；
 3. 应用三文件 patch，并用 reverse check 验证；
-4. 安装 constraints 中的 torch/vLLM/transformers/Ray/TensorDict；
-5. 创建独立 CUDA 12.8 compiler prefix；
-6. 用该 prefix 构建 flash-attn 2.8.3；
-7. editable-install backend 和项目；
-8. import 并检查 `va_opd_k1` 已注册。
+4. 从官方 PyTorch cu128 index 安装 torch 2.9.0 family，并立即检查 `torch.version.cuda == 12.8`；
+5. 创建/补全独立 conda CUDA 12.8 + GCC/G++ 12 compiler prefix；
+6. clone 固定 vLLM 0.12.0 source commit，在临时 checkout 中构建 H200 SM90/cu128 wheel；
+7. 把本地 vLLM wheel、exact verl requirements、Transformers 4.57.3 等作为一次 pip solve，先 `--dry-run` 再安装；
+8. 强制用 source-built wheel 覆盖任何同版本发布 wheel，并构建 flash-attn 2.8.3；
+9. editable-install backend 和项目，执行 `pip check`；
+10. 写 environment build manifest（含 vLLM commit/wheel SHA-256/toolchain），import 并检查 `va_opd_k1` 已注册。
 
 构建期间不要另开 pip/conda 修改同一 prefix。
 
@@ -204,33 +210,44 @@ MAX_JOBS=16 bash scripts/hpc/setup_va_opd_native_env.sh \
 MAX_JOBS=4 bash scripts/hpc/setup_va_opd_native_env.sh
 ```
 
-只有在确认 vLLM/模型路径根本不会调用 flash-attn、且只是为了完成 CPU preflight 时，才可临时跳过：
-
-```bash
-VA_OPD_SKIP_FLASH_ATTN_BUILD=1 bash scripts/hpc/setup_va_opd_native_env.sh
-```
-
-这个 opt-out 不能直接放行 GPU full run。GPU smoke 前必须补装并验证 flash-attn：
-
-```bash
-export CUDA_HOME="$VA_OPD_CUDA_TOOLCHAIN"
-export CUDA_PATH="$VA_OPD_CUDA_TOOLCHAIN"
-export PATH="$VA_OPD_CUDA_TOOLCHAIN/bin:$PATH"
-export LD_LIBRARY_PATH="$VA_OPD_CUDA_TOOLCHAIN/lib:$VA_OPD_CUDA_TOOLCHAIN/targets/x86_64-linux/lib:${LD_LIBRARY_PATH:-}"
-MAX_JOBS=4 "$VA_OPD_ENV_PREFIX/bin/python" -m pip install --no-build-isolation flash-attn==2.8.3
-```
+不要设置旧的 `VA_OPD_SKIP_FLASH_ATTN_BUILD`；v2 pipeline 把 flash-attn 和 build manifest 作为正式 preflight gate。若 `MAX_JOBS=4` 仍 OOM，保存日志并申请更大 CPU RAM，不要把失败的半环境交给 GPU。
 
 ### 4.3 conda CUDA 包解析失败
 
 不要切换到系统 nvcc。先记录完整 solver 输出，然后执行：
 
 ```bash
-conda search -c nvidia cuda-nvcc=12.8
-conda search -c nvidia cuda-cudart-dev=12.8
-conda search -c nvidia cuda-cccl=12.8
+conda search -c nvidia cuda-toolkit=12.8
+conda search -c conda-forge gcc_linux-64=12
+conda search -c conda-forge gxx_linux-64=12
 ```
 
 如果集群 mirror 暂时没有 exact build，优先让管理员恢复 `nvidia` channel 或把已验证的 `VA_OPD_CUDA_TOOLCHAIN` prefix 从另一 CPU 节点同步到共享存储。不要自行改为 12.9/13.0，因为 torch runtime 被锁到 12.8。
+
+### 4.4 CPU CC 必须回传的构建信息
+
+无论成功或失败，都不要只回复“装好了”或一张终端截图。把 build log 留在 Git 外，并向本机 Codex 回传以下脱敏文本：
+
+```bash
+git -C "$VA_OPD_PROJECT" rev-parse HEAD
+git -C "$VERL_VA_OPD_DIR" rev-parse HEAD
+git -C "$VA_OPD_VLLM_SOURCE" rev-parse HEAD
+"$VA_OPD_ENV_PREFIX/bin/python" -m pip check
+"$VA_OPD_ENV_PREFIX/bin/python" -m pip freeze | grep -E '^(torch|torchvision|torchaudio|vllm|transformers|flashinfer-python|flash-attn|ray|tensordict|numpy|nvidia-)'
+"$VA_OPD_CUDA_TOOLCHAIN/bin/nvcc" --version
+realpath "$VA_OPD_CUDA_TOOLCHAIN/bin/nvcc"
+"$VA_OPD_ENV_PREFIX/bin/python" -m json.tool \
+  "$VA_OPD_ENV_PREFIX/share/dual-track-opd/va_opd_environment_manifest.json"
+```
+
+失败时另外回传：失败命令上方至少 80 行和下方全部 traceback、build log 的完整路径、`df -h "$DTOPD_ROOT"`、`free -h`，以及是否为第一次运行或从中断后重跑。不要自行尝试以下“修复”：
+
+- 不要对 vLLM/verl 用 `--no-deps` 绕过 resolver（setup 最后的受控 editable install 除外）；
+- 不要把 Transformers 升到 5.x；
+- 不要把 vLLM 升到 0.18.x；
+- 不要换成 CUDA 12.9/13 wheel 或系统 `/usr` nvcc；
+- 不要复用旧 `va-opd-verl-e003-cu128` prefix；
+- 不要删除旧 prefix、wheelhouse 或构建日志；先报告，便于比较证据。
 
 ## 5. CPU 实例：构建后审计
 
@@ -240,11 +257,13 @@ import importlib.metadata as md
 import torch
 
 expected = {
-    "torch": "2.10.0",
-    "vllm": "0.18.0",
-    "transformers": "5.5.0",
+    "torch": "2.9.0",
+    "vllm": "0.12.0+cu128",
+    "transformers": "4.57.3",
     "ray": "2.53.0",
     "tensordict": "0.10.0",
+    "flashinfer-python": "0.5.3",
+    "flash-attn": "2.8.3",
 }
 for package, wanted in expected.items():
     actual = md.version(package)
@@ -253,6 +272,16 @@ for package, wanted in expected.items():
 print("torch.version.cuda=", torch.version.cuda)
 assert torch.version.cuda == "12.8"
 PY
+```
+
+再检查 source-build provenance；缺少此文件即视为环境未完成：
+
+```bash
+ENV_MANIFEST="$VA_OPD_ENV_PREFIX/share/dual-track-opd/va_opd_environment_manifest.json"
+test -s "$ENV_MANIFEST"
+"$VA_OPD_ENV_PREFIX/bin/python" -m json.tool "$ENV_MANIFEST"
+grep -F '4fd9d6a85c00ac0186aa9abbeff73fc2ac6c721e' "$ENV_MANIFEST"
+grep -F 'cpu-source-build-cu128-h200-sm90' "$ENV_MANIFEST"
 ```
 
 backend 审计：
@@ -349,7 +378,9 @@ sha256sum "$GEOMETRY3K_VA_OPD_DATA_DIR/train.parquet" "$GEOMETRY3K_VA_OPD_DATA_D
 - train/val paths与 hashes；
 - CPU preflight run directory；
 - environment build log；
-- 是否跳过过 flash-attn build。
+- vLLM source commit、wheel SHA-256 与 environment manifest 路径；
+- environment build log 中最后一次 `pip check` 和 `native VA-OPD environment: PASS`；
+- flash-attn 已安装且未跳过。
 
 GPU 操作者收到后先执行只读检查，不立即跑训练。
 
@@ -390,7 +421,7 @@ import transformers
 print("torch", torch.__version__, "runtime", torch.version.cuda)
 print("visible", torch.cuda.device_count())
 print("gpu0", torch.cuda.get_device_name(0))
-assert torch.__version__.startswith("2.10.0")
+assert torch.__version__.startswith("2.9.0")
 assert torch.version.cuda == "12.8"
 assert torch.cuda.is_available()
 PY

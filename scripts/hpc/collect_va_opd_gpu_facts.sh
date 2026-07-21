@@ -5,8 +5,9 @@ set -u
 
 HPC_ROOT="${DTOPD_ROOT:-/inspire/hdd/global_user/mengweicheng-240108120092/lzy}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-ENV_PREFIX="${VA_OPD_ENV_PREFIX:-${HPC_ROOT}/fc-opd-storage/envs/va-opd-verl-e003-cu128}"
+ENV_PREFIX="${VA_OPD_ENV_PREFIX:-${HPC_ROOT}/fc-opd-storage/envs/va-opd-verl-e003-cu128-v2}"
 VERL_DIR="${VERL_VA_OPD_DIR:-${HPC_ROOT}/fc-opd-storage/backends/verl-va-opd-e0031631}"
+VLLM_SOURCE="${VA_OPD_VLLM_SOURCE:-${HPC_ROOT}/fc-opd-storage/backends/vllm-va-opd-v0120}"
 STUDENT_MODEL="${VA_OPD_STUDENT_MODEL:-${HPC_ROOT}/models/Qwen3-VL-4B-Instruct}"
 TEACHER_MODEL="${VA_OPD_TEACHER_MODEL:-${HPC_ROOT}/models/Qwen3-VL-32B-Instruct}"
 FACT_ROOT="${VA_OPD_FACT_ROOT:-${HPC_ROOT}/fc-opd-storage/diagnostics/va_opd_gpu_facts}"
@@ -41,6 +42,7 @@ printf 'repo_root=%s\n' "${REPO_ROOT}"
 printf 'hpc_root=%s\n' "${HPC_ROOT}"
 printf 'env_prefix=%s\n' "${ENV_PREFIX}"
 printf 'verl_dir=%s\n' "${VERL_DIR}"
+printf 'vllm_source=%s\n' "${VLLM_SOURCE}"
 printf 'student_model=%s\n' "${STUDENT_MODEL}"
 printf 'teacher_model=%s\n' "${TEACHER_MODEL}"
 
@@ -77,7 +79,9 @@ for path in \
     "${REPO_ROOT}" \
     "${ENV_PREFIX}/bin/python" \
     "${ENV_PREFIX}/bin/torchrun" \
+    "${ENV_PREFIX}/share/dual-track-opd/va_opd_environment_manifest.json" \
     "${VERL_DIR}/.git" \
+    "${VLLM_SOURCE}/.git" \
     "${STUDENT_MODEL}/config.json" \
     "${TEACHER_MODEL}/config.json"; do
     if [[ -r "${path}" ]]; then
@@ -87,11 +91,18 @@ for path in \
     fi
 done
 
+if [[ -r "${ENV_PREFIX}/share/dual-track-opd/va_opd_environment_manifest.json" ]]; then
+    section "environment-build-provenance"
+    sed -n '1,240p' "${ENV_PREFIX}/share/dual-track-opd/va_opd_environment_manifest.json"
+fi
+
 section "git-identities"
 git -C "${REPO_ROOT}" rev-parse HEAD 2>/dev/null || true
 git -C "${REPO_ROOT}" status --short --ignore-submodules=all 2>/dev/null || true
 git -C "${VERL_DIR}" rev-parse HEAD 2>/dev/null || true
 git -C "${VERL_DIR}" status --short --untracked-files=no 2>/dev/null || true
+git -C "${VLLM_SOURCE}" rev-parse HEAD 2>/dev/null || true
+git -C "${VLLM_SOURCE}" status --short --untracked-files=no 2>/dev/null || true
 
 if [[ -x "${ENV_PREFIX}/bin/python" ]]; then
     section "python-runtime"

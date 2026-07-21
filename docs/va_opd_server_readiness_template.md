@@ -2,12 +2,30 @@
 
 This is the small, Git-safe summary that the CPU-instance Claude Code should fill after the human runs `scripts/hpc/collect_va_opd_gpu_facts.sh` on a GPU allocation. Keep the raw `gpu_facts.txt` outside Git. Remove hostnames, UUIDs, usernames, scheduler account names, and process command lines from any committed summary.
 
+## Facts already reported on 2026-07-21
+
+Do not re-label these as current without a fresh allocation report:
+
+- node inventory observed 8× H200, about 141 GB each;
+- driver `570.124.06`, reported CUDA capability 12.8;
+- topology was NV18 full mesh;
+- physical GPUs 0–3 were idle at collection time;
+- GPUs 4–7 had a user-owned keepalive PID at collection time;
+- shared storage reported about 240 GB free;
+- `NVIDIA_VISIBLE_DEVICES` exposed eight UUIDs.
+
+These facts justify a cu128/SM90 build, but they do **not** prove that the next scheduler allocation has six free GPUs or that a compiled vLLM kernel runs. Refresh PID, memory, topology and mount visibility before every GPU gate.
+
 ## Record identity
 
 - Date/time:
 - Project commit:
 - Backend commit:
 - CPU environment build log:
+- Environment prefix (must end in `cu128-v2`):
+- Environment build-manifest SHA-256:
+- vLLM source commit (expected `4fd9d6a85c00ac0186aa9abbeff73fc2ac6c721e`):
+- vLLM wheel SHA-256:
 - Raw GPU facts path outside Git:
 - Prepared by:
 
@@ -52,6 +70,8 @@ This is the small, Git-safe summary that the CPU-instance Claude Code should fil
 - Approved conda CUDA 12.8 toolchain path:
 - System nvcc excluded from builds: yes/no
 - cu129/cu130 contamination found: yes/no
+- Build kind (expected `cpu-source-build-cu128-h200-sm90`):
+- Real CUDA kernel/model smoke completed: yes/no (an import-only test is insufficient)
 
 ## Required gates
 

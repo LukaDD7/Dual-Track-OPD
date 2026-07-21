@@ -1,11 +1,16 @@
 # Reproducible runtime for verl e003163181731412595257a72ec173071efb125f.
 # Linux x86_64, Python 3.12, NVIDIA driver compatible with CUDA 12.8.
-torch==2.10.0
-torchvision==0.25.0
-vllm==0.18.0
-transformers==5.5.0
+# vLLM 0.12.0 is the newest release inside this verl commit's declared
+# vllm>=0.8.5,<=0.12.0 range. Its published metadata fixes the torch family
+# below and requires transformers>=4.56,<5.
+torch==2.9.0
+torchvision==0.24.0
+torchaudio==2.9.0
+vllm==0.12.0
+transformers==4.57.3
 tensordict==0.10.0
-flashinfer-python==0.6.6
+flashinfer-python==0.5.3
+flash-attn==2.8.3
 numpy==2.2.6
 pyarrow==22.0.0
 pandas==2.3.3
