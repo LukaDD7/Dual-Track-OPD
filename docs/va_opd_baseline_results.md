@@ -144,21 +144,20 @@ This allowed seamless recovery: after the HPC kill, the retry run detected 190 c
 | pope_random | 3,000 | **91.5%** | 90.5% | +1.0 | Object hallucination (random) |
 | cv-bench | 2,638 | 86.2% | **86.8%** | −0.6 | Computer vision benchmark |
 | mmvp | 300 | 76.3% | **76.7%** | −0.4 | Multi-modal visual patterns |
-| visualprobe | 515 | **53.0%** | 32.8% | +20.2 | Visual probing (hardest) |
+| visualprobe | 515 | **53.0%** | 35.2% | +17.8 | Visual probing (hardest) |
 
 ### visualprobe Breakdown (Qwen3.5-4B)
 
 | Difficulty | Samples | Accuracy |
 |------------|:------:|:--------:|
 | Easy | 141 | 45.39% |
-| Medium | 268 | 33.21% |
-| Hard | 106 | 15.09% |
-| **Overall (micro-avg)** | **515** | **32.8%** |
+| Medium | 268 | 33.96% |
+| Hard | 106 | 24.53% |
+| **Overall (micro-avg)** | **515** | **35.2%** |
 
-> **Note**: `cal_acc.py` reports macro-average = (45.39 + 33.21 + 15.09) / 3 = 31.23%.
-> The micro-average (169/515 = 32.8%) is used here for consistency with the main results table.
-> Includes 33 API_ERROR (Connection error) samples from an initial HPC preemption — these
-> are all counted as incorrect. See Issue 16–17 for details.
+> **Note**: `cal_acc.py` reports macro-average = (45.39 + 33.96 + 24.53) / 3 = 34.62%.
+> The micro-average (181/515 = 35.2%) is used here for consistency with the main results table.
+> 33 API_ERROR samples from the initial run were successfully retried (see Issue 16–17).
 
 ### visualprobe Breakdown (Vision-OPD-4B)
 
@@ -180,7 +179,7 @@ Vision-OPD-4B shows **substantial gains** on benchmarks requiring fine-grained v
 
 | Benchmark | Gain | Interpretation |
 |-----------|:----:|----------------|
-| visualprobe | **+20.2pp** | Largest gain — pure visual probing of low-level features |
+| visualprobe | **+17.8pp** | Largest gain — pure visual probing of low-level features |
 | mme-realworld-lite | **+15.8pp** | Real-world visual understanding with fewer distractors |
 | zoombench | **+11.1pp** | Zoom-in reasoning about image regions |
 | mme-realworld | **+10.2pp** | Broad real-world visual QA (largest benchmark) |
@@ -210,7 +209,7 @@ All four POPE benchmarks show near-identical performance (±1pp). This is expect
 
 ### visualprobe: The Hardest Benchmark
 
-visualprobe is clearly the most difficult benchmark for both models (53% vs 33%). It tests pure visual understanding of low-level image features (probing questions about specific image regions). The 20pp gap here is the strongest evidence that Vision-OPD training specifically improves visual perception — the base model essentially guesses (33%, close to random for a multi-choice task) while the trained model achieves moderate competence (53%).
+visualprobe is clearly the most difficult benchmark for both models (53% vs 35%). It tests pure visual understanding of low-level image features (probing questions about specific image regions). The 18pp gap here is the strongest evidence that Vision-OPD training specifically improves visual perception — the base model performs poorly (35%) while the trained model achieves moderate competence (53%).
 
 ## Key Scripts
 
