@@ -153,7 +153,12 @@ This allowed seamless recovery: after the HPC kill, the retry run detected 190 c
 | Easy | 141 | 45.39% |
 | Medium | 268 | 33.21% |
 | Hard | 106 | 15.09% |
-| **Overall** | **515** | **31.23%** |
+| **Overall (micro-avg)** | **515** | **32.8%** |
+
+> **Note**: `cal_acc.py` reports macro-average = (45.39 + 33.21 + 15.09) / 3 = 31.23%.
+> The micro-average (169/515 = 32.8%) is used here for consistency with the main results table.
+> Includes 33 API_ERROR (Connection error) samples from an initial HPC preemption — these
+> are all counted as incorrect. See Issue 16–17 for details.
 
 ### visualprobe Breakdown (Vision-OPD-4B)
 
@@ -162,7 +167,10 @@ This allowed seamless recovery: after the HPC kill, the retry run detected 190 c
 | Easy | 141 | 68.8% |
 | Medium | 268 | 47.0% |
 | Hard | 106 | 47.2% |
-| **Overall** | **515** | **53.0%** |
+| **Overall (micro-avg)** | **515** | **53.0%** |
+
+> **Note**: `cal_acc.py` reports macro-average = (68.8 + 47.0 + 47.2) / 3 = 54.3%.
+> The micro-average (273/515 = 53.0%) is used here for consistency with the main results table.
 
 ## Analysis
 
@@ -216,16 +224,22 @@ visualprobe is clearly the most difficult benchmark for both models (53% vs 33%)
 
 ## Output Directories
 
+Raw results are committed to the main repo under `baselines/vision_opd/data/` (373 MB total):
+
 ```
-third_party/Vision-OPD/eval/
+baselines/vision_opd/data/
 ├── model_answer/          # Raw model outputs (JSONL, one per benchmark/model)
 │   ├── vstar/{Vision-OPD-4B,Qwen3.5-4B}_seed42_answer.jsonl
 │   ├── zoombench/...
-│   └── ... (15 benchmarks × 2 models = 30 files)
+│   └── ... (15 benchmarks × 2 models = 30 files, 146 MB)
 ├── judge/                 # Judge results (JSON arrays with "judge" field)
-│   └── ... (same structure, 30 files)
-└── *.json                 # Prepared benchmark data
+│   └── ... (same structure, 30 files, 227 MB)
+└── (benchmark data JSON files remain in third_party/Vision-OPD/eval/)
 ```
+
+The eval pipeline writes into `third_party/Vision-OPD/eval/model_answer/` and
+`third_party/Vision-OPD/eval/judge/` at runtime; these are synced into the repo
+after each full run.
 
 ## Run Timeline
 
