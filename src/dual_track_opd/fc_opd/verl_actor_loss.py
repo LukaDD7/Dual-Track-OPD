@@ -128,6 +128,8 @@ def _compute_va_opd_actor_loss(
 
     rollout_weights = batch.get("fc_rollout_weights", None)
     prompt_ids = _prompt_ids(batch) if rollout_weights is None else None
+    expected_rollouts_raw = fc_config.get("expected_rollouts", None)
+    expected_rollouts = None if expected_rollouts_raw is None else int(expected_rollouts_raw)
     if rollout_weights is None:
         va_pos = (sampled_log_probs[:, full_idx] - sampled_log_probs[:, degraded_idx]).clamp_min(0.0)
         teacher_mask = _teacher_pair_valid_mask(teacher_full, teacher_degraded, response_mask)
@@ -135,6 +137,7 @@ def _compute_va_opd_actor_loss(
             va_pos,
             response_mask=response_mask.bool() & teacher_mask,
             prompt_ids=prompt_ids,
+            expected_rollouts=expected_rollouts,
             tau=float(fc_config.get("tau_rollout", 1.0)),
         )
 
@@ -146,6 +149,7 @@ def _compute_va_opd_actor_loss(
         response_mask=response_mask,
         prompt_ids=prompt_ids,
         rollout_weights=rollout_weights,
+        expected_rollouts=expected_rollouts,
         top_q=float(fc_config.get("va_top_q", 0.20)),
         tau_rollout=float(fc_config.get("tau_rollout", 1.0)),
         lambda_high=float(fc_config.get("va_lambda", 0.50)),

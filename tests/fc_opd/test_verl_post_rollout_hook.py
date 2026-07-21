@@ -297,3 +297,38 @@ def test_post_rollout_hook_plain_gkd_rejects_multiple_conditions():
             },
             global_steps=1,
         )
+
+
+def test_va_hook_groups_siblings_by_extra_info_sample_uid():
+    tokenizer = ByteTokenizer()
+    valid_ids = tuple(tokenizer.encode("Answer: B"))
+    responses = torch.tensor([valid_ids] * 4, dtype=torch.long)
+    response_mask = torch.ones_like(responses, dtype=torch.bool)
+    batch = SimpleNamespace(
+        batch={"responses": responses, "response_mask": response_mask},
+        non_tensor_batch={
+            "question": ["Find the angle."] * 4,
+            "condition_inputs": [_condition_inputs().to_dict()] * 4,
+            "extra_info": [{"sample_uid": "geometry-1"}] * 4,
+        },
+    )
+
+    fc_opd_post_rollout_hook(
+        batch=batch,
+        tokenizer=tokenizer,
+        processor=None,
+        config={
+            "algorithm": {
+                "fc_opd": {
+                    "teacher_scorer": RecordingTeacher(),
+                    "conditions": ["full", "degraded"],
+                    "loss_mode": "va_opd",
+                    "expected_rollouts": 4,
+                }
+            }
+        },
+        global_steps=3,
+    )
+
+    assert batch.non_tensor_batch["fc_prompt_ids"].tolist() == ["geometry-1"] * 4
+    assert batch.batch["fc_rollout_weights"].sum().item() == pytest.approx(1.0)

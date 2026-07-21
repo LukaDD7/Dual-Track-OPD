@@ -132,10 +132,12 @@ def fc_opd_post_rollout_hook(
                 & verl_tensors.teacher_valid_mask[:, degraded_idx].to(responses.device, dtype=torch.bool)
             )
         )
+        expected_rollouts_raw = _config_get(fc_config, "expected_rollouts", None)
         batch.batch["fc_rollout_weights"] = compute_rollout_va_weights(
             va_pos,
             response_mask=response_mask & teacher_valid,
             prompt_ids=[sample.sample_uid for sample in samples],
+            expected_rollouts=(None if expected_rollouts_raw is None else int(expected_rollouts_raw)),
         ).to(responses.device)
 
     # ── Formal pipeline verification log (VA-OPD reproducibility) ───
@@ -311,9 +313,9 @@ def _build_teacher_scorer(
 
     def _score(sample: OnlineFCOPDSample, conds: Sequence[Condition]):
         for idx, s in enumerate(samples):
-            if s.sample_uid == sample.sample_uid:
+            if s is sample:
                 return {Condition(c): lookup[idx][Condition(c)] for c in conds}
-        raise ValueError(f"sample {sample.sample_uid} not found in pre-scored batch")
+        raise ValueError(f"sample object {sample.sample_uid} not found in pre-scored batch")
 
     return _score
 
@@ -428,9 +430,17 @@ def _sample_from_batch_row(
 
     condition_inputs = _condition_inputs_from_row(batch, row_index)
     rollout_text = _decode_tokens(tokenizer, response_token_ids, skip_special_tokens=False)
-    sample_uid = _row_text(batch, row_index, ("sample_uid", "uid", "id")) or f"verl:{global_steps}:{row_index}"
     # verl drops non-standard columns; read verl-hidden fields from extra_info
     extra = _row_value(batch, row_index, ("extra_info",)) or {}
+    # ``uid`` is generated once per prompt by verl and repeated for all K
+    # sibling rollouts.  Dataset sample_uid is the next-best stable grouping
+    # key.  Row index is only a last-resort diagnostic fallback.
+    sample_uid = (
+        _row_text(batch, row_index, ("uid",))
+        or (str(extra.get("sample_uid", "")) if isinstance(extra, Mapping) else "")
+        or _row_text(batch, row_index, ("sample_uid", "id"))
+        or f"verl:{global_steps}:{row_index}"
+    )
     choices = tuple(str(item) for item in (
         extra.get("choices") or _row_value(batch, row_index, ("choices", "options")) or ()
     ))

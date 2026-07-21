@@ -42,6 +42,17 @@ def test_rollout_weights_sum_to_one_within_each_prompt_group():
     assert weights[2].item() > weights[3].item()
 
 
+def test_rollout_weights_use_population_std_from_paper_example():
+    va = torch.tensor([[0.045], [0.030], [0.020], [0.010]])
+    weights = compute_rollout_va_weights(
+        va,
+        prompt_ids=["same"] * 4,
+        expected_rollouts=4,
+    )
+
+    assert weights.tolist() == pytest.approx([0.656, 0.206, 0.095, 0.044], abs=1.5e-3)
+
+
 def test_va_uses_exact_sampled_log_probs_when_available():
     sampled = torch.tensor([[1, 2]])
     full = _teacher(sampled, torch.tensor([[0.8, 0.7]]))

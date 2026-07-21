@@ -1,0 +1,72 @@
+experiment:
+  name: qwen3vl_geometry3k_va_opd_native
+  objective: va_opd
+  paper: arxiv:2605.21924
+  backend_commit: e003163181731412595257a72ec173071efb125f
+  backend_patch: patches/verl/va_opd_native_e0031631.patch
+
+models:
+  student: ${DTOPD_ROOT}/models/Qwen3-VL-4B-Instruct
+  teacher: ${DTOPD_ROOT}/models/Qwen3-VL-32B-Instruct
+  shared_tokenizer_required: true
+
+data:
+  source: ${DTOPD_ROOT}/dataset/geometry3k/data/train-00000-of-00001.parquet
+  prepared_root: ${DTOPD_ROOT}/fc-opd-storage/outputs/fc_opd/geometry3k_gkd
+  validation_size: 200
+  degradation: lowres_10pct_nearest
+  require_same_image_dimensions: true
+
+distillation:
+  backend: verl_native_opd
+  divergence: reverse_kl_k1_policy_gradient
+  conditions: [full, degraded]
+  kl_target_condition: full
+  use_task_rewards: false
+  loss_mode: va_opd_k1
+  loss_aggregation: seq-mean-token-sum
+  loss_clamp: 10.0
+
+visual_advantage:
+  rectification: positive
+  rollouts_per_prompt: 4
+  rollout_standard_deviation: population
+  rollout_temperature: 1.0
+  high_token_fraction: 0.20
+  high_group_weight: 0.50
+
+training:
+  learning_rate: 1.0e-6
+  prompt_batch_size: 16
+  ppo_epochs: 1
+  epochs: 5
+  temperature: 1.0
+  top_p: 0.99
+  max_prompt_length: 6144
+  # Historical 1024-token runs clipped roughly two thirds of native Qwen3-VL
+  # reasoning responses.  Keep the native boxed-answer prompt and allow 2048.
+  max_response_length: 2048
+  actor_strategy: fsdp2
+  rollout_backend: vllm
+  actor_cpu_offload: false
+  optimizer_cpu_offload: false
+  gradient_checkpointing: true
+  calculate_entropy: true
+
+hardware:
+  minimum_visible_gpus: 6
+  actor_gpus: 4
+  teacher_gpus: 2
+  teacher_tensor_parallel_size: 2
+  expected_gpu: H200_141GB
+  cuda_runtime: "12.8"
+  system_nvcc_allowed: false
+
+gates:
+  exact_sibling_group_size: 4
+  teacher_response_id_match: true
+  degraded_image_dimension_match: true
+  group_weight_sum_max_error: 1.0e-5
+  finite_teacher_log_probs: true
+  finite_gradient_required: true
+  completed_update_required: true

@@ -1,4 +1,9 @@
-# Qwen3-VL Geometry3K Online GKD
+# Qwen3-VL Geometry3K Online GKD（Legacy / Ablation）
+
+> This launcher is retained for historical reproduction and forward-GKD
+> ablation. It is not the canonical VA-OPD implementation. For the recovered
+> mainline, read `va_opd_root_cause_and_recovery_20260719.md` and execute
+> `va_opd_hpc_runbook.md`.
 
 This is the Route-1 baseline before VA-OPD reproduction. It is intentionally
 separate from the text-only Megatron GKD environment gate and from offline
@@ -71,3 +76,7 @@ The launcher also exposes `--objective va_opd` and `--objective va_opd_jsd`.
 Those modes use full/degraded teacher conditions and pure VA-weighted
 distillation on the same online rollouts. They should be enabled only after the
 vanilla GKD baseline passes and its manifest/logs are preserved.
+
+Those switches belong to the older project HTTP-teacher path. New experiments
+must use `scripts/hpc/run_va_opd_native.sh`: native sampled-token reverse KL is
+the main objective, and JSD is an explicitly named stability ablation only.

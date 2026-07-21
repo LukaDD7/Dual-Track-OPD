@@ -73,3 +73,42 @@ alignment smoke.
 Removal path: revert the two patches and remove `algorithm.fc_opd.*` from the
 verl config. Project-side modules under `src/dual_track_opd/fc_opd/` remain
 valid for diagnostics and non-verl smokes.
+
+## Native VA-OPD Patch
+
+Upstream target:
+
+- verl commit `e003163181731412595257a72ec173071efb125f`
+- native async VLM teacher path introduced upstream after the pinned v0.7.1
+  submodule
+
+Patch:
+
+- `va_opd_native_e0031631.patch`
+  - transports a second, degraded-image sampled-token teacher score beside the
+    native full-image score;
+  - constructs the degraded multimodal payload through project-owned code;
+  - calls project-owned VA weighting before batch balancing/microbatching;
+  - registers project-owned `va_opd_k1` in the native distillation registry;
+  - changes exactly three backend files and contains no VA equation logic.
+
+The full-image native teacher score remains the reverse-KL target. The second
+pass only routes visual advantage. Both passes force-score the exact student
+sequence; project code rejects any response-token ID drift.
+
+Do not apply this overlay to `third_party/verl` at v0.7.1. Prepare a separate
+checkout at the exact commit:
+
+```bash
+export VERL_VA_OPD_DIR=/path/outside/git/verl-va-opd-e0031631
+bash scripts/setup/prepare_va_opd_native_verl.sh
+```
+
+The preparation script verifies that a clean checkout accepts the patch, or
+that an already-patched checkout accepts its exact reverse. The native
+preflight additionally checks the SHA-256 of all three patched backend files.
+
+Removal path: use a clean checkout of the upstream commit and omit the
+top-level `va_opd.*` Hydra keys. When upstream supports two-condition scoring
+and grouped token weights natively, delete the overlay while retaining the
+framework-neutral objective tests in `tests/va_opd/`.

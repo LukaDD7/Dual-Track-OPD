@@ -46,6 +46,12 @@ The intended workflow is:
 
 See [docs/hpc_workflow.md](docs/hpc_workflow.md).
 
+For the recovered VA-OPD mainline, see the
+[root-cause report](docs/va_opd_root_cause_and_recovery_20260719.md) and the
+[CPU/GPU runbook](docs/va_opd_hpc_runbook.md). The older Geometry3K GKD
+launcher is retained as a legacy forward-GKD ablation, not the canonical
+VA-OPD path.
+
 For the contract benchmark baseline using the reproduced Vision-OPD checkpoint,
 see [docs/project_benchmark_vision_opd.md](docs/project_benchmark_vision_opd.md).
 

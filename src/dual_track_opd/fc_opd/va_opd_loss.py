@@ -27,6 +27,7 @@ from .verl_sparse_kd import (
     compute_verl_sparse_jsd,
     compute_verl_sparse_reverse_kl,
 )
+from dual_track_opd.va_opd.objective import compute_rollout_weights as compute_paper_rollout_weights
 
 
 # ── VA-OPD defaults (from paper) ─────────────────────────────────────────
@@ -70,6 +71,7 @@ def compute_rollout_va_weights(
     *,
     response_mask: torch.Tensor | None = None,
     prompt_ids: Sequence[int | str] | None = None,
+    expected_rollouts: int | None = None,
     tau: float = VA_TAU,
 ) -> torch.Tensor:
     """Compute sibling-rollout VA softmax weights that sum to 1 (§3.2).
@@ -84,36 +86,16 @@ def compute_rollout_va_weights(
     mask = response_mask if response_mask is not None else torch.ones(
         va_pos.shape[:2], dtype=torch.bool, device=va_pos.device
     )
-
-    # ā^(k) = mean over ALL valid tokens (not top-q)
-    summaries = torch.tensor(
-        [va_pos[i, mask[i]].float().mean().item() if mask[i].any() else 0.0
-         for i in range(va_pos.shape[0])],
-        dtype=torch.float32, device=va_pos.device,
+    stable_ids: Sequence[int | str] = (
+        list(prompt_ids) if prompt_ids is not None else ["__all__"] * va_pos.shape[0]
     )
-
-    groups = _prompt_groups(prompt_ids, va_pos.shape[0])
-    weights = torch.ones_like(summaries)
-    eps = 1e-8
-    for _, indices in groups.items():
-        idx = torch.tensor(indices, dtype=torch.long, device=va_pos.device)
-        group_scores = summaries[idx]  # [K]
-        K = float(len(indices))
-
-        if K <= 1:
-            # Solo rollout: weight = 1.0
-            weights[idx] = torch.ones_like(group_scores)
-        else:
-            # ẑ^(k) = (ā - μ) / (σ + ε)  — z-score within group
-            mu = group_scores.mean()
-            sigma = group_scores.std()
-            if sigma < eps:
-                # All rollouts have nearly identical VA → uniform weights 1/K
-                weights[idx] = torch.full_like(group_scores, 1.0 / K)
-            else:
-                z_scores = (group_scores - mu) / sigma
-                # w^(k) = softmax(ẑ / τ)  — sums to 1
-                weights[idx] = torch.softmax(z_scores / tau, dim=0)
+    weights, _, _ = compute_paper_rollout_weights(
+        va_pos,
+        response_mask=mask,
+        prompt_ids=stable_ids,
+        expected_rollouts=expected_rollouts,
+        tau=tau,
+    )
     return weights
 
 
@@ -154,6 +136,7 @@ def compute_va_opd_loss(
     lambda_high: float = VA_LAMBDA,
     min_high_tokens: int = 1,
     rollout_weights: torch.Tensor | None = None,
+    expected_rollouts: int | None = None,
     renormalize_topk: bool = True,
     include_tail: bool = True,
     loss_type: str = "reverse",                      # "reverse" | "jsd"
@@ -229,7 +212,11 @@ def compute_va_opd_loss(
     # ── 3. Rollout weights: ā → ẑ → w = softmax(ẑ/τ) §3.2 ───────────────
     if rollout_weights is None:
         rollout_weights = compute_rollout_va_weights(
-            va_pos, response_mask=training_mask, prompt_ids=prompt_ids, tau=tau_rollout,
+            va_pos,
+            response_mask=training_mask,
+            prompt_ids=prompt_ids,
+            expected_rollouts=expected_rollouts,
+            tau=tau_rollout,
         )  # [B]
     else:
         rollout_weights = rollout_weights.to(device=student_logits.device, dtype=torch.float32)
@@ -270,10 +257,15 @@ def compute_va_opd_loss(
     loss = numerator
     token_mean = token_sum / token_count.clamp_min(eps)
 
+    weight_groups = _prompt_groups(prompt_ids, B)
+    group_weight_sums = torch.stack(
+        [rollout_weights[torch.as_tensor(rows, device=rollout_weights.device)].sum() for rows in weight_groups.values()]
+    )
     metrics = {
         "va_opd/loss": loss.detach(),
         "va_opd/token_mean_loss": token_mean.detach(),
         "va_opd/rollout_weight_sum": rollout_weights.sum().detach().item(),
+        "va_opd/group_weight_sum_max_error": (group_weight_sums - 1.0).abs().max().detach(),
         "va/mean": _masked_mean(va_pos, training_mask).detach(),
         "va/sparsity": ((va_pos <= 0) & training_mask).float().sum() /
                        training_mask.float().sum().clamp_min(1.0),

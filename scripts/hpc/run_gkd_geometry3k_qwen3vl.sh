@@ -29,6 +29,7 @@ TRAIN_GPU_LIST="1,2,3,4"
 STEPS=10
 TRAIN_BATCH_SIZE=4
 ROLLOUT_N=1
+ROLLOUT_N_EXPLICIT=false
 TOP_K=256
 MAX_PROMPT_LENGTH=6144
 MAX_RESPONSE_LENGTH=1024
@@ -85,7 +86,7 @@ while [[ $# -gt 0 ]]; do
         --train-data) TRAIN_DATA="${2:?missing train data}"; PREPARE_DATA=false; shift 2 ;;
         --val-data) VAL_DATA="${2:?missing val data}"; PREPARE_DATA=false; shift 2 ;;
         --batch-size) TRAIN_BATCH_SIZE="${2:?missing batch size}"; shift 2 ;;
-        --rollout-n) ROLLOUT_N="${2:?missing rollout n}"; shift 2 ;;
+        --rollout-n) ROLLOUT_N="${2:?missing rollout n}"; ROLLOUT_N_EXPLICIT=true; shift 2 ;;
         --top-k) TOP_K="${2:?missing top-k}"; shift 2 ;;
         --save-freq) SAVE_FREQ="${2:?missing save frequency}"; shift 2 ;;
         --name) NAME="_${2:?missing name}"; shift 2 ;;
@@ -102,7 +103,9 @@ done
 
 case "${OBJECTIVE}" in
     gkd) CONDITIONS="[full]" ;;
-    va_opd|va_opd_jsd) CONDITIONS="[full,degraded]" ;;
+    va_opd|va_opd_jsd) CONDITIONS="[full,degraded]"
+        if ! ${ROLLOUT_N_EXPLICIT}; then ROLLOUT_N=4; fi
+        ;;
     *) echo "FATAL: unsupported objective ${OBJECTIVE}" >&2; exit 2 ;;
 esac
 
@@ -362,6 +365,7 @@ CUDA_VISIBLE_DEVICES="${TRAIN_GPU_LIST}" "${PYTHON}" -m verl.trainer.main_ppo \
     "+algorithm.fc_opd.conditions=${CONDITIONS}" \
     "+algorithm.fc_opd.loss_coef=1.0" \
     "+algorithm.fc_opd.loss_mode=${OBJECTIVE}" \
+    "+algorithm.fc_opd.expected_rollouts=${ROLLOUT_N}" \
     "+algorithm.fc_opd.renormalize_topk=true" \
     "+algorithm.fc_opd.include_tail=false" \
     "trainer.total_epochs=100" \

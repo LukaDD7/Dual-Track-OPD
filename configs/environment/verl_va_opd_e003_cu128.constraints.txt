@@ -1,0 +1,15 @@
+# Reproducible runtime for verl e003163181731412595257a72ec173071efb125f.
+# Linux x86_64, Python 3.12, NVIDIA driver compatible with CUDA 12.8.
+torch==2.10.0
+torchvision==0.25.0
+vllm==0.18.0
+transformers==5.5.0
+tensordict==0.10.0
+flashinfer-python==0.6.6
+numpy==2.2.6
+pyarrow==22.0.0
+pandas==2.3.3
+ray==2.53.0
+datasets==4.4.2
+accelerate==1.12.0
+peft==0.18.0

@@ -138,6 +138,8 @@ def main() -> None:
         raise ValueError("teacher GPU must be disjoint from training GPUs")
     if args.steps < 1 or args.train_batch_size < 1 or args.rollout_n < 1 or args.top_k < 1:
         raise ValueError("steps, train batch size, rollout n, and top-k must be positive")
+    if args.objective in {"va_opd", "va_opd_jsd"} and args.rollout_n != 4:
+        raise ValueError("paper-faithful VA-OPD requires exactly K=4 rollouts per prompt")
     if args.max_prompt_length < 1 or args.max_response_length < 1 or args.save_freq < 1:
         raise ValueError("sequence lengths and save frequency must be positive")
     if not 0.0 < args.gpu_memory_utilization < 1.0 or args.learning_rate <= 0:

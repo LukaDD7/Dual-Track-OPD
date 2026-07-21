@@ -1,0 +1,121 @@
+diff --git a/verl/experimental/agent_loop/agent_loop.py b/verl/experimental/agent_loop/agent_loop.py
+index 1bd98610..13d1ab64 100644
+--- a/verl/experimental/agent_loop/agent_loop.py
++++ b/verl/experimental/agent_loop/agent_loop.py
+@@ -170,6 +170,10 @@ class _InternalAgentLoopOutput(AgentLoopOutput):
+     """Padded log probabilities from teacher model for prompt/response tokens."""
+     teacher_ids: Optional[torch.Tensor] = None
+     """Padded token ids corresponding to the teacher log probabilities."""
++    teacher_degraded_logprobs: Optional[torch.Tensor] = None
++    """Padded sampled-token log probabilities from the degraded-image teacher pass."""
++    teacher_degraded_ids: Optional[torch.Tensor] = None
++    """Padded token ids corresponding to the degraded-image teacher pass."""
+     routed_experts: Optional[torch.Tensor] = None
+     """Padded routed experts for the total tokens."""
+     multi_modal_inputs: Optional[dict[str, torch.Tensor]] = None
+@@ -843,6 +847,23 @@ class AgentLoopWorker:
+                 pad_token_id=self.tokenizer.pad_token_id,
+             )
+-
++
++        teacher_degraded_ids, teacher_degraded_logprobs = (
++            output.extra_fields.pop("teacher_degraded_ids", None),
++            output.extra_fields.pop("teacher_degraded_logprobs", None),
++        )
++        if teacher_degraded_ids is not None and teacher_degraded_logprobs is not None:
++            from verl.experimental.teacher_loop.teacher_manager import _pad_teacher_outputs
++
++            teacher_degraded_ids, teacher_degraded_logprobs = _pad_teacher_outputs(
++                teacher_degraded_ids,
++                teacher_degraded_logprobs,
++                prompt_width=prompt_output["input_ids"].shape[1],
++                response_width=response_output["input_ids"].shape[1],
++                prompt_length=len(output.prompt_ids),
++                response_length=len(output.response_ids),
++                pad_token_id=self.tokenizer.pad_token_id,
++            )
++
+         return _InternalAgentLoopOutput(
+             prompt_ids=prompt_output["input_ids"],
+             response_ids=response_output["input_ids"],
+@@ -857,6 +878,8 @@ class AgentLoopWorker:
+             mm_processor_kwargs=output.mm_processor_kwargs,
+             teacher_logprobs=teacher_logprobs,
+             teacher_ids=teacher_ids,
++            teacher_degraded_logprobs=teacher_degraded_logprobs,
++            teacher_degraded_ids=teacher_degraded_ids,
+             reward_score=output.reward_score,
+             num_turns=output.num_turns,
+             metrics=output.metrics,
+@@ -1027,6 +1050,24 @@ class AgentLoopWorker:
+             )
+             output.extra_fields["teacher_ids"] = teacher_ids
+             output.extra_fields["teacher_logprobs"] = teacher_logprobs
++            va_config = self.config.get("va_opd", {})
++            if va_config.get("enabled", False):
++                from dual_track_opd.va_opd.native_verl import build_degraded_multi_modal_data
++
++                degraded_multi_modal_data = build_degraded_multi_modal_data(
++                    output.multi_modal_data,
++                    sample_kwargs,
++                )
++                degraded_ids, degraded_logprobs = (
++                    await self.teacher_server_manager.compute_teacher_logprobs_single(
++                        sequence_ids=prompt_ids + response_ids,
++                        multi_modal_data=degraded_multi_modal_data,
++                        mm_processor_kwargs=output.mm_processor_kwargs,
++                        routing_key=routing_key,
++                    )
++                )
++                output.extra_fields["teacher_degraded_ids"] = degraded_ids
++                output.extra_fields["teacher_degraded_logprobs"] = degraded_logprobs
+-
++
+     def _postprocess(
+         self,
+@@ -1050,6 +1091,13 @@ class AgentLoopWorker:
+         if inputs[0].teacher_logprobs is not None and inputs[0].teacher_ids is not None:
+             optional_outputs["teacher_logprobs"] = torch.cat([input.teacher_logprobs for input in inputs], dim=0)
+             optional_outputs["teacher_ids"] = torch.cat([input.teacher_ids for input in inputs], dim=0)
++        if inputs[0].teacher_degraded_logprobs is not None and inputs[0].teacher_degraded_ids is not None:
++            optional_outputs["teacher_degraded_logprobs"] = torch.cat(
++                [input.teacher_degraded_logprobs for input in inputs], dim=0
++            )
++            optional_outputs["teacher_degraded_ids"] = torch.cat(
++                [input.teacher_degraded_ids for input in inputs], dim=0
++            )
+         batch = TensorDict(
+             {
+                 "prompts": prompt_ids,  # [bsz, prompt_length]
+diff --git a/verl/trainer/distillation/losses.py b/verl/trainer/distillation/losses.py
+index 3467e59e..fd70f27b 100644
+--- a/verl/trainer/distillation/losses.py
++++ b/verl/trainer/distillation/losses.py
+@@ -397,3 +397,10 @@ def compute_distillation_loss_reverse_kl_estimator(
+         "distillation/abs_loss": Metric(AggregationType.MEAN, distillation_losses[response_mask_bool].abs().mean()),
+     }
+     return distillation_losses, metrics
++
++
++# Project-owned VA-OPD research logic registers against the native verl loss
++# API. Keeping the implementation outside verl makes this backend patch small.
++from dual_track_opd.va_opd.native_verl import register_native_verl_loss  # noqa: E402
++
++register_native_verl_loss(register_distillation_loss, DistillationLossSettings)
+diff --git a/verl/trainer/ppo/ray_trainer.py b/verl/trainer/ppo/ray_trainer.py
+index 7fc30e61..4bd9939b 100644
+--- a/verl/trainer/ppo/ray_trainer.py
++++ b/verl/trainer/ppo/ray_trainer.py
+@@ -1505,6 +1505,11 @@ class RayPPOTrainer:
+-
++
+                     if "response_mask" not in batch.batch.keys():
+                         batch.batch["response_mask"] = compute_response_mask(batch)
++                    va_config = self.config.get("va_opd", {})
++                    if va_config.get("enabled", False):
++                        from dual_track_opd.va_opd.native_verl import prepare_native_verl_batch
++
++                        metrics.update(prepare_native_verl_batch(batch, self.config))
+                     # Balance the number of valid tokens across DP ranks.
+                     # NOTE: This usually changes the order of data in the `batch`,
+                     # which won't affect the advantage calculation (since it's based on uid),
