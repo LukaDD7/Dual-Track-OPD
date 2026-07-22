@@ -2,6 +2,12 @@
 
 ## 结论先行
 
+> 2026-07-23 环境治理补充：R595 节点虽然由 `nvidia-smi` 报告 CUDA 13.2，
+> 但当前 verl native OPD 支持矩阵仍应使用 cu128 用户态。torch 2.13+cu132
+> 与 vLLM 0.25.1 的强制覆盖环境已因 C++ ABI 和 verl API 边界问题被隔离。
+> 所有项目 Conda 环境改用 `$DTOPD_ROOT/conda-envs/`，完整台账、构建日期、
+> 用途和恢复命令见 `docs/environment_registry.md`。
+
 之前的 VA-OPD 不是卡在一个 bug 上，而是四层问题叠加：目标函数实现不完整、旧 GKD recipe 与当前 verl API 漂移、H200 节点上的 offload/NCCL 拓扑问题，以及 prompt/长度/评测协议失配。继续给旧的 `recipe/gkd` 打补丁，只会把下一处兼容性错误向后推。
 
 本轮采用的主线是：

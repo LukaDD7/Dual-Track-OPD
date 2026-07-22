@@ -1,5 +1,10 @@
 # VA-OPD cu132 环境构建 — 状态与阻塞点
 
+> **最终判定（2026-07-23）：QUARANTINED。** 本文记录失败事实，不是可执行安装指南。
+> 不要继续修补或激活该 prefix，不要执行旧 cu132 setup。当前主线是在 R595
+> 节点上使用受支持的 cu128 用户态矩阵；统一目录和完整迁移步骤见
+> `docs/environment_registry.md`。
+
 **日期**: 2026-07-22
 **分支**: `codex/va-opd` (commit `affb6e1`)
 **目标**: 在 8×H200 + Driver 595.58.03 (CUDA 13.2) 上复现 VA-OPD
@@ -183,9 +188,15 @@ $ENV_PREFIX/share/dual-track-opd/va_opd_environment_manifest.json
 }
 ```
 
+上面是失败环境当时写出的 manifest，不是可信 provenance。其中
+`4fd9d6a85c...` 实际对应 vLLM **0.12.0** tag；vLLM 0.25.1 tag 是
+`752a3a5044...`。因此该 manifest 除了记录“当时声称的状态”之外，不得用于重建。
+
 ---
 
-## 7. 运行命令参考
+## 7. 历史运行命令（禁止执行）
+
+以下命令仅保留用于解释事故。该 prefix 已 quarantined。
 
 ```bash
 export DTOPD_ROOT=/inspire/hdd/global_user/mengweicheng-240108120092/lzy
@@ -209,37 +220,22 @@ VERL_BACKEND_NO_FETCH=1 CUDA_VISIBLE_DEVICES=0,1,2,3,4,5 \
 
 ---
 
-## 8. 向前推进的可能路径
+## 8. 最终推进路径
 
-### 路径 A: vllm 源码编译（推荐但耗时）
+不采用此前列出的 cu132 workaround：
 
-从源码编译 vllm 0.25.1 链接 torch 2.13.0+cu132 的 libtorch。
-- vllm 源码已 pin `4fd9d6a85c00ac0186aa9abbeff73fc2ac6c721e`
-- 编译时间估计: 1-3 小时（CPU 多核）
-- 需在 CPU 节点编写编译脚本
-- 产物: 自包含 wheel，可复用到其他 GPU 分配
-- 优点: ABI 完全匹配，稳定性最高
+- attention backend 在 native extension 导入失败之后才有意义，不能修 ABI；
+- 源码编 vLLM 0.25.1 即使解决 torch ABI，仍越过 verl `<=0.12.0` 的 API 边界；
+- nightly 不满足固定版本和可复现要求；
+- torch 2.11/cu130 + vLLM 0.25.1 仍不属于当前 verl backend 的支持矩阵。
 
-### 路径 B: vllm nightly/更高版本
+当前主线是在 R595/H200 节点运行 verl e003 + vLLM 0.12 + torch
+2.9/cu128，并使用全新的统一 prefix：
 
-检查 vllm 是否有 0.26+ 或 nightly 版本使用 torch 2.13 编译。
-- PyPI 当前发布: `vllm 0.25.1` (最新)
-- `pip install --pre vllm` 可能提供预发布版
-- vllm nightly wheels 可能在 `https://wheels.vllm.ai/` 或类似 channel
-- 需在有网的 CPU 节点检查
+```text
+$DTOPD_ROOT/conda-envs/va-opd-native-e003-cu128-r595-v1
+```
 
-### 路径 C: 禁用 vllm 内置 FA2，强制使用外部 flash-attn
-
-设置 `VLLM_ATTENTION_BACKEND=FLASH_ATTN` 或 `VLLM_ATTENTION_BACKEND=FLASHINFER` 绕过 `vllm_flash_attn`。
-- 我们在环境中已安装了 `flash-attn==2.8.3`（从源码编译）
-- 也被安装了 `flashinfer==0.6.13`
-- 环境变量 `VLLM_ATTENTION_BACKEND` 在 launcher 中被 `unset`（line 212）
-- 风险: H200 上需要 FA3 而非 FA2 来获得最佳性能
-
-### 路径 D: torch 2.11 + CUDA 13.0 runtime
-
-vllm 0.25.1 硬锁 `torch==2.11.0`。PyTorch 2.11 官方支持 CUDA 13.0 (experimental)。
-- Driver 595 (CUDA 13.2) 对 CUDA 13.0 程序是**前向兼容**的
-- `https://download.pytorch.org/whl/cu130` 有 torch 2.11.0
-- vllm 0.25.1 直接与 torch 2.11.0+cu130 兼容（无 ABI 问题）
-- 缺点: 不是真正的 cu132，NCCL 版本可能是 2.27.x（旧版死锁风险回归）
+先运行同样的 4-rank NCCL smoke。只有它在新驱动上仍失败时，才建立单独的
+cu128 + newer-NCCL candidate，保持 torch/vLLM/Transformers 不变，以隔离变量。
+完整命令、环境台账和升降级规则见 `docs/environment_registry.md`。

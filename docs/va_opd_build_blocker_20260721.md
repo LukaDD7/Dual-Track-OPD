@@ -1,5 +1,10 @@
 # VA-OPD Build Blocker — 2026-07-21
 
+> 2026-07-23 update: this file records the first cu128 recovery attempt. New
+> environments must use the unified `$DTOPD_ROOT/conda-envs/` layout and the
+> cu128-on-R595 candidate defined in `docs/environment_registry.md`; do not
+> reuse or move the historical prefixes below.
+
 ## Status: FIX PREPARED — CPU source build and GPU runtime gates still required
 
 原环境矩阵不可重建，且不止一个问题：

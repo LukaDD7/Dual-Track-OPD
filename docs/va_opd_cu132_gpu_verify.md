@@ -1,5 +1,10 @@
 # VA-OPD cu132 GPU Verification Commands
 
+> **STOP — historical commands only.** cu132 environment is quarantined due to
+> a confirmed vLLM/torch C++ ABI mismatch and an unsupported verl/vLLM API
+> combination. Do not run Phases 0–5 below. Use the cu128-on-R595 procedure in
+> `docs/environment_registry.md`; this file remains only as an incident record.
+
 GPU node: 8× H200, Driver 595.58.03, CUDA 13.2
 
 ## Phase 0: Environment Setup (run on internet-connected node first)

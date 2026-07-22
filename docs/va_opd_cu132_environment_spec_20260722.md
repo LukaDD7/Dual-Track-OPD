@@ -1,6 +1,9 @@
 # VA-OPD cu132 环境规格说明书
 
-> 给 codex 的交接文档。包含完整的路径布局、环境配置、当前状态和阻塞点。
+> **历史事故交接文档，状态为 QUARANTINED。** 下面的版本和路径用于解释
+> 2026-07-21 的失败环境，不代表当前推荐配置。不得执行本文旧安装步骤。
+> 当前统一目录、环境台账和 cu128-on-R595 恢复步骤见
+> `docs/environment_registry.md`。
 
 **日期**: 2026-07-22
 **GPU 节点**: 8× H200, Driver 595.58.03, CUDA 13.2
@@ -277,7 +280,10 @@ ${ENV_PREFIX}/targets/x86_64-linux/lib                   ← conda CUDA 运行�
 
 ---
 
-## 5. 环境构建步骤（CPU 节点有网）
+## 5. 历史环境构建步骤（禁止重放）
+
+以下命令只记录当时做过什么。`setup_va_opd_native_env_cu132.sh` 已改为
+fail closed；不要通过复制旧命令绕过它。
 
 ```bash
 export DTOPD_ROOT=/inspire/hdd/global_user/mengweicheng-240108120092/lzy
@@ -287,7 +293,7 @@ export VA_OPD_CUDA_TOOLCHAIN="$DTOPD_ROOT/fc-opd-storage/toolchains/cuda-13.2"
 
 cd "$DTOPD_ROOT/projects/Dual-Track-OPD"
 
-# 完整构建（含 flash-attn 源码编译, ~1h）
+# 历史命令，禁止执行
 MAX_JOBS=16 bash scripts/hpc/setup_va_opd_native_env_cu132.sh
 
 # 跳过 flash-attn 编译（训练用 PyTorch SDPA fallback）
@@ -348,45 +354,37 @@ undefined symbol: _ZNK2at10TensorBase14const_data_ptrIiLi0EEEPKT_v
 
 ---
 
-## 7. 四个解决路径
+## 7. 已否决路径与当前决定
 
-### 路径 C: 绕过 vllm 内置 FA2 ⭐ 最先尝试
+### 已否决：绕过 vllm 内置 FA2
 
-**操作**: 设置 `VLLM_ATTENTION_BACKEND=FLASH_ATTN` 或 `=FLASHINFER`，强制 vllm 使用外部 flash-attn/flashinfer，完全跳过 `vllm_flash_attn` 导入链。
+attention backend 选择不能修复发生在模块导入阶段的 libtorch ABI 错误。
 
-**当前状态**: launcher 中 `unset VLLM_ATTENTION_BACKEND`，改为 `export VLLM_ATTENTION_BACKEND=FLASH_ATTN` 即可。
+### 已否决：在本 backend 上源码编译 vLLM 0.25.1
 
-**已有条件**:
-- `flash-attn==2.8.3` 已从源码编译安装（SM90, CUDA 13.2）
-- `flashinfer-python==0.6.13` + `flashinfer-cubin==0.6.13` 已安装
+这仍越过 verl e003 声明的 vLLM `<=0.12.0` API 边界，而且旧文档引用的
+`4fd9d6a...` 实际是 vLLM 0.12.0，不是 0.25.1。
 
-**风险**: vllm 0.25.x 的某些 attention 路径可能强制使用 `vllm_flash_attn` 而忽略环境变量。
+### 已否决：torch 2.11 + CUDA 13.0 + vLLM 0.25.1
 
-### 路径 A: vllm 源码编译
+虽然该组合可满足 vLLM 0.25.1 的 torch pin，但仍不满足 verl e003 的
+vLLM API 边界，并且会把多个变量同时带入实验。
 
-**操作**: 在 CPU 节点从源码编译 vllm 0.25.1，链接 torch 2.13.0+cu132。
+### 已否决：vLLM nightly
 
-**优势**: ABI 完全匹配，产物 wheel 可复用。
+nightly 不能提供本实验所需的固定 backend/ABI/API provenance。
 
-**估计**: 1-3 小时编译，编写编译脚本。
+### 当前决定
 
-**参考**: vllm 源码 commit `4fd9d6a85c00ac0186aa9abbeff73fc2ac6c721e` (EXPECTED_VLLM_SOURCE_COMMIT)。
+在 R595/H200 节点使用受支持的 CUDA 12.8 用户态栈，统一 prefix 为：
 
-### 路径 D: torch 2.11 + CUDA 13.0
+```text
+$DTOPD_ROOT/conda-envs/va-opd-native-e003-cu128-r595-v1
+```
 
-**操作**: 降级到 torch 2.11.0+cu130（PyTorch 官方支持 CUDA 13.0 experimental）。
-
-**优势**: vllm 0.25.1 原生兼容，无 ABI 问题。Driver 595 对 CUDA 13.0 前向兼容。
-
-**风险**: 
-- NCCL 版本回退到 ~2.27.x（旧 CUDA 12.8 的死锁可能回归）
-- 需要在 GPU 节点重新跑 NCCL smoke 验证
-
-### 路径 B: vllm nightly
-
-**操作**: 检查 `pip install --pre vllm` 或 vllm nightly wheel 是否提供 torch 2.13 兼容版本。
-
-**状态**: PyPI stable 最新 `0.25.1`，需调查预发布 channel。
+R595 驱动向后兼容 cu128 应用。先重建干净 backend（仅 3-file VA patch）和
+干净环境，再执行 NCCL、OPD、VA-OPD、paired pilot gates。详见
+`docs/environment_registry.md`。
 
 ---
 
@@ -397,8 +395,8 @@ undefined symbol: _ZNK2at10TensorBase14const_data_ptrIiLi0EEEPKT_v
 | `docs/va_opd_cu132_environment_spec_20260722.md` | 本文档 — 环境规格 |
 | `docs/va_opd_cu132_status_20260722.md` | 构建过程与诊断记录 |
 | `docs/va_opd_cu132_gpu_verify.md` | GPU 五阶段验证命令 |
-| `configs/environment/verl_va_opd_e003_cu132.constraints.txt` | cu132 pip 约束 |
-| `scripts/hpc/setup_va_opd_native_env_cu132.sh` | 自包含环境构建脚本 |
+| `configs/environment/verl_va_opd_e003_cu132.constraints.txt` | quarantined 历史版本记录，不得传给 pip |
+| `scripts/hpc/setup_va_opd_native_env_cu132.sh` | fail-closed 事故保护入口 |
 | `scripts/hpc/run_va_opd_native.sh` | 训练主启动脚本 |
 | `scripts/hpc/preflight_va_opd_native.py` | 预检脚本 (修改后) |
 | `scripts/setup/prepare_va_opd_native_verl.sh` | verl backend 准备 (修改后) |

@@ -2,8 +2,10 @@
 # Build the shared CPU-prepared environment for the native verl VA-OPD path.
 # Run on the CPU instance; consume the same prefix from the GPU instance.
 #
-# The target H200 nodes have a CUDA-12.8-era driver.  Do not install the
-# published vLLM wheel: vLLM 0.12.0 defaults can contain CUDA 12.9 binaries.
+# The supported user-space stack is CUDA 12.8.  It is valid on both the old
+# R570 nodes and the newer R595 nodes whose nvidia-smi reports CUDA 13.2.
+# Do not install the published vLLM wheel: vLLM 0.12.0 defaults can contain
+# CUDA 12.9 binaries.
 # This script compiles the exact vLLM tag against torch/cu128 and a separate
 # conda CUDA toolkit, without consulting /usr/bin/nvcc.
 
@@ -11,11 +13,12 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 HPC_ROOT="${DTOPD_ROOT:-/inspire/hdd/global_user/mengweicheng-240108120092/lzy}"
-ENV_PREFIX="${VA_OPD_ENV_PREFIX:-${HPC_ROOT}/fc-opd-storage/envs/va-opd-verl-e003-cu128-v2}"
-VERL_DIR="${VERL_VA_OPD_DIR:-${HPC_ROOT}/fc-opd-storage/backends/verl-va-opd-e0031631}"
-CUDA_TOOLCHAIN="${VA_OPD_CUDA_TOOLCHAIN:-${HPC_ROOT}/fc-opd-storage/toolchains/cuda-12.8}"
+CONDA_ENVS_ROOT="${DTOPD_CONDA_ENVS_ROOT:-${HPC_ROOT}/conda-envs}"
+ENV_PREFIX="${VA_OPD_ENV_PREFIX:-${CONDA_ENVS_ROOT}/va-opd-native-e003-cu128-r595-v1}"
+VERL_DIR="${VERL_VA_OPD_DIR:-${HPC_ROOT}/fc-opd-storage/backends/verl-va-opd-e0031631-clean}"
+CUDA_TOOLCHAIN="${VA_OPD_CUDA_TOOLCHAIN:-${HPC_ROOT}/toolchains/cuda-12.8}"
 VLLM_SOURCE="${VA_OPD_VLLM_SOURCE:-${HPC_ROOT}/fc-opd-storage/backends/vllm-va-opd-v0120}"
-WHEELHOUSE="${VA_OPD_WHEELHOUSE:-${HPC_ROOT}/fc-opd-storage/wheelhouse/va-opd-cu128-v2}"
+WHEELHOUSE="${VA_OPD_WHEELHOUSE:-${HPC_ROOT}/fc-opd-storage/wheelhouse/va-opd-cu128-r595-v1}"
 CONSTRAINTS="${REPO_ROOT}/configs/environment/verl_va_opd_e003_cu128.constraints.txt"
 VLLM_COMMIT="4fd9d6a85c00ac0186aa9abbeff73fc2ac6c721e"
 PYTORCH_INDEX="https://download.pytorch.org/whl/cu128"
@@ -177,8 +180,12 @@ RUNTIME_REQUIREMENTS=(
 "${PYTHON}" -m pip check
 
 ENV_MANIFEST="${ENV_PREFIX}/share/dual-track-opd/va_opd_environment_manifest.json"
+GENERIC_ENV_MANIFEST="${ENV_PREFIX}/share/dual-track-opd/environment_manifest.json"
 mkdir -p "$(dirname "${ENV_MANIFEST}")"
 VA_OPD_ENV_MANIFEST="${ENV_MANIFEST}" \
+VA_OPD_GENERIC_ENV_MANIFEST="${GENERIC_ENV_MANIFEST}" \
+VA_OPD_ENV_PREFIX="${ENV_PREFIX}" \
+VA_OPD_REPO_ROOT="${REPO_ROOT}" \
 VA_OPD_VLLM_WHEEL="${VLLM_WHEEL}" \
 VA_OPD_VLLM_COMMIT="${VLLM_COMMIT}" \
 VA_OPD_CUDA_TOOLCHAIN="${CUDA_TOOLCHAIN}" \
@@ -190,6 +197,7 @@ import importlib.metadata as md
 import json
 import os
 import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
 
 import torch
@@ -198,13 +206,30 @@ wheel = Path(os.environ["VA_OPD_VLLM_WHEEL"]).resolve()
 constraints = Path(os.environ["VA_OPD_CONSTRAINTS"]).resolve()
 manifest = {
     "schema_version": 1,
+    "environment_name": Path(os.environ["VA_OPD_ENV_PREFIX"]).name,
+    "environment_prefix": str(Path(os.environ["VA_OPD_ENV_PREFIX"]).resolve()),
+    "purpose": "native verl OPD and VA-OPD on H200",
+    "status_at_build": "candidate",
+    "created_at_utc": datetime.now(timezone.utc).isoformat(),
     "build_kind": "cpu-source-build-cu128-h200-sm90",
     "packages": {
         name: md.version(name)
         for name in ("torch", "torchvision", "torchaudio", "vllm", "transformers", "flashinfer-python", "flash-attn")
     },
     "torch_cuda": torch.version.cuda,
+    "nccl": ".".join(str(part) for part in torch.cuda.nccl.version()),
     "torch_cuda_arch_list": "9.0",
+    "target_gpu": "NVIDIA H200 (SM90)",
+    "build_node_kind": "CPU with internet; shared prefix consumed on GPU node",
+    "repo_commit": subprocess.check_output(
+        ["git", "-C", os.environ["VA_OPD_REPO_ROOT"], "rev-parse", "HEAD"], text=True
+    ).strip(),
+    "repo_dirty": bool(
+        subprocess.check_output(
+            ["git", "-C", os.environ["VA_OPD_REPO_ROOT"], "status", "--porcelain", "--untracked-files=no"],
+            text=True,
+        ).strip()
+    ),
     "vllm_source_commit": os.environ["VA_OPD_VLLM_COMMIT"],
     "vllm_wheel": str(wheel),
     "vllm_wheel_sha256": hashlib.sha256(wheel.read_bytes()).hexdigest(),
@@ -217,10 +242,16 @@ manifest = {
         [str(Path(os.environ["VA_OPD_CUDA_TOOLCHAIN"]) / "bin/nvcc"), "--version"], text=True
     ).strip(),
     "host_compiler": subprocess.check_output([os.environ["CC"], "--version"], text=True).splitlines()[0],
+    "verification": {
+        "pip_check": "pass",
+        "gpu_kernel_smoke": "pending",
+        "nccl_smoke": "pending",
+        "training_smoke": "pending",
+    },
 }
-Path(os.environ["VA_OPD_ENV_MANIFEST"]).write_text(
-    json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-)
+payload = json.dumps(manifest, indent=2, sort_keys=True) + "\n"
+Path(os.environ["VA_OPD_ENV_MANIFEST"]).write_text(payload, encoding="utf-8")
+Path(os.environ["VA_OPD_GENERIC_ENV_MANIFEST"]).write_text(payload, encoding="utf-8")
 print(json.dumps(manifest, indent=2, sort_keys=True))
 PY
 
@@ -253,3 +284,4 @@ echo "CUDA toolchain:      ${CUDA_TOOLCHAIN}"
 echo "vLLM source:         ${VLLM_SOURCE} @ ${VLLM_COMMIT}"
 echo "vLLM wheel:          ${VLLM_WHEEL}"
 echo "Build manifest:      ${ENV_MANIFEST}"
+echo "Environment registry: ${REPO_ROOT}/docs/environment_registry.md"

@@ -22,7 +22,6 @@ EXPECTED_BACKEND_CHANGES = {
     "verl/experimental/agent_loop/agent_loop.py",
     "verl/trainer/distillation/losses.py",
     "verl/trainer/ppo/ray_trainer.py",
-    "verl/utils/vllm/utils.py",  # vllm 0.25.x LoRA API compat (vllm.lora.models → lora_model)
 }
 EXPECTED_PATCHED_FILE_SHA256 = {
     "verl/experimental/agent_loop/agent_loop.py": "97be16d52f92ed6dee42d1cbdbe7200b8105e842f86a229f7acc9ace766602b8",
@@ -227,20 +226,28 @@ def main() -> None:
 
     import torch
 
-    _valid_runtimes = {
-        ("2.10.0", "12.8", "0.18.0", "5.5.0"),    # cu128 (legacy)
-        ("2.13.0", "13.2", "0.25.1", "5.14.1"),    # cu132 (actual — no cu132 torch 2.11 wheel)
-    }
-    _actual = (torch.__version__[:6], torch.version.cuda, package_version("vllm"), package_version("transformers"))
-    if _actual not in _valid_runtimes:
-        expected_desc = " or ".join(
-            f"torch {t}, CUDA {c}, vllm {v}, transformers {x}" for t, c, v, x in _valid_runtimes
-        )
+    expected_runtime = ("2.9.0", "12.8", "0.12.0+cu128", "4.57.3")
+    actual_runtime = (
+        torch.__version__.split("+")[0],
+        torch.version.cuda,
+        package_version("vllm"),
+        package_version("transformers"),
+    )
+    if actual_runtime != expected_runtime:
         raise RuntimeError(
-            f"unexpected VA-OPD runtime: torch={_actual[0]}, CUDA={_actual[1]}, vllm={_actual[2]}, "
-            f"transformers={_actual[3]}. Expected one of: {expected_desc}"
+            "unsupported VA-OPD runtime: "
+            f"torch={actual_runtime[0]}, CUDA={actual_runtime[1]}, vllm={actual_runtime[2]}, "
+            f"transformers={actual_runtime[3]}; expected {expected_runtime}. "
+            "The torch 2.13/cu132 + vLLM 0.25.1 environment is quarantined because its "
+            "precompiled extensions have a libtorch ABI mismatch and this verl commit only "
+            "supports vLLM through 0.12.0."
         )
-    expected_versions = {"tensordict": "0.10.0"}
+    expected_versions = {
+        "vllm": "0.12.0+cu128",
+        "transformers": "4.57.3",
+        "tensordict": "0.10.0",
+        "flash-attn": "2.8.3",
+    }
     for package, expected in expected_versions.items():
         actual = package_version(package)
         if actual != expected:

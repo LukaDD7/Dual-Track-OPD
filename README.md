@@ -46,6 +46,11 @@ The intended workflow is:
 
 See [docs/hpc_workflow.md](docs/hpc_workflow.md).
 
+All project Conda environments, their purposes, construction/evidence dates,
+status, and the canonical shared prefix layout are tracked in the
+[environment registry](docs/environment_registry.md). New HPC environments
+must use that registry rather than copying paths from historical incident logs.
+
 For the recovered VA-OPD mainline, see the
 [root-cause report](docs/va_opd_root_cause_and_recovery_20260719.md) and the
 [CPU/GPU runbook](docs/va_opd_hpc_runbook.md). The older Geometry3K GKD

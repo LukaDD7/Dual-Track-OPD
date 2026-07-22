@@ -70,16 +70,21 @@ CPU CC 需要维护的 Git-safe readiness summary 模板位于 `docs/va_opd_serv
 ```bash
 export DTOPD_ROOT=/inspire/hdd/global_user/mengweicheng-240108120092/lzy
 export VA_OPD_PROJECT="$DTOPD_ROOT/Dual-track OPD"
-export VA_OPD_ENV_PREFIX="$DTOPD_ROOT/fc-opd-storage/envs/va-opd-verl-e003-cu128-v2"
-export VERL_VA_OPD_DIR="$DTOPD_ROOT/fc-opd-storage/backends/verl-va-opd-e0031631"
-export VA_OPD_CUDA_TOOLCHAIN="$DTOPD_ROOT/fc-opd-storage/toolchains/cuda-12.8"
+export DTOPD_CONDA_ENVS_ROOT="$DTOPD_ROOT/conda-envs"
+export VA_OPD_ENV_PREFIX="$DTOPD_CONDA_ENVS_ROOT/va-opd-native-e003-cu128-r595-v1"
+export VERL_VA_OPD_DIR="$DTOPD_ROOT/fc-opd-storage/backends/verl-va-opd-e0031631-clean"
+export VA_OPD_CUDA_TOOLCHAIN="$DTOPD_ROOT/toolchains/cuda-12.8"
 export VA_OPD_VLLM_SOURCE="$DTOPD_ROOT/fc-opd-storage/backends/vllm-va-opd-v0120"
-export VA_OPD_WHEELHOUSE="$DTOPD_ROOT/fc-opd-storage/wheelhouse/va-opd-cu128-v2"
+export VA_OPD_WHEELHOUSE="$DTOPD_ROOT/fc-opd-storage/wheelhouse/va-opd-cu128-r595-v1"
 export VA_OPD_STUDENT_MODEL="$DTOPD_ROOT/models/Qwen3-VL-4B-Instruct"
 export VA_OPD_TEACHER_MODEL="$DTOPD_ROOT/models/Qwen3-VL-32B-Instruct"
 export GEOMETRY3K_SOURCE="$DTOPD_ROOT/dataset/geometry3k/data/train-00000-of-00001.parquet"
 export GEOMETRY3K_VA_OPD_DATA_DIR="$DTOPD_ROOT/fc-opd-storage/outputs/fc_opd/geometry3k_gkd"
 ```
+
+以上是 2026-07-23 起的统一目录。历史环境路径和构建/证据日期见
+`docs/environment_registry.md`。不要直接移动旧 Conda prefix；需要复用时按锁文件
+在统一目录重建。
 
 每个新 shell 都重新 export。不要假设上一次 shell 的变量仍存在。
 

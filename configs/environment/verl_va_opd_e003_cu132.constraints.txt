@@ -1,6 +1,11 @@
-# Reproducible runtime for verl e003163181731412595257a72ec173071efb125f.
-# Linux x86_64, Python 3.12, CUDA 13.2 (cu132).
-# Built 2026-07-21. All CUDA toolchain packages live inside the conda env — no /usr/ dependency.
+# QUARANTINED HISTORICAL RECORD — DO NOT USE AS A CONSTRAINT/LOCK FILE.
+#
+# Attempted 2026-07-21 for verl e003163181731412595257a72ec173071efb125f.
+# The resulting environment failed before OPD training because vLLM 0.25.1's
+# precompiled extensions target torch 2.11, while torch was force-replaced by
+# 2.13+cu132.  The verl commit also declares vLLM <= 0.12.0.  This file remains
+# only to explain the failed prefix and must not be passed to pip.
+# See docs/environment_registry.md and docs/va_opd_cu132_status_20260722.md.
 #
 # Strategy: torch 2.13.0+cu132 installed first, vllm 0.25.1 pulled normally (downgrades
 # torch to 2.11.0), then torch 2.13.0+cu132 force-reinstalled over the top to restore
