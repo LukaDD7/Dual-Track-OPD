@@ -13,7 +13,11 @@ if [[ ! -e "${VERL_DIR}/.git" ]]; then
     git clone --filter=blob:none https://github.com/verl-project/verl.git "${VERL_DIR}"
 fi
 
-git -C "${VERL_DIR}" fetch origin "${EXPECTED_COMMIT}" --depth 1
+if [[ "${VERL_BACKEND_NO_FETCH:-0}" == "1" ]]; then
+    echo "VERL_BACKEND_NO_FETCH=1 — skipping network fetch (offline GPU node)"
+else
+    git -C "${VERL_DIR}" fetch origin "${EXPECTED_COMMIT}" --depth 1
+fi
 CURRENT_COMMIT="$(git -C "${VERL_DIR}" rev-parse HEAD)"
 if [[ "${CURRENT_COMMIT}" != "${EXPECTED_COMMIT}" ]]; then
     if [[ -n "$(git -C "${VERL_DIR}" status --porcelain --untracked-files=no)" ]]; then

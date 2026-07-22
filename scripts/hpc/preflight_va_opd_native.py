@@ -22,6 +22,7 @@ EXPECTED_BACKEND_CHANGES = {
     "verl/experimental/agent_loop/agent_loop.py",
     "verl/trainer/distillation/losses.py",
     "verl/trainer/ppo/ray_trainer.py",
+    "verl/utils/vllm/utils.py",  # vllm 0.25.x LoRA API compat (vllm.lora.models → lora_model)
 }
 EXPECTED_PATCHED_FILE_SHA256 = {
     "verl/experimental/agent_loop/agent_loop.py": "97be16d52f92ed6dee42d1cbdbe7200b8105e842f86a229f7acc9ace766602b8",
@@ -39,7 +40,7 @@ def sha256_file(path: Path) -> str:
 
 
 def git(repo: Path, *args: str) -> str:
-    return subprocess.check_output(["git", "-C", str(repo), *args], text=True).strip()
+    return subprocess.check_output(["git", "-C", str(repo), *args], text=True).rstrip("\n")
 
 
 def mapping(value: Any) -> dict[str, Any]:
@@ -226,14 +227,20 @@ def main() -> None:
 
     import torch
 
-    if not torch.__version__.startswith("2.9.0") or torch.version.cuda != "12.8":
-        raise RuntimeError(f"expected torch 2.9.0 CUDA 12.8, got torch={torch.__version__}, cuda={torch.version.cuda}")
-    expected_versions = {
-        "vllm": "0.12.0+cu128",
-        "transformers": "4.57.3",
-        "tensordict": "0.10.0",
-        "flash-attn": "2.8.3",
+    _valid_runtimes = {
+        ("2.10.0", "12.8", "0.18.0", "5.5.0"),    # cu128 (legacy)
+        ("2.13.0", "13.2", "0.25.1", "5.14.1"),    # cu132 (actual — no cu132 torch 2.11 wheel)
     }
+    _actual = (torch.__version__[:6], torch.version.cuda, package_version("vllm"), package_version("transformers"))
+    if _actual not in _valid_runtimes:
+        expected_desc = " or ".join(
+            f"torch {t}, CUDA {c}, vllm {v}, transformers {x}" for t, c, v, x in _valid_runtimes
+        )
+        raise RuntimeError(
+            f"unexpected VA-OPD runtime: torch={_actual[0]}, CUDA={_actual[1]}, vllm={_actual[2]}, "
+            f"transformers={_actual[3]}. Expected one of: {expected_desc}"
+        )
+    expected_versions = {"tensordict": "0.10.0"}
     for package, expected in expected_versions.items():
         actual = package_version(package)
         if actual != expected:

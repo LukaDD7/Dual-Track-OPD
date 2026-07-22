@@ -84,3 +84,17 @@ class FCOPDDataset(RLHFDataset):
                     pass
         row_dict["extra_info"] = extra
         return row_dict
+
+    def maybe_filter_out_long_prompts(self, dataframe=None):
+        """Skip verl's chat-template-based length filter.
+
+        Geometry3K prompts are pre-formatted and safely within the 6144-token
+        budget.  The base-class filter uses closures that fail under
+        multiprocessing pickling for our subclass.
+        """
+        max_len = getattr(self, "max_prompt_length", 6144)
+        print(
+            f"FCOPDataset: skipping chat-template-based filter; "
+            f"keeping all {len(dataframe)} samples (pre-filtered <= {max_len})"
+        )
+        return dataframe

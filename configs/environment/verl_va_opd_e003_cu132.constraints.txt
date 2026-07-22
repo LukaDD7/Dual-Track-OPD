@@ -1,0 +1,38 @@
+# Reproducible runtime for verl e003163181731412595257a72ec173071efb125f.
+# Linux x86_64, Python 3.12, CUDA 13.2 (cu132).
+# Built 2026-07-21. All CUDA toolchain packages live inside the conda env — no /usr/ dependency.
+#
+# Strategy: torch 2.13.0+cu132 installed first, vllm 0.25.1 pulled normally (downgrades
+# torch to 2.11.0), then torch 2.13.0+cu132 force-reinstalled over the top to restore
+# all nvidia-* packages at CUDA 13.2 versions.  torchaudio removed (no cu132 wheel).
+# flash-attn 2.8.3 built from source against conda CUDA 13.2 toolchain.
+#
+# Conda CUDA toolchain (installed directly into env, not a separate toolchain dir):
+#   conda install -p $ENV_PREFIX -c nvidia -c conda-forge \
+#       cuda-nvcc=13.2 cuda-cudart-dev=13.2 cuda-cccl=13.2 \
+#       libcublas-dev cuda-nvrtc cuda-version=13.2
+#
+# Install order:
+#   1. conda create python=3.12 + CUDA toolchain above
+#   2. pip install torch==2.13.0 torchvision==0.28.0 --index-url https://download.pytorch.org/whl/cu132
+#   3. pip install vllm==0.25.1  (downgrades torch+nvidia-*)
+#   4. pip install --force-reinstall torch==2.13.0 torchvision==0.28.0 --index-url $cu132
+#   5. pip uninstall torchaudio
+#   6. Build flash-attn with CUDA_HOME=$ENV_PREFIX, TARGETS_INCLUDE set
+#   7. pip install verl requirements + editable installs
+torch==2.13.0
+torchvision==0.28.0
+vllm==0.25.1
+transformers==5.14.1
+tensordict==0.10.0
+flashinfer-python==0.6.13
+flashinfer-cubin==0.6.13
+numpy>=2.0.0
+pyarrow>=19.0.0
+pandas
+ray[default]==2.53.0
+datasets==4.4.2
+accelerate==1.12.0
+peft==0.18.0
+qwen-vl-utils==0.0.14
+pillow

@@ -200,6 +200,8 @@ export PYTHONUNBUFFERED=1
 export NCCL_TIMEOUT=1800
 export TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC=1200
 export RAY_memory_usage_threshold=0.95
+# Ensure Ray workers can find CUDA/torch shared libraries (self-contained conda env).
+export LD_LIBRARY_PATH="${ENV_PREFIX}/lib:${ENV_PREFIX}/lib/python3.12/site-packages/torch/lib:${ENV_PREFIX}/targets/x86_64-linux/lib:${LD_LIBRARY_PATH:-}"
 unset VLLM_ATTENTION_BACKEND
 
 if (( TOTAL_STEPS > 0 )); then
