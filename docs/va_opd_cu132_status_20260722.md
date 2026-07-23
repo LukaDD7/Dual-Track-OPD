@@ -233,7 +233,7 @@ VERL_BACKEND_NO_FETCH=1 CUDA_VISIBLE_DEVICES=0,1,2,3,4,5 \
 2.9/cu128，并使用全新的统一 prefix：
 
 ```text
-$DTOPD_ROOT/conda-envs/va-opd-native-e003-cu128-r595-v1
+$DTOPD_ROOT/envs/va-opd-native-e003-cu128-r595-v1
 ```
 
 先运行同样的 4-rank NCCL smoke。只有它在新驱动上仍失败时，才建立单独的

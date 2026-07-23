@@ -10,34 +10,32 @@
 
 ```bash
 export DTOPD_ROOT=/inspire/hdd/global_user/mengweicheng-240108120092/lzy
-export DTOPD_CONDA_ENVS_ROOT="${DTOPD_ROOT}/conda-envs"
+# DTOPD = Dual-Track OPD, 项目在所有环境变量和路径中的统一前缀
 ```
 
 目录约定：
 
 ```text
 $DTOPD_ROOT/
-├── conda-envs/                         # 只放可激活的 Conda/Python prefix
-│   ├── fc-opd-verl071-cu128/
-│   ├── vaopd-gkd-cu128/
-│   ├── vision-opd-cu128/
-│   ├── va-opd-native-e003-cu128-r595-v1/
-│   └── quarantine/                     # 失败环境只保留诊断，不再运行
+├── envs/                               # 所有 Conda/Python prefix 及编译工具链
+│   ├── va-opd-native-e003-cu128-r595-v1/   ← 当前主线目标
+│   ├── vaopd-gkd-cu128/                    ← legacy
+│   ├── vision-opd-cu128/                   ← legacy
+│   ├── cuda128-toolchain/                  ← CUDA 12.8 编译工具链（非 Python env）
+│   ├── *.bad_*                             ← 失败尝试（诊断保留）
+│   └── _backups/
 ├── fc-opd-storage/
 │   ├── backends/                       # verl/vLLM 独立源码 checkout
 │   ├── wheelhouse/                     # 可重建 wheel 与 SHA-256
 │   ├── outputs/                        # 数据产物和 raw run output
 │   ├── checkpoints/
 │   └── diagnostics/
-└── toolchains/                         # nvcc/GCC 等编译工具链，不是 Python env
-    ├── cuda-12.8/
-    └── cuda-13.2/                      # 仅保留 cu132 事故复现所需时使用
 ```
 
 规则：
 
-1. `conda-envs/` 只存放 Python 环境；CUDA toolchain、backend checkout、wheelhouse、模型和数据不得混入。
-2. 新脚本使用 `DTOPD_CONDA_ENVS_ROOT`，允许显式 `VA_OPD_ENV_PREFIX` 等变量覆盖，但不得再默认到 `fc-opd-storage/envs/`、`miniconda3/envs/` 或零散的 `$DTOPD_ROOT/envs/`。
+1. `envs/` 存放 Python 环境和 CUDA toolchain；backend checkout、wheelhouse、模型和数据不得混入。
+2. 新脚本默认 `VA_OPD_ENV_PREFIX="$DTOPD_ROOT/envs/va-opd-native-e003-cu128-r595-v1"`，允许显式覆盖，但不得再默认到 `fc-opd-storage/envs/`、`miniconda3/envs/` 或其他零散目录。
 3. Conda prefix 含绝对路径和 shebang，禁止用 `mv`、`cp -a` 或软链接伪装迁移。旧环境必须根据 lock/manifest 在统一目录重新创建并重新验证。
 4. 环境名必须包含用途、backend 代际和 CUDA 用户态版本；需要并存的重建用 `-v2` 或日期后缀，不得原地覆盖一个已用于实验的 prefix。
 5. “GPU 节点显示 CUDA 13.2”表示 R595 驱动可支持的最高 CUDA 版本，不要求 Python wheel 必须是 cu132。R595 可运行本项目锁定的 cu128 用户态栈。
@@ -61,15 +59,15 @@ $DTOPD_ROOT/
 
 | 环境 | 历史/目标路径 | 构建或首次证据日期 | 用途 | 关键版本 | 状态 | 后续处理 |
 |---|---|---|---|---|---|---|
-| FC-OPD verl 0.7.1 | 历史：`$DTOPD_ROOT/fc-opd-storage/envs/fc-opd-verl071-cu128`；统一目标：`$DTOPD_CONDA_ENVS_ROOT/fc-opd-verl071-cu128` | 环境审计 2026-06-25；最早保存训练日志 2026-06-29 | FC-OPD/FSDP、项目 HTTP teacher、早期 Geometry3K GKD | Python 3.12、torch 2.8 cu128、vLLM 0.11、verl 0.7.1 | `legacy` | 不修改旧 prefix；只有复现实验需要时才按 freeze 重建到统一目录 |
-| VAOPD GKD/Megatron | 历史：`$DTOPD_ROOT/envs/vaopd-gkd-cu128`；统一目标：`$DTOPD_CONDA_ENVS_ROOT/vaopd-gkd-cu128` | 环境审计 2026-07-09；smoke 2026-07-10 | 旧 `recipe/gkd`、Megatron、forward-GKD ablation | Python 3.12、torch 2.8 cu128、vLLM 0.11、Megatron Core 0.13.1 | `legacy` | 保留作 ablation，不用于 native VA-OPD 主线 |
-| Vision-OPD baseline eval | 当前 Conda name/prefix：`vision-opd-cu128`；统一目标：`$DTOPD_CONDA_ENVS_ROOT/vision-opd-cu128` | 首次完整诊断记录 2026-07-15 | Vision-OPD/Qwen3.5-4B benchmark 推理和 judge | Python 3.12、vLLM 0.18、Transformers 5.x、cu128 | `legacy` | 与训练环境严格隔离；只用于已记录的 baseline eval |
+| FC-OPD verl 0.7.1 | 历史：`$DTOPD_ROOT/fc-opd-storage/envs/fc-opd-verl071-cu128` | 环境审计 2026-06-25；最早保存训练日志 2026-06-29 | FC-OPD/FSDP、项目 HTTP teacher、早期 Geometry3K GKD | Python 3.12、torch 2.8 cu128、vLLM 0.11、verl 0.7.1 | `legacy` | 不修改旧 prefix；只有复现实验需要时才按 freeze 重建到统一目录 |
+| VAOPD GKD/Megatron | `$DTOPD_ROOT/envs/vaopd-gkd-cu128` | 环境审计 2026-07-09；smoke 2026-07-10 | 旧 `recipe/gkd`、Megatron、forward-GKD ablation | Python 3.12、torch 2.8 cu128、vLLM 0.11、Megatron Core 0.13.1 | `legacy` | 保留作 ablation，不用于 native VA-OPD 主线 |
+| Vision-OPD baseline eval | `$DTOPD_ROOT/envs/vision-opd-cu128` | 首次完整诊断记录 2026-07-15 | Vision-OPD/Qwen3.5-4B benchmark 推理和 judge | Python 3.12、vLLM 0.18、Transformers 5.x、cu128 | `legacy` | 与训练环境严格隔离；只用于已记录的 baseline eval |
 | Native VA-OPD cu128 初版 | `$DTOPD_ROOT/fc-opd-storage/envs/va-opd-verl-e003-cu128` | 构建尝试 2026-07-21 | 第一次 native OPD 环境尝试 | 初始错误矩阵含 vLLM 0.18 / Transformers 5.5 | `quarantined` | 保留失败证据，不修补、不激活 |
 | Native VA-OPD cu128 v2 | `$DTOPD_ROOT/fc-opd-storage/envs/va-opd-verl-e003-cu128-v2` | 方案提交 2026-07-21；实际完整构建日期未确认 | 锁定 verl e003 + vLLM 0.12 的恢复方案 | torch 2.9 cu128、vLLM 0.12、Transformers 4.57.3 | `candidate`/待服务器确认 | 不直接搬迁；在统一目录重建为 R595 v1，并重新跑全部 gate |
 | Native VA-OPD cu132 事故环境 | `$DTOPD_ROOT/fc-opd-storage/envs/va-opd-verl-e003-cu132` | 2026-07-21 | 试图利用 R595/cu132/NCCL 2.29.7 | torch 2.13 cu132 + vLLM 0.25.1 wheel + Transformers 5.14.1 | `quarantined` | ABI 与 verl API 均不受支持；不得运行、不得作为 base env |
-| Native VA-OPD cu128 on R595 v1 | `$DTOPD_CONDA_ENVS_ROOT/va-opd-native-e003-cu128-r595-v1` | `planned`，由 CPU 实例完成后写入 manifest | 当前推荐的 OPD/VA-OPD 主线 | verl e003 + 3-file patch、torch 2.9 cu128、vLLM 0.12 cu128 source wheel、Transformers 4.57.3 | `planned` | 下一步构建；先 NCCL smoke，再 OPD/VA smoke 和成对 pilot |
+| Native VA-OPD cu128 on R595 v1 | `$DTOPD_ROOT/envs/va-opd-native-e003-cu128-r595-v1` | `planned`，由 CPU 实例完成后写入 manifest | 当前推荐的 OPD/VA-OPD 主线 | verl e003 + 3-file patch、torch 2.9 cu128、vLLM 0.12 cu128 source wheel、Transformers 4.57.3 | `planned` | 下一步构建；先 NCCL smoke，再 OPD/VA smoke 和成对 pilot |
 
-另有 `$DTOPD_ROOT/envs/cuda128-toolchain`。它是 CUDA 12.8 编译工具链，不是 Conda Python 环境；应在下一次重建时改为 `$DTOPD_ROOT/toolchains/cuda-12.8`，旧路径在历史复现完成前不删除。
+CUDA 12.8 编译工具链位于 `$DTOPD_ROOT/envs/cuda128-toolchain`（nvcc V12.8.61），是 Conda 环境而非独立 toolchain 目录。它与其他 Python 环境共用 `envs/` 目录。
 
 ## 4. 当前主线选择
 
@@ -100,10 +98,9 @@ CPU 实例上：
 
 ```bash
 export DTOPD_ROOT=/inspire/hdd/global_user/mengweicheng-240108120092/lzy
-export DTOPD_CONDA_ENVS_ROOT="$DTOPD_ROOT/conda-envs"
-export VA_OPD_ENV_PREFIX="$DTOPD_CONDA_ENVS_ROOT/va-opd-native-e003-cu128-r595-v1"
+export VA_OPD_ENV_PREFIX="$DTOPD_ROOT/envs/va-opd-native-e003-cu128-r595-v1"
 export VERL_VA_OPD_DIR="$DTOPD_ROOT/fc-opd-storage/backends/verl-va-opd-e0031631-clean"
-export VA_OPD_CUDA_TOOLCHAIN="$DTOPD_ROOT/toolchains/cuda-12.8"
+export VA_OPD_CUDA_TOOLCHAIN="$DTOPD_ROOT/envs/cuda128-toolchain"
 export VA_OPD_WHEELHOUSE="$DTOPD_ROOT/fc-opd-storage/wheelhouse/va-opd-cu128-r595-v1"
 
 cd "$DTOPD_ROOT/projects/Dual-Track-OPD"

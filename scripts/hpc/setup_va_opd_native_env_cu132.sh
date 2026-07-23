@@ -17,10 +17,9 @@ node.  A newer driver can run the pinned CUDA 12.8 application stack.
 
 Canonical setup:
   export DTOPD_ROOT=/inspire/hdd/global_user/mengweicheng-240108120092/lzy
-  export DTOPD_CONDA_ENVS_ROOT="$DTOPD_ROOT/conda-envs"
-  export VA_OPD_ENV_PREFIX="$DTOPD_CONDA_ENVS_ROOT/va-opd-native-e003-cu128-r595-v1"
+  export VA_OPD_ENV_PREFIX="$DTOPD_ROOT/envs/va-opd-native-e003-cu128-r595-v1"
   export VERL_VA_OPD_DIR="$DTOPD_ROOT/fc-opd-storage/backends/verl-va-opd-e0031631-clean"
-  export VA_OPD_CUDA_TOOLCHAIN="$DTOPD_ROOT/toolchains/cuda-12.8"
+  export VA_OPD_CUDA_TOOLCHAIN="$DTOPD_ROOT/envs/cuda128-toolchain"
   bash scripts/hpc/setup_va_opd_native_env.sh
 
 Read docs/environment_registry.md and docs/va_opd_cu132_status_20260722.md.

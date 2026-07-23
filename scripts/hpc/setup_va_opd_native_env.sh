@@ -13,10 +13,9 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 HPC_ROOT="${DTOPD_ROOT:-/inspire/hdd/global_user/mengweicheng-240108120092/lzy}"
-CONDA_ENVS_ROOT="${DTOPD_CONDA_ENVS_ROOT:-${HPC_ROOT}/conda-envs}"
-ENV_PREFIX="${VA_OPD_ENV_PREFIX:-${CONDA_ENVS_ROOT}/va-opd-native-e003-cu128-r595-v1}"
+ENV_PREFIX="${VA_OPD_ENV_PREFIX:-${HPC_ROOT}/envs/va-opd-native-e003-cu128-r595-v1}"
 VERL_DIR="${VERL_VA_OPD_DIR:-${HPC_ROOT}/fc-opd-storage/backends/verl-va-opd-e0031631-clean}"
-CUDA_TOOLCHAIN="${VA_OPD_CUDA_TOOLCHAIN:-${HPC_ROOT}/toolchains/cuda-12.8}"
+CUDA_TOOLCHAIN="${VA_OPD_CUDA_TOOLCHAIN:-${HPC_ROOT}/envs/cuda128-toolchain}"
 VLLM_SOURCE="${VA_OPD_VLLM_SOURCE:-${HPC_ROOT}/fc-opd-storage/backends/vllm-va-opd-v0120}"
 WHEELHOUSE="${VA_OPD_WHEELHOUSE:-${HPC_ROOT}/fc-opd-storage/wheelhouse/va-opd-cu128-r595-v1}"
 CONSTRAINTS="${REPO_ROOT}/configs/environment/verl_va_opd_e003_cu128.constraints.txt"

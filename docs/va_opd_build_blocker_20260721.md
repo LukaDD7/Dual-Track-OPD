@@ -1,7 +1,7 @@
 # VA-OPD Build Blocker — 2026-07-21
 
 > 2026-07-23 update: this file records the first cu128 recovery attempt. New
-> environments must use the unified `$DTOPD_ROOT/conda-envs/` layout and the
+> environments must use the unified `$DTOPD_ROOT/envs/` layout and the
 > cu128-on-R595 candidate defined in `docs/environment_registry.md`; do not
 > reuse or move the historical prefixes below.
 
@@ -35,7 +35,7 @@ unset CUDA_HOME CUDA_PATH NVCC
 export DTOPD_ROOT=/inspire/hdd/global_user/mengweicheng-240108120092/lzy
 export VA_OPD_ENV_PREFIX="$DTOPD_ROOT/fc-opd-storage/envs/va-opd-verl-e003-cu128"
 export VERL_VA_OPD_DIR="$DTOPD_ROOT/fc-opd-storage/backends/verl-va-opd-e0031631"
-export VA_OPD_CUDA_TOOLCHAIN="$DTOPD_ROOT/fc-opd-storage/toolchains/cuda-12.8"
+export VA_OPD_CUDA_TOOLCHAIN="$DTOPD_ROOT/envs/cuda128-toolchain"
 MAX_JOBS=16 bash scripts/hpc/setup_va_opd_native_env.sh
 ```
 

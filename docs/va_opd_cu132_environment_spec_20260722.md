@@ -379,7 +379,7 @@ nightly 不能提供本实验所需的固定 backend/ABI/API provenance。
 在 R595/H200 节点使用受支持的 CUDA 12.8 用户态栈，统一 prefix 为：
 
 ```text
-$DTOPD_ROOT/conda-envs/va-opd-native-e003-cu128-r595-v1
+$DTOPD_ROOT/envs/va-opd-native-e003-cu128-r595-v1
 ```
 
 R595 驱动向后兼容 cu128 应用。先重建干净 backend（仅 3-file VA patch）和

@@ -56,7 +56,7 @@ def test_setup_builds_pinned_vllm_with_managed_cu128_toolchain() -> None:
     assert "VA_OPD_SKIP_FLASH_ATTN_BUILD" not in setup
 
 
-def test_all_native_entrypoints_use_canonical_conda_env_root() -> None:
+def test_all_native_entrypoints_use_canonical_env_root() -> None:
     entrypoints = (
         REPO_ROOT / "scripts/hpc/setup_va_opd_native_env.sh",
         REPO_ROOT / "scripts/hpc/run_va_opd_native.sh",
@@ -64,7 +64,6 @@ def test_all_native_entrypoints_use_canonical_conda_env_root() -> None:
     )
     for path in entrypoints:
         text = path.read_text(encoding="utf-8")
-        assert "DTOPD_CONDA_ENVS_ROOT" in text, path
         assert "va-opd-native-e003-cu128-r595-v1" in text, path
         assert "fc-opd-storage/envs/va-opd" not in text, path
 

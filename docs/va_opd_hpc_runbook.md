@@ -70,10 +70,9 @@ CPU CC 需要维护的 Git-safe readiness summary 模板位于 `docs/va_opd_serv
 ```bash
 export DTOPD_ROOT=/inspire/hdd/global_user/mengweicheng-240108120092/lzy
 export VA_OPD_PROJECT="$DTOPD_ROOT/Dual-track OPD"
-export DTOPD_CONDA_ENVS_ROOT="$DTOPD_ROOT/conda-envs"
-export VA_OPD_ENV_PREFIX="$DTOPD_CONDA_ENVS_ROOT/va-opd-native-e003-cu128-r595-v1"
+export VA_OPD_ENV_PREFIX="$DTOPD_ROOT/envs/va-opd-native-e003-cu128-r595-v1"
 export VERL_VA_OPD_DIR="$DTOPD_ROOT/fc-opd-storage/backends/verl-va-opd-e0031631-clean"
-export VA_OPD_CUDA_TOOLCHAIN="$DTOPD_ROOT/toolchains/cuda-12.8"
+export VA_OPD_CUDA_TOOLCHAIN="$DTOPD_ROOT/envs/cuda128-toolchain"
 export VA_OPD_VLLM_SOURCE="$DTOPD_ROOT/fc-opd-storage/backends/vllm-va-opd-v0120"
 export VA_OPD_WHEELHOUSE="$DTOPD_ROOT/fc-opd-storage/wheelhouse/va-opd-cu128-r595-v1"
 export VA_OPD_STUDENT_MODEL="$DTOPD_ROOT/models/Qwen3-VL-4B-Instruct"
