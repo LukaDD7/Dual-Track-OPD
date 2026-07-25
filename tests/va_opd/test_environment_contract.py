@@ -81,7 +81,44 @@ def test_cu132_setup_fails_closed_and_registry_marks_it_quarantined() -> None:
     setup = (REPO_ROOT / "scripts/hpc/setup_va_opd_native_env_cu132.sh").read_text(encoding="utf-8")
     registry = (REPO_ROOT / "docs/environment_registry.md").read_text(encoding="utf-8")
 
-    assert "must not be rebuilt" in setup
-    assert "exit 2" in setup
+    # The cu132 script is now a working source-build setup, not a fail-closed stub.
+    assert "752a3a504485790a2e8491cacbb35c137339ad34" in setup  # v0.25.1 tag
+    assert 'PYTORCH_INDEX="https://download.pytorch.org/whl/cu132"' in setup
+    assert 'cuda-toolkit=13.2' in setup
+    assert "use_existing_torch.py" in setup
+    assert "cpu-source-build-cu132-h200-sm90" in setup
+    assert "pip check" in setup
+    # Must NOT use the old force-reinstall pattern for torch
+    assert "force-reinstall torch" not in setup
     assert "va-opd-verl-e003-cu132" in registry
     assert "`quarantined`" in registry
+
+
+def test_cu132_constraints_match_source_build_design() -> None:
+    constraints = (REPO_ROOT / "configs/environment/verl_va_opd_e003_cu132.constraints.txt").read_text(encoding="utf-8")
+
+    assert "torch==2.13.0" in constraints
+    assert "torchvision==0.28.0" in constraints
+    assert "vllm==0.25.1" in constraints
+    assert "transformers==5.14.1" in constraints
+    assert "flashinfer-python==0.6.13" in constraints
+    assert "flash-attn==2.8.3" in constraints
+    # Must document the install strategy (no force-reinstall)
+    assert "force-reinstall" not in constraints.split("#")[0]  # not in the install strategy header
+    # Check the setup script references the right commit
+    setup_cu132 = (REPO_ROOT / "scripts/hpc/setup_va_opd_native_env_cu132.sh").read_text(encoding="utf-8")
+    assert "752a3a504485790a2e8491cacbb35c137339ad34" in setup_cu132
+
+
+def test_preflight_supports_both_cu128_and_cu132() -> None:
+    preflight = (REPO_ROOT / "scripts/hpc/preflight_va_opd_native.py").read_text(encoding="utf-8")
+
+    assert "EXPECTED_BUILD_KIND_CU128" in preflight
+    assert "EXPECTED_BUILD_KIND_CU132" in preflight
+    assert "EXPECTED_VLLM_SOURCE_COMMIT_CU128" in preflight
+    assert "EXPECTED_VLLM_SOURCE_COMMIT_CU132" in preflight
+    assert "752a3a504485790a2e8491cacbb35c137339ad34" in preflight
+    assert "0.25.1+cu132" in preflight
+    assert "5.14.1" in preflight
+    assert "vllm.lora.lora_model" in preflight
+    assert "LD_LIBRARY_PATH" in preflight  # cu132 backend check

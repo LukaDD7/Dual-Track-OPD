@@ -201,7 +201,15 @@ export NCCL_TIMEOUT=1800
 export TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC=1200
 export RAY_memory_usage_threshold=0.95
 # Ensure Ray workers can find CUDA/torch shared libraries (self-contained conda env).
-export LD_LIBRARY_PATH="${ENV_PREFIX}/lib:${ENV_PREFIX}/lib/python3.12/site-packages/torch/lib:${ENV_PREFIX}/targets/x86_64-linux/lib:${LD_LIBRARY_PATH:-}"
+# The CUDA toolchain is only needed at build time; at runtime torch bundles its own
+# CUDA 12.8/13.2 libraries under torch/lib/.  We include the env lib directory for
+# flash-attn and any other compiled extensions.
+export LD_LIBRARY_PATH="${ENV_PREFIX}/lib:${ENV_PREFIX}/lib/python3.12/site-packages/torch/lib:${LD_LIBRARY_PATH:-}"
+# If a separate CUDA toolchain exists (cu128/cu132 managed prefix), append it so
+# any JIT-compiled kernels find the right nvcc and runtime libraries.
+if [[ -n "${VA_OPD_CUDA_TOOLCHAIN:-}" && -d "${VA_OPD_CUDA_TOOLCHAIN}/lib" ]]; then
+    export LD_LIBRARY_PATH="${VA_OPD_CUDA_TOOLCHAIN}/lib:${VA_OPD_CUDA_TOOLCHAIN}/targets/x86_64-linux/lib:${LD_LIBRARY_PATH}"
+fi
 unset VLLM_ATTENTION_BACKEND
 
 if (( TOTAL_STEPS > 0 )); then

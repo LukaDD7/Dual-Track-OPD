@@ -10,11 +10,13 @@ PATCH_PATH="${REPO_ROOT}/patches/verl/va_opd_native_e0031631.patch"
 
 if [[ ! -e "${VERL_DIR}/.git" ]]; then
     mkdir -p "$(dirname "${VERL_DIR}")"
-    git clone --filter=blob:none https://github.com/verl-project/verl.git "${VERL_DIR}"
+    git clone https://github.com/verl-project/verl.git "${VERL_DIR}"
 fi
 
 if [[ "${VERL_BACKEND_NO_FETCH:-0}" == "1" ]]; then
-    echo "VERL_BACKEND_NO_FETCH=1 — skipping network fetch (offline GPU node)"
+    echo "VERL_BACKEND_NO_FETCH=1 — skipping network fetch (offline node)"
+elif git -C "${VERL_DIR}" cat-file -e "${EXPECTED_COMMIT}" 2>/dev/null; then
+    echo "commit ${EXPECTED_COMMIT} already available locally — skipping fetch"
 else
     git -C "${VERL_DIR}" fetch origin "${EXPECTED_COMMIT}" --depth 1
 fi

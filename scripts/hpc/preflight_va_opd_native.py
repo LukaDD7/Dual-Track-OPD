@@ -17,12 +17,44 @@ import pandas as pd
 from PIL import Image
 
 EXPECTED_BACKEND_COMMIT = "e003163181731412595257a72ec173071efb125f"
-EXPECTED_VLLM_SOURCE_COMMIT = "4fd9d6a85c00ac0186aa9abbeff73fc2ac6c721e"
-EXPECTED_BACKEND_CHANGES = {
+
+# ── cu128 (verl-supported vLLM 0.12.0) ──────────────────────────────────
+EXPECTED_VLLM_SOURCE_COMMIT_CU128 = "4fd9d6a85c00ac0186aa9abbeff73fc2ac6c721e"
+EXPECTED_BACKEND_CHANGES_CU128 = {
     "verl/experimental/agent_loop/agent_loop.py",
     "verl/trainer/distillation/losses.py",
     "verl/trainer/ppo/ray_trainer.py",
 }
+EXPECTED_RUNTIME_CU128 = ("2.9.0", "12.8", "0.12.0+cu128", "4.57.3")
+EXPECTED_BUILD_KIND_CU128 = "cpu-source-build-cu128-h200-sm90"
+EXPECTED_VERSIONS_CU128 = {
+    "vllm": "0.12.0+cu128",
+    "transformers": "4.57.3",
+    "tensordict": "0.10.0",
+    "flash-attn": "2.8.3",
+    "flashinfer-python": "0.5.3",
+}
+
+# ── cu132 (source-built vLLM 0.25.1) ────────────────────────────────────
+EXPECTED_VLLM_SOURCE_COMMIT_CU132 = "752a3a504485790a2e8491cacbb35c137339ad34"
+EXPECTED_BACKEND_CHANGES_CU132 = {
+    "verl/experimental/agent_loop/agent_loop.py",
+    "verl/trainer/distillation/losses.py",
+    "verl/trainer/ppo/ray_trainer.py",
+    "verl/utils/vllm/utils.py",           # LoRA import: vllm.lora.lora_model (vLLM >= 0.25)
+    "verl/trainer/constants_ppo.py",      # Ray runtime_env LD_LIBRARY_PATH forwarding
+}
+EXPECTED_RUNTIME_CU132 = ("2.13.0", "13.2", "0.25.1+cu132", "5.14.1")
+EXPECTED_BUILD_KIND_CU132 = "cpu-source-build-cu132-h200-sm90"
+EXPECTED_VERSIONS_CU132 = {
+    "vllm": "0.25.1+cu132",
+    "transformers": "5.14.1",
+    "tensordict": "0.10.0",
+    "flash-attn": "2.8.3",
+    "flashinfer-python": "0.6.13",
+}
+
+# Patch SHA-256 are only validated for cu128 (exact known-good overlay).
 EXPECTED_PATCHED_FILE_SHA256 = {
     "verl/experimental/agent_loop/agent_loop.py": "97be16d52f92ed6dee42d1cbdbe7200b8105e842f86a229f7acc9ace766602b8",
     "verl/trainer/distillation/losses.py": "41f8959296620b0e08bed59719a405e7d7b835653ff86a17340ed495bdb5197b",
@@ -226,7 +258,64 @@ def main() -> None:
 
     import torch
 
-    expected_runtime = ("2.9.0", "12.8", "0.12.0+cu128", "4.57.3")
+    # ── Read manifest first to determine build kind ─────────────────────
+    environment_manifest_path = env_prefix / "share/dual-track-opd/va_opd_environment_manifest.json"
+    if not environment_manifest_path.is_file():
+        raise FileNotFoundError(f"environment build manifest is missing: {environment_manifest_path}")
+    environment_manifest = json.loads(environment_manifest_path.read_text(encoding="utf-8"))
+    build_kind = environment_manifest.get("build_kind")
+
+    if build_kind == EXPECTED_BUILD_KIND_CU128:
+        expected_vllm_source_commit = EXPECTED_VLLM_SOURCE_COMMIT_CU128
+        expected_backend_changes = EXPECTED_BACKEND_CHANGES_CU128
+        expected_runtime = EXPECTED_RUNTIME_CU128
+        expected_versions = dict(EXPECTED_VERSIONS_CU128)
+        expected_torch_cuda = "12.8"
+        check_backend_sha = True
+    elif build_kind == EXPECTED_BUILD_KIND_CU132:
+        expected_vllm_source_commit = EXPECTED_VLLM_SOURCE_COMMIT_CU132
+        expected_backend_changes = EXPECTED_BACKEND_CHANGES_CU132
+        expected_runtime = EXPECTED_RUNTIME_CU132
+        expected_versions = dict(EXPECTED_VERSIONS_CU132)
+        expected_torch_cuda = "13.2"
+        check_backend_sha = False  # cu132 patches differ per-build; validate markers instead
+    else:
+        raise RuntimeError(
+            f"unrecognized environment build kind: {build_kind!r}. "
+            f"Expected {EXPECTED_BUILD_KIND_CU128!r} or {EXPECTED_BUILD_KIND_CU132!r}."
+        )
+
+    # ── Validate backend ─────────────────────────────────────────────────
+    if changed != expected_backend_changes:
+        raise RuntimeError(
+            f"backend patch scope drift for {build_kind}: "
+            f"expected {sorted(expected_backend_changes)}, got {sorted(changed)}"
+        )
+    for relative, marker in (
+        ("verl/experimental/agent_loop/agent_loop.py", "teacher_degraded_logprobs"),
+        ("verl/trainer/distillation/losses.py", "register_native_verl_loss"),
+        ("verl/trainer/ppo/ray_trainer.py", "prepare_native_verl_batch"),
+    ):
+        if marker not in (backend / relative).read_text(encoding="utf-8"):
+            raise RuntimeError(f"native VA-OPD patch marker {marker!r} is missing from {relative}")
+
+    if check_backend_sha:
+        for relative, expected_sha256 in EXPECTED_PATCHED_FILE_SHA256.items():
+            actual_sha256 = sha256_file(backend / relative)
+            if actual_sha256 != expected_sha256:
+                raise RuntimeError(
+                    f"patched backend file drift: {relative} expected {expected_sha256}, got {actual_sha256}"
+                )
+    else:
+        # cu132: verify LoRA import patch is applied (vllm >= 0.25 requirement)
+        lora_utils = backend / "verl/utils/vllm/utils.py"
+        if "vllm.lora.lora_model" not in lora_utils.read_text(encoding="utf-8"):
+            raise RuntimeError("cu132 backend is missing the LoRA import patch (vllm.lora.lora_model)")
+        ray_constants = backend / "verl/trainer/constants_ppo.py"
+        if "LD_LIBRARY_PATH" not in ray_constants.read_text(encoding="utf-8"):
+            raise RuntimeError("cu132 backend is missing the Ray LD_LIBRARY_PATH forwarding patch")
+
+    # ── Validate runtime versions ────────────────────────────────────────
     actual_runtime = (
         torch.__version__.split("+")[0],
         torch.version.cuda,
@@ -235,19 +324,10 @@ def main() -> None:
     )
     if actual_runtime != expected_runtime:
         raise RuntimeError(
-            "unsupported VA-OPD runtime: "
+            f"unsupported VA-OPD runtime for {build_kind}: "
             f"torch={actual_runtime[0]}, CUDA={actual_runtime[1]}, vllm={actual_runtime[2]}, "
-            f"transformers={actual_runtime[3]}; expected {expected_runtime}. "
-            "The torch 2.13/cu132 + vLLM 0.25.1 environment is quarantined because its "
-            "precompiled extensions have a libtorch ABI mismatch and this verl commit only "
-            "supports vLLM through 0.12.0."
+            f"transformers={actual_runtime[3]}; expected {expected_runtime}."
         )
-    expected_versions = {
-        "vllm": "0.12.0+cu128",
-        "transformers": "4.57.3",
-        "tensordict": "0.10.0",
-        "flash-attn": "2.8.3",
-    }
     for package, expected in expected_versions.items():
         actual = package_version(package)
         if actual != expected:
@@ -257,19 +337,17 @@ def main() -> None:
     if nvcc and Path(nvcc).resolve().as_posix().startswith("/usr/") and not args.allow_system_nvcc:
         raise RuntimeError(f"system nvcc is forbidden for this pipeline: {Path(nvcc).resolve()}")
 
-    environment_manifest_path = env_prefix / "share/dual-track-opd/va_opd_environment_manifest.json"
-    if not environment_manifest_path.is_file():
-        raise FileNotFoundError(f"environment build manifest is missing: {environment_manifest_path}")
-    environment_manifest = json.loads(environment_manifest_path.read_text(encoding="utf-8"))
-    if environment_manifest.get("vllm_source_commit") != EXPECTED_VLLM_SOURCE_COMMIT:
+    # ── Validate environment manifest provenance ─────────────────────────
+    if environment_manifest.get("vllm_source_commit") != expected_vllm_source_commit:
         raise RuntimeError(
-            "vLLM source provenance drift: expected "
-            f"{EXPECTED_VLLM_SOURCE_COMMIT}, got {environment_manifest.get('vllm_source_commit')}"
+            f"vLLM source provenance drift for {build_kind}: expected "
+            f"{expected_vllm_source_commit}, got {environment_manifest.get('vllm_source_commit')}"
         )
-    if environment_manifest.get("build_kind") != "cpu-source-build-cu128-h200-sm90":
-        raise RuntimeError(f"unexpected environment build kind: {environment_manifest.get('build_kind')!r}")
-    if environment_manifest.get("torch_cuda") != "12.8":
-        raise RuntimeError(f"environment manifest is not CUDA 12.8: {environment_manifest.get('torch_cuda')!r}")
+    if environment_manifest.get("torch_cuda") != expected_torch_cuda:
+        raise RuntimeError(
+            f"environment manifest CUDA mismatch for {build_kind}: "
+            f"expected {expected_torch_cuda}, got {environment_manifest.get('torch_cuda')!r}"
+        )
     if environment_manifest.get("torch_cuda_arch_list") != "9.0":
         raise RuntimeError(
             f"environment manifest was not built for H200 SM90: {environment_manifest.get('torch_cuda_arch_list')!r}"
@@ -279,11 +357,16 @@ def main() -> None:
             "environment was built against the wrong verl backend: "
             f"{environment_manifest.get('verl_backend_commit')!r}"
         )
-    constraints_path = repo / "configs/environment/verl_va_opd_e003_cu128.constraints.txt"
+    if build_kind == EXPECTED_BUILD_KIND_CU128:
+        constraints_path = repo / "configs/environment/verl_va_opd_e003_cu128.constraints.txt"
+        manifest_torch_version = "2.9.0"
+    else:
+        constraints_path = repo / "configs/environment/verl_va_opd_e003_cu132.constraints.txt"
+        manifest_torch_version = "2.13.0"
     if environment_manifest.get("constraints_sha256") != sha256_file(constraints_path):
         raise RuntimeError("environment constraints hash differs from the checked-out project")
     manifest_packages = mapping(environment_manifest.get("packages"))
-    for package, expected in {"torch": "2.9.0", **expected_versions}.items():
+    for package, expected in {"torch": manifest_torch_version, **expected_versions}.items():
         if manifest_packages.get(package) != expected:
             raise RuntimeError(
                 f"environment manifest {package} drift: expected {expected}, got {manifest_packages.get(package)}"

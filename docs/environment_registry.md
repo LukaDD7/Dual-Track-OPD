@@ -1,6 +1,6 @@
 # Dual-Track-OPD 环境台账与目录规范
 
-最后更新：2026-07-23
+最后更新：2026-07-25
 
 本文是本项目在共享集群上的 Conda/Python 环境单一事实源。新建、重建、废弃或验证环境后，必须同时更新本文和环境内的 manifest。历史事故文档可以保留当时路径，但新的脚本和操作说明不得再自行发明环境目录。
 
@@ -18,10 +18,12 @@ export DTOPD_ROOT=/inspire/hdd/global_user/mengweicheng-240108120092/lzy
 ```text
 $DTOPD_ROOT/
 ├── envs/                               # 所有 Conda/Python prefix 及编译工具链
-│   ├── va-opd-native-e003-cu128-r595-v1/   ← 当前主线目标
+│   ├── va-opd-native-e003-cu128-r595-v1/   ← cu128 主线目标（备选）
+│   ├── va-opd-native-e003-cu132-r595-v1/   ← cu132 主线目标（当前推进）
 │   ├── vaopd-gkd-cu128/                    ← legacy
 │   ├── vision-opd-cu128/                   ← legacy
 │   ├── cuda128-toolchain/                  ← CUDA 12.8 编译工具链（非 Python env）
+│   ├── cuda132-toolchain/                  ← CUDA 13.2 编译工具链（非 Python env）
 │   ├── *.bad_*                             ← 失败尝试（诊断保留）
 │   └── _backups/
 ├── fc-opd-storage/
@@ -64,10 +66,11 @@ $DTOPD_ROOT/
 | Vision-OPD baseline eval | `$DTOPD_ROOT/envs/vision-opd-cu128` | 首次完整诊断记录 2026-07-15 | Vision-OPD/Qwen3.5-4B benchmark 推理和 judge | Python 3.12、vLLM 0.18、Transformers 5.x、cu128 | `legacy` | 与训练环境严格隔离；只用于已记录的 baseline eval |
 | Native VA-OPD cu128 初版 | `$DTOPD_ROOT/fc-opd-storage/envs/va-opd-verl-e003-cu128` | 构建尝试 2026-07-21 | 第一次 native OPD 环境尝试 | 初始错误矩阵含 vLLM 0.18 / Transformers 5.5 | `quarantined` | 保留失败证据，不修补、不激活 |
 | Native VA-OPD cu128 v2 | `$DTOPD_ROOT/fc-opd-storage/envs/va-opd-verl-e003-cu128-v2` | 方案提交 2026-07-21；实际完整构建日期未确认 | 锁定 verl e003 + vLLM 0.12 的恢复方案 | torch 2.9 cu128、vLLM 0.12、Transformers 4.57.3 | `candidate`/待服务器确认 | 不直接搬迁；在统一目录重建为 R595 v1，并重新跑全部 gate |
-| Native VA-OPD cu132 事故环境 | `$DTOPD_ROOT/fc-opd-storage/envs/va-opd-verl-e003-cu132` | 2026-07-21 | 试图利用 R595/cu132/NCCL 2.29.7 | torch 2.13 cu132 + vLLM 0.25.1 wheel + Transformers 5.14.1 | `quarantined` | ABI 与 verl API 均不受支持；不得运行、不得作为 base env |
-| Native VA-OPD cu128 on R595 v1 | `$DTOPD_ROOT/envs/va-opd-native-e003-cu128-r595-v1` | `planned`，由 CPU 实例完成后写入 manifest | 当前推荐的 OPD/VA-OPD 主线 | verl e003 + 3-file patch、torch 2.9 cu128、vLLM 0.12 cu128 source wheel、Transformers 4.57.3 | `planned` | 下一步构建；先 NCCL smoke，再 OPD/VA smoke 和成对 pilot |
+| Native VA-OPD cu132 事故环境 | `$DTOPD_ROOT/fc-opd-storage/envs/va-opd-verl-e003-cu132` | 2026-07-21 | 试图利用 R595/cu132/NCCL 2.29.7 | torch 2.13 cu132 + vLLM 0.25.1 **wheel** + Transformers 5.14.1 | `quarantined` | 预编译 wheel ABI 断裂 + manifest provenance 错误；保留诊断，不激活 |
+| Native VA-OPD cu132 on R595 v1（源码编译） | `$DTOPD_ROOT/envs/va-opd-native-e003-cu132-r595-v1` | 2026-07-25（10 次修复迭代后成功） | 当前 cu132 主线：source-built vLLM 0.25.1 + torch 2.13 | verl e003 + 5-file patch、torch 2.13.0+cu132、vLLM 0.25.1 **source wheel** (460MB)、Transformers 5.14.1、NCCL 2.29.7、flash-attn 2.8.3、flashinfer-python 0.6.13 | `candidate` | GPU kernel smoke、NCCL smoke、training smoke 待跑；详见 §5.1 构建问题清单 |
+| Native VA-OPD cu128 on R595 v1 | `$DTOPD_ROOT/envs/va-opd-native-e003-cu128-r595-v1` | `planned`，由 CPU 实例完成后写入 manifest | 备选 cu128 主线（verl 原生支持 vLLM 0.12.0） | verl e003 + 3-file patch、torch 2.9 cu128、vLLM 0.12 cu128 source wheel、Transformers 4.57.3 | `planned` | 如果 cu132 source-build 受阻则启用；R595 向下兼容 cu128 |
 
-CUDA 12.8 编译工具链位于 `$DTOPD_ROOT/envs/cuda128-toolchain`（nvcc V12.8.61），是 Conda 环境而非独立 toolchain 目录。它与其他 Python 环境共用 `envs/` 目录。
+CUDA 12.8 编译工具链位于 `$DTOPD_ROOT/envs/cuda128-toolchain`（nvcc V12.8.61），CUDA 13.2 编译工具链位于 `$DTOPD_ROOT/envs/cuda132-toolchain`。两者均为独立 Conda prefix，不与 Python 环境混合。
 
 ## 4. 当前主线选择
 
@@ -79,18 +82,72 @@ VA-OPD 不是从旧 `recipe/gkd` 继续打补丁。当前主线由三部分组�
 
 `recipe/gkd`、HTTP teacher 和 vLLM 0.25 兼容补丁都不是 native VA-OPD 主线的一部分。
 
-## 5. cu132 环境为什么被隔离
+## 5. cu132 事故回顾与源码编译修正
 
-2026-07-21 构建的 cu132 环境不是少一个环境变量，而是越过了多重兼容边界：
+### 5.0 2026-07-21 首次尝试（已隔离）
 
-- verl commit `e0031631` 声明 `vllm>=0.8.5,<=0.12.0`，而事故环境安装了 vLLM 0.25.1；
-- vLLM 0.25.1 wheel 精确绑定 torch 2.11，随后强制覆盖成 torch 2.13，导致 `_vllm_fa2_C.abi3.so` 缺少 libtorch 符号；
-- `VLLM_ATTENTION_BACKEND` 不能修复模块导入阶段的 C++ ABI 错误；
-- 记录中的 `4fd9d6a85c...` 是 vLLM 0.12.0 tag，不是 0.25.1；vLLM 0.25.1 tag 是 `752a3a5044...`，因此旧 manifest 的 source provenance 不真实；
-- setup 脚本、constraints 和 preflight 分别要求不同的 torch/Transformers 版本，不能从空 prefix 可重复构建；
-- Conda CUDA libraries 与 torch wheel 的 `nvidia-*` runtime 同时优先进入 `LD_LIBRARY_PATH`，形成第二套未审计的动态库选择。
+2026-07-21 构建的 cu132 环境失败原因已明确——**预编译** vLLM 0.25.1 wheel 的 C++ 扩展链接 torch 2.11 的 libtorch，与 CUDA 13.2 必需的 torch ≥2.12 不兼容。此外：
 
-该 prefix 仅保留诊断价值。`scripts/hpc/setup_va_opd_native_env_cu132.sh` 现在会 fail closed，避免再次生成已知无效环境。
+- verl commit `e0031631` 声明 `vllm>=0.8.5,<=0.12.0`——但这是 pip 元数据约束，不是运行时 API 硬断；
+- 旧 manifest 记录 `vllm_source_commit: 4fd9d6a85c...`（vLLM **0.12.0** tag），实际安装的是 vLLM 0.25.1（tag `752a3a5044...`），provenance 错误；
+- `pip install --force-reinstall torch==2.13` 是破坏性修补，不可复现；
+- Conda CUDA 库与 torch wheel 的 `nvidia-*` runtime 同时进入 `LD_LIBRARY_PATH`，无审计。
+
+旧 prefix 保留为 `$DTOPD_ROOT/fc-opd-storage/envs/va-opd-verl-e003-cu132`，仅诊断价值。
+
+### 5.1 2026-07-25 源码编译：10 次修复记录
+
+脚本：`scripts/hpc/setup_va_opd_native_env_cu132.sh`，2026-07-23 重写为可执行源码编译脚本后，于 2026-07-25 经过 10 轮迭代修复成功。
+
+| # | 失败现象 | 根因 | 修复 |
+|---|---|---|---|
+| 1 | `requirements/build.txt` not found | vLLM 0.25.1 将 `requirements/build.txt`（单文件）重构为 `requirements/build/`（目录，含平台特定文件） | 路径改为 `requirements/build/cuda.txt` |
+| 2 | `RuntimeError: Cannot find CMake executable` | pip 安装的 cmake 二进制在 `${ENV_PREFIX}/bin`，但 PATH 只含 `${CUDA_TOOLCHAIN}/bin` | `export PATH="${ENV_PREFIX}/bin:${CUDA_TOOLCHAIN}/bin:${PATH}"` |
+| 3 | `find_package(CUDA)` 模块不存在 | pip cmake 4.4.0 默认启用 CMP0146=NEW，移除旧版 FindCUDA | constraints 文件加 `cmake<4.0` + 显式 `pip install cmake>=3.26.1,<4.0` |
+| 4 | `Could NOT find CUDA (missing: CUDA_INCLUDE_DIRS)` | cmake 3.31 中 CMP0146 默认值已变 NEW；`CUDA_TOOLKIT_ROOT_DIR` 未设置 | `export CMAKE_POLICY_DEFAULT_CMP0146=OLD` + `export CUDA_TOOLKIT_ROOT_DIR="${CUDA_TOOLCHAIN}"` |
+| 5 | `cuda_select_nvcc_arch_flags` 未定义 | Python patch 替换 `find_package(CUDA)` 块时提前 `return()`，跳过了 arch flag 生成和 `enable_language(CUDA)` | Python 脚本精确替换，用 `include(FindCUDA)` 加载函数，硬编码 CUDA 变量但保留后续流程 |
+| 6 | qutlass FetchContent 下载失败 | GitHub 临时不可达（`Failed to connect to github.com port 443`） | 网络恢复后重跑 |
+| 7 | DeepGEMM `CUDA_HOME not found` | `build_deepgemm_C.py` 通过 `torch.utils.cpp_extension.CUDA_HOME` 检测 CUDA，cmake→ninja→Python 环境变量链路断裂 | setup.py patch 增加 `-DCUDA_HOME=...` cmake 参数 |
+| 8 | DeepGEMM `fatal error: cuda.h: No such file or directory` | conda CUDA 13.2 的 `cuda.h` 在 `targets/x86_64-linux/include/`，不在 `${CUDA_HOME}/include/` | 尝试 `add_custom_command(ENVIRONMENT ...)` 无效（cmake 3.31+Ninja 将此关键字误解析为依赖名） |
+| 9 | DeepGEMM `fatal error: device_types.h: No such file or directory` | 初次只 symlink 了 `cuda.h`、`cccl`、`crt`，缺其他头文件 | **最终方案**：symlink `targets/x86_64-linux/include/*` 全部到 `${CUDA_TOOLCHAIN}/include/`（见下文 §5.2） |
+| 10 | `AssertionError: torch 2.13.0+cu132 != 2.13.0` | `importlib.metadata.version("torch")` 包含 local suffix `+cu132`，脚本用精确等号比较 | 期望值改为 `"2.13.0+cu132"` |
+
+### 5.2 最终构建方案
+
+**构建环境**：CPU 实例（64 核，503GB RAM），`MAX_JOBS=32`
+
+**关键修复汇总**（`scripts/hpc/setup_va_opd_native_env_cu132.sh`）：
+
+1. **cmake 版本约束**：`cmake>=3.26.1,<4.0`——cmake 4.x 移除 FindCUDA 模块
+2. **FindCUDA 恢复**：`CMAKE_POLICY_DEFAULT_CMP0146=OLD` 环境变量
+3. **CUDA 检测绕过**：Python 内联脚本 patch torch 的 `cuda.cmake`，硬编码 conda CUDA 13.2 布局下的路径到 `targets/x86_64-linux`
+4. **CUDA header 兼容**：构建前 symlink `targets/x86_64-linux/include/*` → `${CUDA_TOOLCHAIN}/include/`（conda 将头文件放在 `targets/` 子目录，但 vLLM/build_deepgemm_C.py 期望在 `${CUDA_HOME}/include/`）
+5. **vLLM torch 版本检查**：`TORCH_SUPPORTED_VERSION_CUDA` 从 `2.11.0` 改为 `2.13.0`
+6. **PATH 完整**：确保 `${ENV_PREFIX}/bin` 在 PATH 中（cmake、ninja 由 pip 安装）
+7. **CUDA_HOME 转发**：setup.py patch 增加 `-DCUDA_HOME=...` cmake 参数
+
+**最终产物**：
+
+| 项目 | 值 |
+|---|---|
+| 环境 prefix | `/inspire/hdd/global_user/mengweicheng-240108120092/lzy/envs/va-opd-native-e003-cu132-r595-v1` |
+| Wheelhouse | `/inspire/hdd/global_user/mengweicheng-240108120092/lzy/fc-opd-storage/wheelhouse/va-opd-cu132-r595-v1/` |
+| vLLM wheel | `vllm-0.25.1-cp312-cp312-linux_x86_64.whl` (460 MB) |
+| SHA-256 | `94781779a6cf50aec1df1e93ac75847fafeeddcb7af4fb0bd30955d1fd034ba8` |
+| torch | 2.13.0+cu132 |
+| torchvision | 0.28.0+cu132 |
+| transformers | 5.14.1 |
+| flash-attn | 2.8.3 |
+| flashinfer-python | 0.6.13 |
+| tensordict | 0.10.0 |
+| ray | 2.53.0 |
+| vLLM source | `752a3a504485790a2e8491cacbb35c137339ad34` (v0.25.1 tag) |
+| verl backend | `e003163181731412595257a72ec173071efb125f` |
+| CUDA toolchain | nvcc V13.2.86, GCC 12.4.0 (conda-forge) |
+| NCCL | 2.29.7 |
+| 目标 GPU | NVIDIA H200 (SM90) |
+| pip check | pass ✅ |
+| 状态 | `candidate` — GPU kernel/NCCL/training smoke 待跑 |
 
 ## 6. 推荐环境的构建与验证
 

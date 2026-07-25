@@ -98,14 +98,16 @@ fi
 
 export CUDA_HOME="${CUDA_TOOLCHAIN}"
 export CUDA_PATH="${CUDA_TOOLCHAIN}"
+export CUDA_TOOLKIT_ROOT_DIR="${CUDA_TOOLCHAIN}"
 export CUDACXX="${CUDA_TOOLCHAIN}/bin/nvcc"
 export CUDAHOSTCXX="${CXX_BIN}"
 export CC="${CC_BIN}"
 export CXX="${CXX_BIN}"
-export PATH="${CUDA_TOOLCHAIN}/bin:${PATH}"
+export PATH="${ENV_PREFIX}/bin:${CUDA_TOOLCHAIN}/bin:${PATH}"
 export LD_LIBRARY_PATH="${CUDA_TOOLCHAIN}/lib:${CUDA_TOOLCHAIN}/targets/x86_64-linux/lib:${LD_LIBRARY_PATH:-}"
 export CMAKE_PREFIX_PATH="${CUDA_TOOLCHAIN}:${ENV_PREFIX}"
 export TORCH_CUDA_ARCH_LIST="9.0"
+export CMAKE_POLICY_DEFAULT_CMP0146="OLD"  # restore FindCUDA (removed in cmake ≥3.27 default)
 export MAX_JOBS="${MAX_JOBS:-16}"
 export NVCC_THREADS="${NVCC_THREADS:-2}"
 export VLLM_TARGET_DEVICE="cuda"
@@ -113,7 +115,7 @@ export VLLM_VERSION_OVERRIDE="0.12.0"
 
 if [[ ! -e "${VLLM_SOURCE}/.git" ]]; then
     mkdir -p "$(dirname "${VLLM_SOURCE}")"
-    git clone --filter=blob:none https://github.com/vllm-project/vllm.git "${VLLM_SOURCE}"
+    git clone https://github.com/vllm-project/vllm.git "${VLLM_SOURCE}"
 fi
 git -C "${VLLM_SOURCE}" fetch origin "${VLLM_COMMIT}" --depth 1
 if [[ "$(git -C "${VLLM_SOURCE}" rev-parse HEAD)" != "${VLLM_COMMIT}" ]]; then
@@ -141,7 +143,14 @@ if [[ -z "${VLLM_WHEEL}" ]]; then
     (
         cd "${BUILD_ROOT}"
         "${PYTHON}" use_existing_torch.py
+        # cmake >= 4.0 enables CMP0146=NEW which removes the FindCUDA module
+        # required by torch's Caffe2 CMake config.  Downgrade if needed.
+        "${PYTHON}" -m pip install 'cmake>=3.26.1,<4.0'
         "${PYTHON}" -m pip install --constraint "${CONSTRAINTS}" -r requirements/build.txt
+        # vLLM's setup.py only passes -DCMAKE_CUDA_COMPILER from CUDA_HOME but
+        # does NOT pass -DCUDA_TOOLKIT_ROOT_DIR.  FindCUDA needs the toolkit root
+        # to locate CUDA headers in the conda CUDA layout.
+        sed -i '/cmake_args += \[f"-DCMAKE_CUDA_COMPILER={CUDA_HOME}\/bin\/nvcc"\]/a\            cmake_args += [f"-DCUDA_TOOLKIT_ROOT_DIR={CUDA_HOME}"]' setup.py 2>/dev/null || true
         "${PYTHON}" -m pip wheel --no-build-isolation --no-deps --wheel-dir "${WHEELHOUSE}" .
     )
     VLLM_WHEEL="$(find "${WHEELHOUSE}" -maxdepth 1 -type f -name 'vllm-0.12.0*.whl' -print -quit)"
