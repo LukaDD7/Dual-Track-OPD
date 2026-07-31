@@ -254,17 +254,18 @@ def generate_response(
         inputs = inputs.to(f"cuda:{torch.cuda.current_device()}")
 
     do_sample = temperature > 0
-    gen_kwargs: dict[str, Any] = {
-        "do_sample": do_sample,
-        "max_new_tokens": max_new_tokens,
-        "pad_token_id": processor.tokenizer.eos_token_id,
-    }
-    if do_sample:
-        gen_kwargs["temperature"] = temperature
-        gen_kwargs["top_p"] = top_p
+    # Use GenerationConfig for transformers ≥ 5.x compatibility
+    from transformers import GenerationConfig
+    gen_config = GenerationConfig(
+        do_sample=do_sample,
+        max_new_tokens=max_new_tokens,
+        pad_token_id=processor.tokenizer.eos_token_id,
+        temperature=temperature if do_sample else None,
+        top_p=top_p if do_sample else None,
+    )
 
     with torch.no_grad():
-        outputs = model.generate(**inputs, **gen_kwargs)
+        outputs = model.generate(**inputs, generation_config=gen_config)
 
     input_len = inputs["input_ids"].shape[-1]
     generated_ids = outputs[0, input_len:]
