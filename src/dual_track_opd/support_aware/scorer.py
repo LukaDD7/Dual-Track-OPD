@@ -237,7 +237,7 @@ class StudentScorer:
         )
         self._model.eval()
         self._tokenizer = self._processor.tokenizer
-        self._model_device = config.device
+        self._device_str = config.device  # stored for reference
         self._image_cls = Image
 
     @property
