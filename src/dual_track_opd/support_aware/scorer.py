@@ -139,7 +139,7 @@ class TeacherScorer:
                     "question": question,
                     "condition_inputs": {
                         "full_image": {"path": image_path},
-                        "degraded_image": {"path": image_path},
+                        "degraded_image": {"path": image_path, "transform": {"type": "gaussian_blur", "sigma": 2.0}},
                         "free_caption": "placeholder",
                         "task_evidence": "placeholder",
                         "task_visible_evidence": None,
