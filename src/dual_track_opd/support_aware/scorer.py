@@ -233,12 +233,17 @@ class StudentScorer:
             getattr(torch, config.dtype) if config.dtype != "float32" else torch.float32
         )
         self._model = AutoModelForImageTextToText.from_pretrained(
-            resolved, torch_dtype=torch_dtype
-        ).to(config.device)
+            resolved, torch_dtype=torch_dtype, device_map="auto"
+        )
         self._model.eval()
         self._tokenizer = self._processor.tokenizer
-        self._device = config.device
+        self._model_device = config.device
         self._image_cls = Image
+
+    @property
+    def _model_device(self) -> torch.device:
+        """The device where the model actually resides."""
+        return next(self._model.parameters()).device
 
     @property
     def tokenizer(self):
@@ -332,9 +337,9 @@ class StudentScorer:
         for key, value in full_enc.items():
             if key in {"input_ids", "attention_mask"}:
                 continue
-            model_inputs[key] = value.to(self._device)
-        model_inputs["input_ids"] = full_ids.to(self._device)
-        model_inputs["attention_mask"] = torch.ones_like(full_ids, device=self._device)
+            model_inputs[key] = value.to(self._model_device)
+        model_inputs["input_ids"] = full_ids.to(self._model_device)
+        model_inputs["attention_mask"] = torch.ones_like(full_ids, device=self._model_device)
 
         with torch.no_grad():
             logits = self._model(**model_inputs).logits
@@ -352,7 +357,7 @@ class StudentScorer:
             )
 
         response_logits = logits[0, prompt_len - 1 : prompt_len + T - 1, :]
-        response_ids_tensor = full_ids[0, prompt_len:].to(self._device)
+        response_ids_tensor = full_ids[0, prompt_len:].to(self._model_device)
 
         log_probs = F.log_softmax(response_logits.float(), dim=-1)
         sampled = log_probs[range(len(response_ids_tensor)), response_ids_tensor]

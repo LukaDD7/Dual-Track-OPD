@@ -248,7 +248,10 @@ def generate_response(
     )
     inputs = processor(
         text=[chat], images=[image], return_tensors="pt"
-    ).to(device)
+    )
+    # Move to whichever GPU the model is on (avoids CUDA_VISIBLE_DEVICES issues)
+    if torch.cuda.is_available():
+        inputs = inputs.to(f"cuda:{torch.cuda.current_device()}")
 
     do_sample = temperature > 0
     gen_kwargs: dict[str, Any] = {
@@ -329,8 +332,8 @@ def run_diagnostic(config: DiagnosticConfig) -> dict[str, Any]:
     processor = AutoProcessor.from_pretrained(student_path)
     torch_dtype = getattr(torch, config.dtype) if config.dtype != "float32" else torch.float32
     model = AutoModelForImageTextToText.from_pretrained(
-        student_path, torch_dtype=torch_dtype
-    ).to(config.device)
+        student_path, torch_dtype=torch_dtype, device_map="auto"
+    )
     model.eval()
 
     # Student scorer (uses the same model for forced scoring)
