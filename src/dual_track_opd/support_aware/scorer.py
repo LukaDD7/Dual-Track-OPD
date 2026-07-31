@@ -235,10 +235,8 @@ class StudentScorer:
         self._model = AutoModelForImageTextToText.from_pretrained(
             resolved,
             torch_dtype=torch_dtype,
-            device_map=config.device if config.device == "cuda" else None,
+            device_map="auto",
         )
-        if config.device != "cuda":
-            self._model.to(config.device)
         self._model.eval()
         self._tokenizer = self._processor.tokenizer
         self._device = config.device
