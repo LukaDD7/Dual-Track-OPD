@@ -115,6 +115,7 @@ class TeacherScorer:
         request_id: str,
         question: str,
         image_path: str,
+        prompt_text: str,
         response_token_ids: Sequence[int],
         response_text: str = "",
     ) -> "TeacherScorer.ScoreResult":
@@ -124,6 +125,7 @@ class TeacherScorer:
             request_id: Unique identifier for this scoring request.
             question: The geometry problem text.
             image_path: Path to the diagram image.
+            prompt_text: The full prompt text shown to the student.
             response_token_ids: The exact token IDs of the student response.
             response_text: The decoded response text (for logging only).
 
@@ -131,6 +133,16 @@ class TeacherScorer:
             ScoreResult with per-token log-probs and mean.
         """
         meta = self.metadata
+        # Reconstruct the chat messages that were used for generation.
+        prompt_messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image", "image": image_path},
+                    {"type": "text", "text": prompt_text},
+                ],
+            }
+        ]
         payload = {
             "requests": [
                 {
@@ -148,6 +160,7 @@ class TeacherScorer:
                         "verified_facts": None,
                         "verified_facts_source": None,
                     },
+                    "prompt": prompt_messages,
                     "response_token_ids": list(response_token_ids),
                     "tokenizer_hash": str(meta["tokenizer_hash"]),
                     "response_text": response_text,

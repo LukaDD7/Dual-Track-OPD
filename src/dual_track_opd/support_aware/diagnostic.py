@@ -687,6 +687,7 @@ def _score_and_record(
         request_id=rollout_uid,
         question=question,
         image_path=image_path,
+        prompt_text=prompt_text,
         response_token_ids=response_token_ids,
         response_text=response_text,
     )
