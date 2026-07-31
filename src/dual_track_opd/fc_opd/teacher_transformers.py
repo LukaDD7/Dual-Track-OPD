@@ -228,6 +228,11 @@ class TransformersTeacherScorer(TeacherScorer):
             "image_grid_thw": model_inputs.get("image_grid_thw"),
             "video_grid_thw": model_inputs.get("video_grid_thw"),
         }
+        # Qwen3-VL with transformers ≥ 5.x requires mm_token_type_ids for
+        # get_rope_index().  The processor populates it; forward it if present.
+        for extra in ("mm_token_type_ids", "pixel_values", "pixel_values_videos"):
+            if extra in model_inputs:
+                kwargs[extra] = model_inputs[extra]
         candidates = (
             getattr(self.processor, "get_rope_index", None),
             getattr(self.model, "get_rope_index", None),
