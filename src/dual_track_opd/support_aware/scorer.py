@@ -140,8 +140,8 @@ class TeacherScorer:
                     "condition_inputs": {
                         "full_image": {"path": image_path},
                         "degraded_image": {"path": image_path},
-                        "free_caption": "",
-                        "task_evidence": "",
+                        "free_caption": "placeholder",
+                        "task_evidence": "placeholder",
                         "task_visible_evidence": None,
                         "task_infer_evidence": None,
                         "task_solve_evidence": None,
