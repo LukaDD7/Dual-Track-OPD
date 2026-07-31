@@ -1,7 +1,7 @@
 """Teacher and student forced-scoring for frozen-policy diagnostics.
 
 TeacherScorer
-    Thin HTTP client for the standalone Qwen3-VL-32B teacher service.
+    Thin wrapper around the battle-tested ``TeacherClient`` from FC-OPD.
     Sends response token IDs and receives ``sampled_token_log_probs`` —
     the exact log-probability the teacher assigns to each response token.
 
@@ -16,15 +16,13 @@ import json
 import os
 from dataclasses import dataclass
 from typing import Any, Sequence
-from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
 
 import torch
 from PIL import Image
 
 
 # ---------------------------------------------------------------------------
-# Teacher scorer (HTTP)
+# Teacher scorer — wraps the verified TeacherClient
 # ---------------------------------------------------------------------------
 
 
@@ -34,79 +32,36 @@ class TeacherScorerConfig:
     timeout_seconds: float = 120.0
 
 
-class TeacherServiceError(RuntimeError):
-    pass
-
-
 class TeacherScorer:
-    """HTTP client for teacher forced-scoring."""
+    """Teacher forced-scorer backed by the verified FC-OPD TeacherClient."""
 
     def __init__(self, config: TeacherScorerConfig | None = None):
+        from dual_track_opd.fc_opd.teacher_client import TeacherClient
+
         self._cfg = config or TeacherScorerConfig()
-        self._metadata: dict[str, Any] | None = None
-
-    # -- connection ------------------------------------------------------------
-
-    @property
-    def metadata(self) -> dict[str, Any]:
-        if self._metadata is None:
-            self._metadata = self._get_json("/metadata")
-        return self._metadata
+        self._client = TeacherClient(
+            self._cfg.base_url,
+            timeout_seconds=self._cfg.timeout_seconds,
+        )
 
     @property
     def tokenizer_hash(self) -> str:
-        return str(self.metadata["tokenizer_hash"])
+        return self._client.metadata.tokenizer_hash
 
     @property
     def model_id(self) -> str:
-        return str(self.metadata["model_id"])
+        return self._client.metadata.model_id
 
     def health(self) -> bool:
-        try:
-            resp = self._get_json("/health")
-            return isinstance(resp, dict) and resp.get("status") == "ok"
-        except TeacherServiceError:
-            return False
-
-    def _get_json(self, path: str) -> Any:
-        return self._request("GET", path)
-
-    def _request(
-        self,
-        method: str,
-        path: str,
-        payload: object | None = None,
-    ) -> Any:
-        data: bytes | None = None
-        headers: dict[str, str] = {"Accept": "application/json"}
-        if payload is not None:
-            data = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()
-            headers["Content-Type"] = "application/json"
-        url = f"{self._cfg.base_url.rstrip('/')}{path}"
-        req = Request(url, method=method, data=data, headers=headers)
-        try:
-            with urlopen(req, timeout=self._cfg.timeout_seconds) as resp:
-                return json.loads(resp.read())
-        except HTTPError as exc:
-            body = exc.read().decode(errors="replace")
-            raise TeacherServiceError(
-                f"teacher HTTP {exc.code}: {body[:500]}"
-            ) from exc
-        except URLError as exc:
-            raise TeacherServiceError(
-                f"teacher unreachable at {self._cfg.base_url}: {exc.reason}"
-            ) from exc
+        return self._client.health()
 
     # -- scoring ---------------------------------------------------------------
 
     @dataclass(frozen=True)
     class ScoreResult:
-        """Result of a single teacher forced-scoring request."""
-
         request_id: str
         sampled_token_log_probs: tuple[float, ...]
         mean_logp: float
-        teacher_entropy: tuple[float, ...] | None = None
         error: str | None = None
 
     def score(
@@ -119,91 +74,64 @@ class TeacherScorer:
         response_token_ids: Sequence[int],
         response_text: str = "",
     ) -> "TeacherScorer.ScoreResult":
-        """Teacher-force score one response.
+        """Teacher-force score one response under condition=FULL."""
+        from dual_track_opd.fc_opd.conditions import Condition, ConditionInputs, ImageInput
+        from dual_track_opd.fc_opd.teacher_client import score_teacher_conditions
 
-        Args:
-            request_id: Unique identifier for this scoring request.
-            question: The geometry problem text.
-            image_path: Path to the diagram image.
-            prompt_text: The full prompt text shown to the student.
-            response_token_ids: The exact token IDs of the student response.
-            response_text: The decoded response text (for logging only).
-
-        Returns:
-            ScoreResult with per-token log-probs and mean.
-        """
-        meta = self.metadata
-        # Reconstruct the chat messages that were used for generation.
-        prompt_messages = [
+        condition_inputs = ConditionInputs(
+            full_image=ImageInput(path=image_path),
+            degraded_image=ImageInput(
+                path=image_path,
+                transform={"type": "gaussian_blur", "sigma": 2.0},
+            ),
+            free_caption="placeholder",
+            task_evidence="placeholder",
+        )
+        prompt = (
             {
                 "role": "user",
                 "content": [
                     {"type": "image", "image": image_path},
                     {"type": "text", "text": prompt_text},
                 ],
-            }
-        ]
-        payload = {
-            "requests": [
-                {
-                    "request_id": request_id,
-                    "condition": "full",
-                    "question": question,
-                    "condition_inputs": {
-                        "full_image": {"path": image_path},
-                        "degraded_image": {"path": image_path, "transform": {"type": "gaussian_blur", "sigma": 2.0}},
-                        "free_caption": "placeholder",
-                        "task_evidence": "placeholder",
-                        "task_visible_evidence": None,
-                        "task_infer_evidence": None,
-                        "task_solve_evidence": None,
-                        "verified_facts": None,
-                        "verified_facts_source": None,
-                    },
-                    "prompt": prompt_messages,
-                    "response_token_ids": list(response_token_ids),
-                    "tokenizer_hash": str(meta["tokenizer_hash"]),
-                    "response_text": response_text,
-                }
-            ]
-        }
+            },
+        )
 
-        raw = self._request("POST", "/score", payload)
-
-        if not isinstance(raw, dict) or not isinstance(raw.get("responses"), list):
-            raise TeacherServiceError("invalid score response")
-        responses = raw["responses"]
-        if len(responses) != 1:
-            raise TeacherServiceError(
-                f"expected 1 response, got {len(responses)}"
+        try:
+            scores = score_teacher_conditions(
+                response_token_ids=response_token_ids,
+                question=question,
+                condition_inputs=condition_inputs,
+                conditions=[Condition.FULL],
+                teacher_client=self._client,
+                response_text=response_text,
+                prompt=prompt,
+                request_prefix=request_id,
             )
-
-        resp = responses[0]
-        if resp.get("request_id") != request_id:
-            raise TeacherServiceError("response request_id mismatch")
-
-        error = resp.get("error")
-        if error:
+        except Exception as exc:
             return TeacherScorer.ScoreResult(
                 request_id=request_id,
                 sampled_token_log_probs=(),
                 mean_logp=float("nan"),
-                error=str(error),
+                error=str(exc),
             )
 
-        sampled = tuple(float(v) for v in resp["sampled_token_log_probs"])
+        topk = scores.get(Condition.FULL)
+        if topk is None or topk.sampled_log_probs is None:
+            return TeacherScorer.ScoreResult(
+                request_id=request_id,
+                sampled_token_log_probs=(),
+                mean_logp=float("nan"),
+                error="teacher returned no sampled_log_probs",
+            )
+
+        sampled = tuple(float(v) for v in topk.sampled_log_probs.flatten().tolist())
         mean_logp = float(sum(sampled) / max(len(sampled), 1))
-        entropy = (
-            tuple(float(v) for v in resp["teacher_entropy"])
-            if resp.get("teacher_entropy")
-            else None
-        )
 
         return TeacherScorer.ScoreResult(
             request_id=request_id,
             sampled_token_log_probs=sampled,
             mean_logp=mean_logp,
-            teacher_entropy=entropy,
         )
 
 
