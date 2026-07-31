@@ -373,11 +373,7 @@ class StudentScorer:
         return tuple(int(t) for t in self._tokenizer.encode(response_text))
 
     def tokenizer_hash(self) -> str:
-        """Compute a deterministic hash of the tokenizer vocabulary."""
-        import hashlib
+        """Compute a deterministic hash of the tokenizer (matches teacher fingerprint)."""
+        from dual_track_opd.fc_opd.teacher_protocol import tokenizer_fingerprint
 
-        vocab = sorted(
-            (str(t), int(i)) for t, i in self._tokenizer.get_vocab().items()
-        )
-        payload = json.dumps({"vocab": vocab}, ensure_ascii=False, sort_keys=True)
-        return hashlib.sha256(payload.encode()).hexdigest()
+        return tokenizer_fingerprint(self._tokenizer)
