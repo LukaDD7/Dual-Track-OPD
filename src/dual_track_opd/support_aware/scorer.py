@@ -202,7 +202,7 @@ class TeacherScorer:
 @dataclass(frozen=True)
 class StudentScorerConfig:
     model_path: str = ""
-    device: str = "cuda"
+    device: str = "cuda:0"
     dtype: str = "bfloat16"
 
 
@@ -233,10 +233,8 @@ class StudentScorer:
             getattr(torch, config.dtype) if config.dtype != "float32" else torch.float32
         )
         self._model = AutoModelForImageTextToText.from_pretrained(
-            resolved,
-            torch_dtype=torch_dtype,
-            device_map="auto",
-        )
+            resolved, torch_dtype=torch_dtype
+        ).to(config.device)
         self._model.eval()
         self._tokenizer = self._processor.tokenizer
         self._device = config.device

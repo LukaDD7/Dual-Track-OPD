@@ -329,8 +329,8 @@ def run_diagnostic(config: DiagnosticConfig) -> dict[str, Any]:
     processor = AutoProcessor.from_pretrained(student_path)
     torch_dtype = getattr(torch, config.dtype) if config.dtype != "float32" else torch.float32
     model = AutoModelForImageTextToText.from_pretrained(
-        student_path, torch_dtype=torch_dtype, device_map="auto"
-    )
+        student_path, torch_dtype=torch_dtype
+    ).to(config.device)
     model.eval()
 
     # Student scorer (uses the same model for forced scoring)
