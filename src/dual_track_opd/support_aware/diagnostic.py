@@ -81,7 +81,7 @@ class DiagnosticConfig:
     seed: int = 42
     student_model_path: str = ""
     teacher_url: str = "http://127.0.0.1:18080"
-    device: str = "cuda"
+    device: str = "cuda:0"
     dtype: str = "bfloat16"
     output_root: str = ""
     mode: str = "smoke"  # "smoke" or "full"
