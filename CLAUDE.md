@@ -23,3 +23,27 @@ CUDA_VISIBLE_DEVICES=3,4 KEEPALIVE_TARGET_UTIL=0.45 KEEPALIVE_WORK_ITERS=32 pyth
 ```
 
 Prefer a flag or env var such as `--keepalive-after-success`; do not start keepalive after failed or interrupted runs unless explicitly requested.
+
+## GPU Instance — vLLM FlashInfer JIT Runtime Requirements
+
+The Vision-OPD-4B checkpoint (`model_type: qwen3_5`) uses Qwen3-Next GDN (Gated Delta Net) attention, which triggers flashinfer SM90 GDN prefill kernel JIT compilation at vLLM inference time. The GPU instance has no system CUDA toolkit (`/usr/local/cuda` absent), so all vLLM servers serving the Vision-OPD checkpoint must declare the managed CUDA toolchain before startup:
+
+```bash
+export CUDA_HOME=/inspire/hdd/global_user/mengweicheng-240108120092/lzy/envs/cuda128-toolchain
+export PATH="${CUDA_HOME}/bin:${PATH}"
+export LIBRARY_PATH="${CUDA_HOME}/lib64:${CUDA_HOME}/lib64/stubs:${CUDA_HOME}/lib:${CUDA_HOME}/targets/x86_64-linux/lib:${LIBRARY_PATH}"
+export LD_LIBRARY_PATH="${CUDA_HOME}/lib:${CUDA_HOME}/targets/x86_64-linux/lib:${LD_LIBRARY_PATH}"
+```
+
+| Variable | Why needed | Who needs it |
+|---|---|---|
+| `CUDA_HOME` | flashinfer `get_cuda_path()` reads this first to locate nvcc + headers + linker `-L` dirs | Vision-OPD vLLM (qwen3_5 → GDN attention) |
+| `PATH` | Belt-and-suspenders: flashinfer also tries `which nvcc` as fallback | Same |
+| `LIBRARY_PATH` | **Critical**: conda GCC uses sysroot-based linking; `-L` flags from flashinfer JIT are ignored. Linker searches `LIBRARY_PATH` instead to resolve `-lcudart` and `-lcuda`. | Same |
+| `LD_LIBRARY_PATH` | Compiled `.so` must find `libcudart.so.*` at dlopen time (libcuda comes from NVIDIA driver) | Same |
+
+**Design rationale**: The cuda128-toolchain was built on the CPU instance (see `scripts/hpc/setup_va_opd_native_env.sh`) for compiling vLLM and flash-attn without `/usr/bin/nvcc`. It uses the **conda CUDA layout** where real libraries live under `targets/x86_64-linux/lib/` with compat symlinks in `lib64/`. The conda GCC 14.3.0 compiler enforces a sysroot model — unlike system GCC, it does not honor `-L` on the command line, so `LIBRARY_PATH` is the only mechanism to inject library search paths at JIT link time.
+
+**Not required for**: Judge server (Qwen3-VL-32B uses standard self-attention, no flashinfer GDN). Adding the vars is harmless.
+
+**FlashInfer cache**: JIT-compiled kernels are cached at `~/.cache/flashinfer/` (GPU-local, not NFS). Clean with `rm -rf ~/.cache/flashinfer/` if a JIT build fails and leaves corrupted artifacts.

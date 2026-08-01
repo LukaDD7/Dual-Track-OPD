@@ -105,6 +105,8 @@ export CC="${CC_BIN}"
 export CXX="${CXX_BIN}"
 export PATH="${ENV_PREFIX}/bin:${CUDA_TOOLCHAIN}/bin:${PATH}"
 export LD_LIBRARY_PATH="${CUDA_TOOLCHAIN}/lib:${CUDA_TOOLCHAIN}/targets/x86_64-linux/lib:${LD_LIBRARY_PATH:-}"
+export C_INCLUDE_PATH="${CUDA_TOOLCHAIN}/include:${CUDA_TOOLCHAIN}/targets/x86_64-linux/include:${C_INCLUDE_PATH:-}"
+export CPLUS_INCLUDE_PATH="${CUDA_TOOLCHAIN}/include:${CUDA_TOOLCHAIN}/targets/x86_64-linux/include:${CPLUS_INCLUDE_PATH:-}"
 export CMAKE_PREFIX_PATH="${CUDA_TOOLCHAIN}:${ENV_PREFIX}"
 export TORCH_CUDA_ARCH_LIST="9.0"
 export CMAKE_POLICY_DEFAULT_CMP0146="OLD"  # restore FindCUDA (removed in cmake ≥3.27 default)
@@ -151,6 +153,8 @@ if [[ -z "${VLLM_WHEEL}" ]]; then
         # does NOT pass -DCUDA_TOOLKIT_ROOT_DIR.  FindCUDA needs the toolkit root
         # to locate CUDA headers in the conda CUDA layout.
         sed -i '/cmake_args += \[f"-DCMAKE_CUDA_COMPILER={CUDA_HOME}\/bin\/nvcc"\]/a\            cmake_args += [f"-DCUDA_TOOLKIT_ROOT_DIR={CUDA_HOME}"]' setup.py 2>/dev/null || true
+        # vLLM ≥0.11 cmake requires VLLM_PYTHON_EXECUTABLE to find Python headers/libs.
+        export VLLM_PYTHON_EXECUTABLE="${PYTHON}"
         "${PYTHON}" -m pip wheel --no-build-isolation --no-deps --wheel-dir "${WHEELHOUSE}" .
     )
     VLLM_WHEEL="$(find "${WHEELHOUSE}" -maxdepth 1 -type f -name 'vllm-0.12.0*.whl' -print -quit)"
