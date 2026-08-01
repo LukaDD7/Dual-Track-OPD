@@ -134,6 +134,85 @@ class TeacherScorer:
             mean_logp=mean_logp,
         )
 
+    def score_batch(
+        self,
+        *,
+        request_ids: Sequence[str],
+        questions: Sequence[str],
+        image_paths: Sequence[str],
+        prompt_texts: Sequence[str],
+        response_token_ids_list: Sequence[Sequence[int]],
+        response_texts: Sequence[str] | None = None,
+    ) -> list["TeacherScorer.ScoreResult"]:
+        """Teacher-force score multiple responses in a single HTTP batch call.
+
+        All responses must share the same question/image (same prompt, different
+        rollouts).  Uses ``score_teacher_conditions_multi_sample`` under the hood.
+        """
+        from dual_track_opd.fc_opd.conditions import Condition, ConditionInputs, ImageInput
+        from dual_track_opd.fc_opd.teacher_client import score_teacher_conditions_multi_sample
+
+        n = len(request_ids)
+        if response_texts is None:
+            response_texts = [""] * n
+
+        # Build samples — all share the same condition_inputs (same prompt)
+        samples: list[tuple[Sequence[int], str, ConditionInputs]] = []
+        for i in range(n):
+            condition_inputs = ConditionInputs(
+                full_image=ImageInput(path=image_paths[i]),
+                degraded_image=ImageInput(
+                    path=image_paths[i],
+                    transform={"type": "gaussian_blur", "sigma": 2.0},
+                ),
+                free_caption="placeholder",
+                task_evidence="placeholder",
+            )
+            samples.append((
+                tuple(int(t) for t in response_token_ids_list[i]),
+                questions[i],
+                condition_inputs,
+            ))
+
+        try:
+            batch_results = score_teacher_conditions_multi_sample(
+                samples=samples,
+                conditions=[Condition.FULL],
+                teacher_client=self._client,
+                response_texts=list(response_texts),
+                request_prefix=request_ids[0].rsplit(":", 1)[0] if request_ids else "batch",
+            )
+        except Exception as exc:
+            return [
+                TeacherScorer.ScoreResult(
+                    request_id=rid,
+                    sampled_token_log_probs=(),
+                    mean_logp=float("nan"),
+                    error=str(exc),
+                )
+                for rid in request_ids
+            ]
+
+        results: list[TeacherScorer.ScoreResult] = []
+        for i, cond_map in enumerate(batch_results):
+            topk = cond_map.get(Condition.FULL)
+            if topk is None or topk.sampled_log_probs is None:
+                results.append(TeacherScorer.ScoreResult(
+                    request_id=request_ids[i],
+                    sampled_token_log_probs=(),
+                    mean_logp=float("nan"),
+                    error="teacher returned no sampled_log_probs",
+                ))
+            else:
+                sampled = tuple(float(v) for v in topk.sampled_log_probs.flatten().tolist())
+                mean_logp = float(sum(sampled) / max(len(sampled), 1))
+                results.append(TeacherScorer.ScoreResult(
+                    request_id=request_ids[i],
+                    sampled_token_log_probs=sampled,
+                    mean_logp=mean_logp,
+                ))
+        return results
+
 
 # ---------------------------------------------------------------------------
 # Student scorer (local model)
@@ -311,6 +390,118 @@ class StudentScorer:
             mean_logp=mean_logp,
             token_count=len(sampled_tuple),
         )
+
+    def score_batch(
+        self,
+        *,
+        questions: Sequence[str],
+        images: Sequence[Image.Image],
+        prompt_texts: Sequence[str],
+        response_texts: Sequence[str],
+        response_token_ids_list: Sequence[Sequence[int]],
+    ) -> list["StudentScorer.ScoreResult"]:
+        """Student-force score multiple responses in a single batched forward pass.
+
+        All items must reference the same prompt (same question + image) so the
+        chat template prefix is identical.  Items differ only in the response suffix.
+        """
+        import torch.nn.functional as F
+
+        n = len(questions)
+        if n == 0:
+            return []
+
+        # Build chat prompt for the shared prefix (use first item's inputs)
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image", "image": images[0]},
+                    {"type": "text", "text": prompt_texts[0]},
+                ],
+            }
+        ]
+        chat_text = self._processor.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True
+        )
+
+        # Tokenize each (prompt + response) pair independently, then pad
+        prompt_enc = self._processor(text=[chat_text], images=[images[0]], return_tensors="pt")
+        prompt_len = prompt_enc["input_ids"].shape[1]
+
+        # Build padded batch
+        all_input_ids: list[torch.Tensor] = []
+        all_response_lens: list[int] = []
+        for i in range(n):
+            resp_ids = tuple(int(t) for t in response_token_ids_list[i])
+            if not resp_ids:
+                all_input_ids.append(prompt_enc["input_ids"][0])
+                all_response_lens.append(0)
+                continue
+            full_text = chat_text + response_texts[i]
+            full_enc = self._processor(
+                text=[full_text], images=[images[0]], return_tensors="pt"
+            )
+            all_input_ids.append(full_enc["input_ids"][0])
+            all_response_lens.append(full_enc["input_ids"].shape[1] - prompt_len)
+
+        # Pad to max length
+        max_len = max(ids.shape[0] for ids in all_input_ids)
+        pad_token_id = self._tokenizer.pad_token_id or self._tokenizer.eos_token_id
+        padded_ids = torch.full((n, max_len), pad_token_id, dtype=torch.long)
+        attention_mask = torch.zeros((n, max_len), dtype=torch.long)
+        for i, ids in enumerate(all_input_ids):
+            L = ids.shape[0]
+            padded_ids[i, :L] = ids
+            attention_mask[i, :L] = 1
+
+        # Move to device
+        device = self._model_device
+        model_inputs: dict[str, torch.Tensor] = {
+            "input_ids": padded_ids.to(device),
+            "attention_mask": attention_mask.to(device),
+        }
+        # Use prompt_enc for image-related tensors (shared across all items)
+        for key, value in prompt_enc.items():
+            if key in {"input_ids", "attention_mask"}:
+                continue
+            if isinstance(value, torch.Tensor):
+                model_inputs[key] = value.to(device)
+
+        with torch.no_grad():
+            logits = self._model(**model_inputs).logits  # (n, max_len, vocab)
+
+        # Extract per-item log-probs
+        results: list[StudentScorer.ScoreResult] = []
+        for i in range(n):
+            T = all_response_lens[i]
+            if T <= 0:
+                results.append(StudentScorer.ScoreResult(
+                    sampled_token_log_probs=(),
+                    mean_logp=float("nan"),
+                    token_count=0,
+                    error="empty response" if T == 0 else "response tokenization misalignment",
+                ))
+                continue
+
+            # Response tokens are at positions [prompt_len, prompt_len+T)
+            # logits[t] predicts token t+1, so we use logits[i, prompt_len-1 : prompt_len+T-1]
+            response_logits = logits[i, prompt_len - 1 : prompt_len + T - 1, :]
+            response_ids = padded_ids[i, prompt_len : prompt_len + T]
+
+            log_probs = F.log_softmax(response_logits.float(), dim=-1)
+            sampled = log_probs[range(len(response_ids)), response_ids]
+
+            sampled_tuple = tuple(float(v.item()) for v in sampled)
+            mean_logp = float(sum(sampled_tuple) / len(sampled_tuple))
+
+            results.append(StudentScorer.ScoreResult(
+                sampled_token_log_probs=sampled_tuple,
+                mean_logp=mean_logp,
+                token_count=len(sampled_tuple),
+            ))
+
+        return results
 
     def encode_response(self, response_text: str) -> tuple[int, ...]:
         """Tokenize a response string into token IDs."""

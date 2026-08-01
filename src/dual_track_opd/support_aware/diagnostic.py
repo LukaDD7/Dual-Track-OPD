@@ -254,18 +254,20 @@ def generate_response(
         inputs = inputs.to(f"cuda:{torch.cuda.current_device()}")
 
     do_sample = temperature > 0
-    # Use GenerationConfig for transformers ≥ 5.x compatibility
-    from transformers import GenerationConfig
-    gen_config = GenerationConfig(
-        do_sample=do_sample,
-        max_new_tokens=max_new_tokens,
-        pad_token_id=processor.tokenizer.eos_token_id,
-        temperature=temperature if do_sample else None,
-        top_p=top_p if do_sample else None,
-    )
+    # transformers ≥ 5.x ignores temperature/top_p as generate() kwargs;
+    # set them on the model's generation_config before calling generate().
+    model.generation_config.do_sample = do_sample
+    model.generation_config.max_new_tokens = max_new_tokens
+    model.generation_config.pad_token_id = processor.tokenizer.eos_token_id
+    if do_sample:
+        model.generation_config.temperature = temperature
+        model.generation_config.top_p = top_p
+    else:
+        model.generation_config.temperature = None
+        model.generation_config.top_p = None
 
     with torch.no_grad():
-        outputs = model.generate(**inputs, generation_config=gen_config)
+        outputs = model.generate(**inputs)
 
     input_len = inputs["input_ids"].shape[-1]
     generated_ids = outputs[0, input_len:]
@@ -311,6 +313,12 @@ def run_diagnostic(config: DiagnosticConfig) -> dict[str, Any]:
     output_dir.mkdir(parents=True, exist_ok=True)
     log_dir = output_dir / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
+
+    # Open incremental output files so we don't lose data if the run is killed
+    rollouts_path = output_dir / "rollouts.jsonl"
+    summaries_path = output_dir / "prompt_support_summary.jsonl"
+    rollouts_fh = rollouts_path.open("a", encoding="utf-8")  # append for resume
+    summaries_fh = summaries_path.open("a", encoding="utf-8")
 
     print(f"=== Support-Aware Diagnostic: {run_id} ===")
     print(f"Output: {output_dir}")
@@ -381,7 +389,7 @@ def run_diagnostic(config: DiagnosticConfig) -> dict[str, Any]:
     print(f"\n[4/6] Generating and scoring ({len(prompts)} prompts × {1+K} rollouts)...")
 
     missing_image = 0
-    non_finite_count = 0
+    nf_container = [0]  # mutable so _score_and_record can increment
     malformed_count = 0
     total_rollouts = 0
 
@@ -399,37 +407,29 @@ def run_diagnostic(config: DiagnosticConfig) -> dict[str, Any]:
             missing_image += 1
             continue
 
-        # Greedy response
+        # -- Phase A: Generate all responses first ---------------------------------
+        # Collect metadata for all 9 rollouts (1 greedy + K stochastic) before
+        # scoring, so we can batch-score teacher and student in single calls.
+        batch_meta: list[dict[str, Any]] = []
+
+        # Greedy
+        greedy_seed = rollout_seed(config.seed, int(prompt.get("source_index", pi)), 0)
         greedy_text, greedy_ids = generate_response(
             model, processor, question, image, prompt_text,
             temperature=0.0, top_p=1.0,
             max_new_tokens=config.max_new_tokens,
-            seed=rollout_seed(config.seed, int(prompt.get("source_index", pi)), 0),
+            seed=greedy_seed,
             device=config.device,
         )
         greedy_verdict = verify_answer(greedy_text, gold_answer)
         greedy_correct = greedy_verdict.get("correct")
-
-        # Score greedy
-        _score_and_record(
-            all_rollouts, teacher, student_scorer,
-            sample_uid=sample_uid, question=question, image=image,
-            image_path=image_path, image_hash=image_hash,
-            prompt_text=prompt_text, prompt_hash=prompt_hash,
+        batch_meta.append(dict(
+            rollout_id=0, is_greedy=True, generation_seed=greedy_seed,
             response_text=greedy_text, response_token_ids=greedy_ids,
-            config=config, prompt_index=pi, rollout_id=0,
-            is_greedy=True, gold_answer=gold_answer,
-            generation_seed=rollout_seed(config.seed, int(prompt.get("source_index", pi)), 0),
-            tokenizer_hash=student_hash,
-            teacher_model_id=teacher.model_id,
-            non_finite_count=non_finite_count,
-            errors=errors,
-        )
-        total_rollouts += 1
-        if greedy_verdict.get("malformed"):
-            malformed_count += 1
+            verdict=greedy_verdict,
+        ))
 
-        # Stochastic rollouts
+        # Stochastic
         correct_count = 0
         prompt_rollout_hashes: list[str] = []
         for rollout_id in range(1, K + 1):
@@ -447,23 +447,96 @@ def run_diagnostic(config: DiagnosticConfig) -> dict[str, Any]:
                 correct_count += 1
             if verdict.get("malformed"):
                 malformed_count += 1
-
-            _score_and_record(
-                all_rollouts, teacher, student_scorer,
-                sample_uid=sample_uid, question=question, image=image,
-                image_path=image_path, image_hash=image_hash,
-                prompt_text=prompt_text, prompt_hash=prompt_hash,
+            batch_meta.append(dict(
+                rollout_id=rollout_id, is_greedy=False, generation_seed=gen_seed,
                 response_text=resp_text, response_token_ids=resp_ids,
-                config=config, prompt_index=pi, rollout_id=rollout_id,
-                is_greedy=False, gold_answer=gold_answer,
-                generation_seed=gen_seed,
-                tokenizer_hash=student_hash,
-                teacher_model_id=teacher.model_id,
-                non_finite_count=non_finite_count,
-                errors=errors,
-            )
-            total_rollouts += 1
+                verdict=verdict,
+            ))
             prompt_rollout_hashes.append(hashlib.sha256(resp_text.encode()).hexdigest())
+
+        # -- Phase B: Batch-score all responses ------------------------------------
+        # Teacher batch: one HTTP call for all 9 rollouts
+        batch_size = len(batch_meta)
+        batch_request_ids = [
+            f"{sample_uid}:greedy" if m["is_greedy"] else f"{sample_uid}:rollout-{m['rollout_id']}"
+            for m in batch_meta
+        ]
+        t_results = teacher.score_batch(
+            request_ids=batch_request_ids,
+            questions=[question] * batch_size,
+            image_paths=[image_path] * batch_size,
+            prompt_texts=[prompt_text] * batch_size,
+            response_token_ids_list=[m["response_token_ids"] for m in batch_meta],
+            response_texts=[m["response_text"] for m in batch_meta],
+        )
+
+        # Student batch: one forward pass for all 9 rollouts
+        s_results = student_scorer.score_batch(
+            questions=[question] * batch_size,
+            images=[image] * batch_size,
+            prompt_texts=[prompt_text] * batch_size,
+            response_texts=[m["response_text"] for m in batch_meta],
+            response_token_ids_list=[m["response_token_ids"] for m in batch_meta],
+        )
+
+        # -- Phase C: Build and write records --------------------------------------
+        for i, meta in enumerate(batch_meta):
+            t_result = t_results[i] if i < len(t_results) else None
+            s_result = s_results[i] if i < len(s_results) else None
+            # Fallback for batch failures
+            teacher_sampled = t_result.sampled_token_log_probs if t_result else ()
+            teacher_mean_logp = t_result.mean_logp if t_result else float("nan")
+            student_sampled = s_result.sampled_token_log_probs if s_result else ()
+            student_mean_logp = s_result.mean_logp if s_result else float("nan")
+
+            import math
+            teacher_gap = (
+                teacher_mean_logp - student_mean_logp
+                if (not math.isnan(teacher_mean_logp) and not math.isnan(student_mean_logp))
+                else float("nan")
+            )
+            if math.isnan(teacher_mean_logp) or math.isnan(student_mean_logp):
+                nf_container[0] += 1
+            if t_result and t_result.error:
+                errors.append(f"{sample_uid}:rollout-{meta['rollout_id']}: teacher_error={t_result.error}")
+            if s_result and s_result.error:
+                errors.append(f"{sample_uid}:rollout-{meta['rollout_id']}: student_error={s_result.error}")
+
+            rollout_uid = f"{sample_uid}:greedy" if meta["is_greedy"] else f"{sample_uid}:rollout-{meta['rollout_id']}"
+            all_rollouts.append({
+                "run_id": run_id,
+                "sample_uid": sample_uid,
+                "source_index": pi,
+                "split": "train",
+                "rollout_id": meta["rollout_id"],
+                "is_greedy": meta["is_greedy"],
+                "generation_seed": meta["generation_seed"],
+                "temperature": 0.0 if meta["is_greedy"] else config.temperature,
+                "top_p": 1.0 if meta["is_greedy"] else config.top_p,
+                "max_new_tokens": config.max_new_tokens,
+                "prompt_hash": prompt_hash,
+                "image_hash": image_hash,
+                "gold_answer": gold_answer,
+                "response_text": meta["response_text"],
+                "response_token_ids": meta["response_token_ids"],
+                "response_token_count": len(meta["response_token_ids"]),
+                "response_hash": hashlib.sha256(meta["response_text"].encode()).hexdigest(),
+                "correct": meta["verdict"].get("correct"),
+                "answer_extracted": meta["verdict"].get("extracted"),
+                "format_valid": meta["verdict"].get("format_valid", True),
+                "malformed": meta["verdict"].get("malformed", False),
+                "teacher_mean_logp": teacher_mean_logp,
+                "teacher_sampled_token_log_probs": teacher_sampled,
+                "student_mean_logp": student_mean_logp,
+                "student_sampled_token_log_probs": student_sampled,
+                "teacher_gap": teacher_gap,
+                "teacher_model_id": teacher.model_id,
+                "student_model_path": config.student_model_path,
+                "tokenizer_hash": student_hash,
+                "errors": [],
+            })
+            _write_rollout_line(rollouts_fh, all_rollouts[-1])
+            total_rollouts += 1
 
         # Per-prompt support state
         unique_hashes = set(prompt_rollout_hashes)
@@ -481,7 +554,7 @@ def run_diagnostic(config: DiagnosticConfig) -> dict[str, Any]:
         prompt_rollouts = [r for r in all_rollouts if r["sample_uid"] == sample_uid and not r["is_greedy"]]
         rank_metrics = _compute_ranking_metrics(prompt_rollouts)
 
-        prompt_summaries.append({
+        prompt_summary = {
             "sample_uid": sample_uid,
             "K": K,
             "correct_count": correct_count,
@@ -490,6 +563,21 @@ def run_diagnostic(config: DiagnosticConfig) -> dict[str, Any]:
             "unique_response_count": len(unique_hashes),
             "duplicate_rollout_rate": dup_rate,
             **rank_metrics,
+        }
+        prompt_summaries.append(prompt_summary)
+        # Incremental write: flush prompt summary immediately
+        _write_json_line(summaries_fh, prompt_summary)
+
+        # Write partial summary every prompt (cheap — just a few KB)
+        _write_partial_summary(output_dir, {
+            "run_id": run_id, "mode": config.mode,
+            "prompts_done": pi + 1, "prompts_total": len(prompts),
+            "rollouts_done": total_rollouts,
+            "elapsed_s": time.time() - start_time,
+            "missing_image": missing_image,
+            "malformed_count": malformed_count,
+            "non_finite_count": nf_container[0],
+            "errors_tail": errors[-10:],
         })
 
         if (pi + 1) % 10 == 0 or pi == 0:
@@ -567,7 +655,7 @@ def run_diagnostic(config: DiagnosticConfig) -> dict[str, Any]:
         "malformed_response_count": malformed_count,
         "malformed_response_rate": malformed_count / max(total_rollouts, 1),
         "missing_image_count": missing_image,
-        "non_finite_score_count": non_finite_count,
+        "non_finite_score_count": nf_container[0],
         "tokenizer_match": student_hash == teacher_hash,
         "student_tokenizer_hash": student_hash,
         "teacher_tokenizer_hash": teacher_hash,
@@ -603,6 +691,10 @@ def run_diagnostic(config: DiagnosticConfig) -> dict[str, Any]:
         exit_status="PASS" if all(p for _, p, _ in gates) else "GATE_FAIL",
     )
 
+    # Close incremental file handles before overwriting with final versions
+    rollouts_fh.close()
+    summaries_fh.close()
+
     write_rollouts_jsonl(output_dir, all_rollouts)
     write_prompt_support_summary_jsonl(output_dir, prompt_summaries)
     write_selected_prompts_jsonl(output_dir, [
@@ -612,6 +704,11 @@ def run_diagnostic(config: DiagnosticConfig) -> dict[str, Any]:
     write_summary_json(output_dir, summary)
     write_run_manifest(output_dir, meta)
     write_resolved_config_yaml(output_dir, {k: str(v) for k, v in config.__dict__.items()})
+
+    # Remove partial summary — run is complete
+    partial_path = output_dir / "_partial_summary.json"
+    if partial_path.exists():
+        partial_path.unlink()
 
     print(f"\nDone. Outputs: {output_dir}")
     print(f"  rollouts.jsonl                — {len(all_rollouts)} rows")
@@ -628,6 +725,40 @@ def run_diagnostic(config: DiagnosticConfig) -> dict[str, Any]:
 def _make_run_id(mode: str) -> str:
     ts = time.strftime("%Y%m%d_%H%M%S")
     return f"diag_{mode}_{ts}"
+
+
+def _write_json_line(fh, record: dict[str, Any]) -> None:
+    """Write a single JSON line to a file handle and flush."""
+    fh.write(json.dumps(record, ensure_ascii=False, default=_default))
+    fh.write("\n")
+    fh.flush()
+
+
+def _write_rollout_line(fh, record: dict[str, Any]) -> None:
+    """Write a single rollout record to the rollouts JSONL file and flush."""
+    _write_json_line(fh, record)
+
+
+def _write_partial_summary(output_dir: Path, info: dict[str, Any]) -> None:
+    """Write a lightweight partial summary so progress is visible on disk."""
+    path = output_dir / "_partial_summary.json"
+    # Atomic write: write to temp file then rename
+    tmp = output_dir / "_partial_summary.json.tmp"
+    tmp.write_text(
+        json.dumps(info, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    tmp.rename(path)
+
+
+def _default(obj: Any) -> Any:
+    """JSON default serializer — reused from reporter module."""
+    from pathlib import Path as _Path
+    if isinstance(obj, _Path):
+        return str(obj)
+    if isinstance(obj, (set, frozenset)):
+        return sorted(obj)
+    raise TypeError(f"not JSON serializable: {type(obj)}")
 
 
 def _fail_run(
@@ -659,6 +790,7 @@ def _score_and_record(
     teacher: TeacherScorer,
     student_scorer: StudentScorer,
     *,
+    run_id: str,
     sample_uid: str,
     question: str,
     image: Image.Image,
@@ -676,7 +808,7 @@ def _score_and_record(
     generation_seed: int,
     tokenizer_hash: str,
     teacher_model_id: str,
-    non_finite_count: int,
+    non_finite_count: list[int],  # mutable container so caller sees increments
     errors: list[str],
 ) -> None:
     """Score one rollout and append to all_rollouts."""
@@ -715,7 +847,7 @@ def _score_and_record(
     )
 
     if math.isnan(teacher_mean_logp) or math.isnan(student_mean_logp):
-        non_finite_count += 1
+        non_finite_count[0] += 1
 
     if t_result.error:
         errors.append(f"{rollout_uid}: teacher_error={t_result.error}")
@@ -723,7 +855,7 @@ def _score_and_record(
         errors.append(f"{rollout_uid}: student_error={s_result.error}")
 
     all_rollouts.append({
-        "run_id": _make_run_id(config.mode),
+        "run_id": run_id,
         "sample_uid": sample_uid,
         "source_index": prompt_index,
         "split": "train",

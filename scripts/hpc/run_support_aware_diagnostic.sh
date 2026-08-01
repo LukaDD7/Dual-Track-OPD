@@ -114,7 +114,7 @@ echo ""
 
 # GPU check
 if command -v nvidia-smi &>/dev/null; then
-    if [[ -n "${CUDA_VISIBLE_DEVICES}" ]]; then
+    if [[ -n "${CUDA_VISIBLE_DEVICES:-}" ]]; then
         echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}"
         GPU_COUNT=$(echo "${CUDA_VISIBLE_DEVICES}" | tr ',' '\n' | wc -l)
         echo "Requested GPUs: ${GPU_COUNT}"
