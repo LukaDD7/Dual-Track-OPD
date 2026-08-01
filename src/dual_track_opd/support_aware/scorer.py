@@ -425,54 +425,46 @@ class StudentScorer:
             messages, tokenize=False, add_generation_prompt=True
         )
 
-        # Tokenize each (prompt + response) pair independently, then pad
+        # Tokenize the shared prompt prefix to locate the response boundary.
         prompt_enc = self._processor(text=[chat_text], images=[images[0]], return_tensors="pt")
         prompt_len = prompt_enc["input_ids"].shape[1]
 
-        # Build padded batch
-        all_input_ids: list[torch.Tensor] = []
-        all_response_lens: list[int] = []
-        for i in range(n):
-            resp_ids = tuple(int(t) for t in response_token_ids_list[i])
-            if not resp_ids:
-                all_input_ids.append(prompt_enc["input_ids"][0])
-                all_response_lens.append(0)
-                continue
-            full_text = chat_text + response_texts[i]
-            full_enc = self._processor(
-                text=[full_text], images=[images[0]], return_tensors="pt"
-            )
-            all_input_ids.append(full_enc["input_ids"][0])
-            all_response_lens.append(full_enc["input_ids"].shape[1] - prompt_len)
-
-        # Pad to max length
-        max_len = max(ids.shape[0] for ids in all_input_ids)
-        pad_token_id = self._tokenizer.pad_token_id or self._tokenizer.eos_token_id
-        padded_ids = torch.full((n, max_len), pad_token_id, dtype=torch.long)
-        attention_mask = torch.zeros((n, max_len), dtype=torch.long)
-        for i, ids in enumerate(all_input_ids):
-            L = ids.shape[0]
-            padded_ids[i, :L] = ids
-            attention_mask[i, :L] = 1
+        # Encode every (prompt + response) row in one processor call so each row
+        # carries its own image tensors (pixel_values, image_grid_thw,
+        # mm_token_type_ids) padded to a common batch length.  Reusing the
+        # single-image tensors from prompt_enc with a multi-row input_ids makes
+        # Qwen3-VL's placeholder check fail ("Image features and image tokens do
+        # not match"): the batch holds n image-token blocks but only one image's
+        # features.  It would also break M-RoPE, since mm_token_type_ids would
+        # not be padded to the batch's (n, max_len) shape.
+        empty_flags = [
+            not tuple(int(t) for t in response_token_ids_list[i]) for i in range(n)
+        ]
+        full_texts = [chat_text + response_texts[i] for i in range(n)]
+        batch_enc = self._processor(
+            text=full_texts,
+            images=[images[0]] * n,
+            return_tensors="pt",
+            padding=True,
+        )
+        actual_lens = batch_enc["attention_mask"].sum(dim=1).tolist()
+        all_response_lens = [
+            0 if empty_flags[i] else int(actual_lens[i]) - prompt_len
+            for i in range(n)
+        ]
 
         # Move to device
         device = self._model_device
         model_inputs: dict[str, torch.Tensor] = {
-            "input_ids": padded_ids.to(device),
-            "attention_mask": attention_mask.to(device),
+            key: value.to(device) for key, value in batch_enc.items()
         }
-        # Use prompt_enc for image-related tensors (shared across all items)
-        for key, value in prompt_enc.items():
-            if key in {"input_ids", "attention_mask"}:
-                continue
-            if isinstance(value, torch.Tensor):
-                model_inputs[key] = value.to(device)
 
         with torch.no_grad():
             logits = self._model(**model_inputs).logits  # (n, max_len, vocab)
 
         # Extract per-item log-probs
         results: list[StudentScorer.ScoreResult] = []
+        padded_ids = model_inputs["input_ids"]
         for i in range(n):
             T = all_response_lens[i]
             if T <= 0:

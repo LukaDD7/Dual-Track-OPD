@@ -43,6 +43,29 @@ confounded by truncation (short→correct, long→truncated→wrong).
 - Student scoring now uses **batch forward pass** (padded concatenation)
 - **Must re-run before proceeding to Step 2**
 
+### Fixed: batch student scoring crashed on the first prompt (2026-08-01)
+
+The 2026-08-01 10:55 re-run died on prompt 1/128 inside
+`StudentScorer.score_batch` with:
+
+```
+ValueError: Image features and image tokens do not match, tokens: 630, features: 70
+```
+
+Root cause: `score_batch` padded `n` (prompt+response) rows into one
+`input_ids` tensor but re-used the **single-image** tensors from the prompt-only
+encoding (`pixel_values`, `image_grid_thw`, `mm_token_type_ids`).  Qwen3-VL
+counts image-pad tokens across the whole batch (n × 70 = 630) and compares them
+with the one image's vision features (70).  The unpadded `mm_token_type_ids`
+would also have broken M-RoPE next.
+
+Fix: encode all rows in **one** processor call
+(`processor(text=full_texts, images=[image] * n, padding=True)`), so every row
+carries its own per-image features/grid and a padded `mm_token_type_ids`.
+Verified on CPU that batched rows tokenize identically to the per-item
+encodings.  Regression tests in `tests/test_support_scorer_batch.py`
+(CPU-only, no LLM weights).
+
 ## Architecture
 
 ```
@@ -206,6 +229,10 @@ increase to 4096. Check `_partial_summary.json` during the run to monitor.
 5. **Teacher scoring serial** — 9 HTTP calls per prompt → now 1 batch call
 6. **Student scoring serial** — 9 forward passes per prompt → now 1 batch pass
 7. **`max_new_tokens=512`** — changed to 2048
+8. **Batch student scoring crashed ("Image features and image tokens do not
+   match")** — padded multi-row `input_ids` with single-image tensors; fixed by
+   one batched processor call so each row has its own image tensors + padded
+   `mm_token_type_ids`
 
 ## Step 2 Prerequisites
 
