@@ -18,6 +18,7 @@ import argparse
 import hashlib
 import io
 import json
+import math
 import os
 import random
 import sys
@@ -85,6 +86,7 @@ class DiagnosticConfig:
     dtype: str = "bfloat16"
     output_root: str = ""
     mode: str = "smoke"  # "smoke" or "full"
+    resume_run_id: str | None = None
 
     @property
     def resolved_num_prompts(self) -> int:
@@ -288,6 +290,82 @@ def compute_mean_logp(sampled_log_probs: Sequence[float]) -> float:
     return float(sum(sampled_log_probs) / len(sampled_log_probs))
 
 
+@dataclass
+class _ResumeState:
+    """Incremental state loaded from a partial run's JSONL files."""
+
+    all_rollouts: list[dict[str, Any]]
+    prompt_summaries: list[dict[str, Any]]
+    completed_uids: set[str]
+    errors: list[str]
+    malformed_count: int
+    non_finite_count: int
+    total_rollouts: int
+
+
+def _is_nonfinite(value: Any) -> bool:
+    try:
+        return not math.isfinite(float(value))
+    except (TypeError, ValueError):
+        return True
+
+
+def _load_resume_state(output_dir: Path) -> _ResumeState:
+    """Load rollouts/summaries written by a previous partial run.
+
+    Only prompts that have a completed summary line are treated as done.
+    Rollouts left behind by a prompt that was killed mid-write (no summary yet)
+    are discarded from the in-memory state; the final writer overwrites the
+    JSONL files with the full in-memory state when the run completes.
+    """
+    summaries: list[dict[str, Any]] = []
+    summaries_path = output_dir / "prompt_support_summary.jsonl"
+    if summaries_path.exists():
+        with summaries_path.open(encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if line:
+                    summaries.append(json.loads(line))
+
+    completed_uids = {
+        str(s.get("sample_uid")) for s in summaries if s.get("sample_uid")
+    }
+
+    rollouts: list[dict[str, Any]] = []
+    rollouts_path = output_dir / "rollouts.jsonl"
+    if rollouts_path.exists():
+        with rollouts_path.open(encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                rec = json.loads(line)
+                if str(rec.get("sample_uid")) in completed_uids:
+                    rollouts.append(rec)
+
+    errors: list[str] = []
+    malformed_count = 0
+    non_finite_count = 0
+    for rec in rollouts:
+        errors.extend(rec.get("errors") or [])
+        if rec.get("malformed"):
+            malformed_count += 1
+        if _is_nonfinite(rec.get("teacher_mean_logp")) or _is_nonfinite(
+            rec.get("student_mean_logp")
+        ):
+            non_finite_count += 1
+
+    return _ResumeState(
+        all_rollouts=rollouts,
+        prompt_summaries=summaries,
+        completed_uids=completed_uids,
+        errors=errors,
+        malformed_count=malformed_count,
+        non_finite_count=non_finite_count,
+        total_rollouts=len(rollouts),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Main pipeline
 # ---------------------------------------------------------------------------
@@ -308,8 +386,19 @@ def run_diagnostic(config: DiagnosticConfig) -> dict[str, Any]:
 
     # -- Resolve output directory -----------------------------------------------
     output_root = Path(os.path.expandvars(config.output_root))
-    run_id = _make_run_id(config.mode)
-    output_dir = output_root / "support_aware_opd" / run_id
+    if config.resume_run_id:
+        run_id = config.resume_run_id
+        output_dir = output_root / "support_aware_opd" / run_id
+        if not (output_dir / "prompt_support_summary.jsonl").exists():
+            output_dir.mkdir(parents=True, exist_ok=True)
+            print(
+                f"FATAL: cannot resume — no prompt_support_summary.jsonl in {output_dir}",
+                file=sys.stderr,
+            )
+            return _fail_run(output_dir, config, start_time, git_commit, git_dirty)
+    else:
+        run_id = _make_run_id(config.mode)
+        output_dir = output_root / "support_aware_opd" / run_id
     output_dir.mkdir(parents=True, exist_ok=True)
     log_dir = output_dir / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -320,9 +409,18 @@ def run_diagnostic(config: DiagnosticConfig) -> dict[str, Any]:
     rollouts_fh = rollouts_path.open("a", encoding="utf-8")  # append for resume
     summaries_fh = summaries_path.open("a", encoding="utf-8")
 
+    # Reload incremental state when resuming a partial run.
+    resume_state = _load_resume_state(output_dir) if config.resume_run_id else None
+
     print(f"=== Support-Aware Diagnostic: {run_id} ===")
     print(f"Output: {output_dir}")
     print(f"Mode: {config.mode}")
+    if resume_state is not None:
+        print(
+            f"  RESUME: {len(resume_state.prompt_summaries)} prompts / "
+            f"{len(resume_state.all_rollouts)} rollouts already on disk; "
+            f"skipping completed prompts"
+        )
 
     # -- Load data --------------------------------------------------------------
     print("\n[1/6] Loading and selecting prompts...")
@@ -382,19 +480,27 @@ def run_diagnostic(config: DiagnosticConfig) -> dict[str, Any]:
 
     # -- Generate and score ----------------------------------------------------
     K = config.resolved_rollouts_per_prompt
-    all_rollouts: list[dict[str, Any]] = []
-    prompt_summaries: list[dict[str, Any]] = []
-    errors: list[str] = []
+    all_rollouts: list[dict[str, Any]] = (
+        list(resume_state.all_rollouts) if resume_state is not None else []
+    )
+    prompt_summaries: list[dict[str, Any]] = (
+        list(resume_state.prompt_summaries) if resume_state is not None else []
+    )
+    errors: list[str] = list(resume_state.errors) if resume_state is not None else []
 
     print(f"\n[4/6] Generating and scoring ({len(prompts)} prompts × {1+K} rollouts)...")
 
     missing_image = 0
-    nf_container = [0]  # mutable so _score_and_record can increment
-    malformed_count = 0
-    total_rollouts = 0
+    nf_container = [
+        resume_state.non_finite_count if resume_state is not None else 0
+    ]  # mutable so _score_and_record can increment
+    malformed_count = resume_state.malformed_count if resume_state is not None else 0
+    total_rollouts = resume_state.total_rollouts if resume_state is not None else 0
 
     for pi, prompt in enumerate(prompts):
         sample_uid = str(prompt["sample_uid"])
+        if resume_state is not None and sample_uid in resume_state.completed_uids:
+            continue
         question = str(prompt.get("question", "")).strip()
         image = extract_image(prompt)
         image_path = save_image_for_teacher(image, temp_dir)
@@ -533,7 +639,7 @@ def run_diagnostic(config: DiagnosticConfig) -> dict[str, Any]:
                 "teacher_model_id": teacher.model_id,
                 "student_model_path": config.student_model_path,
                 "tokenizer_hash": student_hash,
-                "errors": [],
+                "errors": [e for e in errors if e.startswith(f"{sample_uid}:")],
             })
             _write_rollout_line(rollouts_fh, all_rollouts[-1])
             total_rollouts += 1
@@ -569,9 +675,10 @@ def run_diagnostic(config: DiagnosticConfig) -> dict[str, Any]:
         _write_json_line(summaries_fh, prompt_summary)
 
         # Write partial summary every prompt (cheap — just a few KB)
+        prompts_done = len(prompt_summaries)
         _write_partial_summary(output_dir, {
             "run_id": run_id, "mode": config.mode,
-            "prompts_done": pi + 1, "prompts_total": len(prompts),
+            "prompts_done": prompts_done, "prompts_total": len(prompts),
             "rollouts_done": total_rollouts,
             "elapsed_s": time.time() - start_time,
             "missing_image": missing_image,
@@ -580,8 +687,8 @@ def run_diagnostic(config: DiagnosticConfig) -> dict[str, Any]:
             "errors_tail": errors[-10:],
         })
 
-        if (pi + 1) % 10 == 0 or pi == 0:
-            print(f"  [{pi+1}/{len(prompts)}] {sample_uid}: state={state.value}, "
+        if prompts_done % 10 == 0 or prompts_done == 1:
+            print(f"  [{prompts_done}/{len(prompts)}] {sample_uid}: state={state.value}, "
                   f"correct={correct_count}/{K}, greedy_correct={greedy_correct}")
 
     # -- Compute summary --------------------------------------------------------
@@ -1152,6 +1259,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--device", type=str, default=None)
     parser.add_argument("--dtype", type=str, default=None)
+    parser.add_argument(
+        "--resume",
+        type=str,
+        default=None,
+        help="Resume an existing partial run by run_id (e.g. diag_full_20260801_123045)",
+    )
     return parser
 
 
@@ -1175,6 +1288,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         dtype=args.dtype or _nested_get(yaml_cfg, "hardware", "dtype", default="bfloat16"),
         output_root=args.output_root or _nested_get(yaml_cfg, "output", "root", default=os.path.expandvars("$DTOPD_OUTPUT_ROOT")),
         mode=args.mode,
+        resume_run_id=args.resume,
     )
 
     if not config.dataset_path:

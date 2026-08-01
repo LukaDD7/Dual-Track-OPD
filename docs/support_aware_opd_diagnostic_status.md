@@ -168,6 +168,26 @@ The pipeline now saves incrementally:
 
 If the GPU instance is reclaimed mid-run, partial data is on disk.
 
+### Resuming a partial run
+
+The pipeline now supports `--resume RUN_ID` (also passable through
+`run_support_aware_diagnostic.sh --resume RUN_ID`).  On resume it reloads
+`rollouts.jsonl` / `prompt_support_summary.jsonl` from the existing run dir,
+skips prompts that already have a completed summary, and continues appending
+to the same files.  The prompt selection is deterministic (SHA256(sample_uid)),
+so the same config regenerates only the missing prompts with identical seeds.
+
+```bash
+# After the old process is dead, start the teacher again, then:
+bash scripts/hpc/run_support_aware_diagnostic.sh \
+    --config configs/experiment/support_aware_geometry3k_pilot.yaml \
+    --mode full \
+    --resume diag_full_20260801_123045
+```
+
+Do not start a resumed run while the original process is still alive — both
+would append to the same files.
+
 ## Run Output Directory
 
 ```
