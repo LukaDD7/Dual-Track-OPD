@@ -68,7 +68,7 @@ $DTOPD_ROOT/
 | Native VA-OPD cu128 v2 | `$DTOPD_ROOT/fc-opd-storage/envs/va-opd-verl-e003-cu128-v2` | 方案提交 2026-07-21；实际完整构建日期未确认 | 锁定 verl e003 + vLLM 0.12 的恢复方案 | torch 2.9 cu128、vLLM 0.12、Transformers 4.57.3 | `candidate`/待服务器确认 | 不直接搬迁；在统一目录重建为 R595 v1，并重新跑全部 gate |
 | Native VA-OPD cu132 事故环境 | `$DTOPD_ROOT/fc-opd-storage/envs/va-opd-verl-e003-cu132` | 2026-07-21 | 试图利用 R595/cu132/NCCL 2.29.7 | torch 2.13 cu132 + vLLM 0.25.1 **wheel** + Transformers 5.14.1 | `quarantined` | 预编译 wheel ABI 断裂 + manifest provenance 错误；保留诊断，不激活 |
 | Native VA-OPD cu132 on R595 v1（源码编译） | `$DTOPD_ROOT/envs/va-opd-native-e003-cu132-r595-v1` | 2026-07-25（10 次修复迭代后成功） | 当前 cu132 主线：source-built vLLM 0.25.1 + torch 2.13 | verl e003 + 5-file patch、torch 2.13.0+cu132、vLLM 0.25.1 **source wheel** (460MB)、Transformers 5.14.1、NCCL 2.29.7、flash-attn 2.8.3、flashinfer-python 0.6.13 | `candidate` | GPU kernel smoke、NCCL smoke、training smoke 待跑；详见 §5.1 构建问题清单 |
-| Native VA-OPD cu128 on R595 v1 | `$DTOPD_ROOT/envs/va-opd-native-e003-cu128-r595-v1` | 2026-08-01（CPU 实例源码编译完成；vLLM wheel 缓存于 wheelhouse/va-opd-cu128-r595-v1） | 当前 cu128 主线：source-built vLLM 0.12.0 + torch 2.9 cu128 | verl e003 + 3-file patch、torch 2.9.0+cu128、vLLM 0.12.0 **source wheel** (744MB)、Transformers 4.57.3、flash-attn 2.8.3（源码编译 cu128）、flashinfer-python 0.5.3、NCCL 2.27.5 | `candidate` | GPU kernel smoke、NCCL smoke、training smoke 待跑；构建细节见 manifest |
+| Native VA-OPD cu128 on R595 v1 | `$DTOPD_ROOT/envs/va-opd-native-e003-cu128-r595-v1` | 2026-08-01（CPU 实例源码编译完成；GPU smoke 进行中） | 当前 cu128 主线：source-built vLLM 0.12.0 + torch 2.9 cu128 | verl e003 + 3-file patch、torch 2.9.0+cu128、vLLM 0.12.0 **source wheel** (744MB)、Transformers 4.57.3、flash-attn 2.8.3（源码编译 cu128）、flashinfer-python 0.5.3、NCCL 2.27.5 | `candidate` | **GPU smoke 进展见 §6.1**；GPU kernel ✓、vLLM teacher server ✓、FSDP2 student init ✓、dataloader ✓；当前 blocked: reward function data_source 已修复（hiyouga/geometry3k），等待重跑 |
 
 CUDA 12.8 编译工具链位于 `$DTOPD_ROOT/envs/cuda128-toolchain`（nvcc V12.8.61），CUDA 13.2 编译工具链位于 `$DTOPD_ROOT/envs/cuda132-toolchain`。两者均为独立 Conda prefix，不与 Python 环境混合。
 
@@ -242,3 +242,87 @@ CPU 实例执行者完成一次环境工作后，必须回传并提交以下 Git
 - GPU facts、NCCL/kernel/training gate 的 pass/fail 和 raw log 路径；
 - 若失败，保留 prefix 但移动逻辑状态到 `quarantined`，不得通过 force reinstall 继续污染；
 - 更新本文总表。raw logs、hostname、GPU UUID、checkpoint、数据和权重仍留在 Git 外。
+
+## 9. Codex 交接：cu128 R595 v1 GPU smoke 状态 (2026-08-01)
+
+### 9.1 环境状态
+
+| 项目 | 状态 |
+|---|---|
+| CPU 编译 (vLLM + flash-attn) | ✅ 完成 |
+| import gate (所有版本检查) | ✅ 通过 |
+| GPU 4×H200 – 模型加载 (Qwen3-4B-Instruct-2507) | ✅ 通过 |
+| GPU – vLLM teacher server 启动 | ✅ 通过 |
+| GPU – FSDP2 student init | ✅ 通过 |
+| GPU – DataLoader | ✅ 通过 |
+| GPU – 训练 step | ❌ reward function crash → 已修复 data_source |
+
+### 9.2 环境激活命令
+
+```bash
+export DTOPD_ROOT=/inspire/hdd/global_user/mengweicheng-240108120092/lzy
+export CUDA_HOME="${DTOPD_ROOT}/envs/cuda128-toolchain"
+export PATH="${CUDA_HOME}/bin:${PATH}"
+export LIBRARY_PATH="${CUDA_HOME}/lib64:${CUDA_HOME}/lib64/stubs:${CUDA_HOME}/lib:${CUDA_HOME}/targets/x86_64-linux/lib:${LIBRARY_PATH:-}"
+export LD_LIBRARY_PATH="${CUDA_HOME}/lib:${CUDA_HOME}/targets/x86_64-linux/lib:${LD_LIBRARY_PATH:-}"
+conda activate "${DTOPD_ROOT}/envs/va-opd-native-e003-cu128-r595-v1"
+```
+
+### 9.3 Phase 1 Smoke 命令（forward_kl_topk，纯文本 Qwen3）
+
+```bash
+STUDENT_MODEL="${DTOPD_ROOT}/models/Qwen3-4B-Instruct-2507" \
+TEACHER_MODEL="${DTOPD_ROOT}/models/Qwen3-4B-Instruct-2507" \
+TRAIN_FILE="${DTOPD_ROOT}/fc-opd-storage/outputs/fc_opd/geometry3k_gkd/train_text_only.parquet" \
+VAL_FILE="${DTOPD_ROOT}/fc-opd-storage/outputs/fc_opd/geometry3k_gkd/val_text_only.parquet" \
+NGPUS_PER_NODE=4 \
+TEACHER_WORLD_SIZE=1 \
+TEACHER_TP=1 \
+TEACHER_EP=1 \
+rollout_gpu_mem_util=0.3 \
+teacher_gpu_mem_util=0.4 \
+max_prompt_length=2048 \
+max_response_length=512 \
+ppo_max_token_len_per_gpu=16384 \
+train_batch_size=8 \
+ppo_mini_batch_size=8 \
+distillation_loss_mode=forward_kl_topk \
+use_policy_gradient=False \
+distillation_topk=32 \
+total_epochs=1 \
+save_freq=9999 \
+test_freq=9999 \
+bash "${DTOPD_ROOT}/fc-opd-storage/backends/verl-va-opd-e0031631-clean/examples/on_policy_distillation_trainer/run_qwen3_5_4b_fsdp.sh"
+```
+
+Phase 1 通过后，改 `distillation_loss_mode=va_opd_k1 use_policy_gradient=True` 跑 Phase 2。
+
+### 9.4 已修复的问题
+
+| 问题 | 修复 |
+|---|---|
+| `AttributeError: ThrMma` (cutlass 兼容) | `${ENV_PREFIX}/lib/.../nvidia_cutlass_dsl/.../core.py` 添加了 `ThrMma = object` stub |
+| `ModuleNotFoundError: uvloop` | `pip install uvloop` |
+| `RuntimeError: python-multipart` | `pip install python-multipart` |
+| `AssertionError: processor needed` (数据有 images 列) | 创建 text_only 版 parquet（去掉了 images/condition_inputs 列） |
+| `NotImplementedError: geometry3k reward` | 将 data_source 改为 `hiyouga/geometry3k` |
+
+### 9.5 文本数据文件
+
+- Train: `${DTOPD_ROOT}/fc-opd-storage/outputs/fc_opd/geometry3k_gkd/train_text_only.parquet` (1901 rows, `data_source=hiyouga/geometry3k`)
+- Val: `${DTOPD_ROOT}/fc-opd-storage/outputs/fc_opd/geometry3k_gkd/val_text_only.parquet` (200 rows, `data_source=hiyouga/geometry3k`)
+
+### 9.6 已知待解决问题
+
+1. **Qwen3-VL (视觉模型) 使用场景 → cutlass 冲突**：`nvidia-cutlass-dsl 4.6.1` 与 `flash-attn 2.8.3` 的 `cute` 模块不兼容。`ThrMma` patch 只修复第一个 AttributeError，后续 `ModuleNotFoundError: cutlass.utils.ampere_helpers` 会被 verl 的 `except ImportError` 捕获（仅影响 deepseek MoE 模型加载，Qwen3-VL 为 dense 模型不受影响）。**该路径在此 GPU node 上尚未验证。**
+
+2. **Qwen3.5 模型**：`model_type=qwen3_5` 需要 `transformers>=5.x`，但 vLLM 0.12.0 约束 `transformers<5`。当前不可用。
+
+### 9.7 关键路径
+
+- 环境 prefix: `${DTOPD_ROOT}/envs/va-opd-native-e003-cu128-r595-v1`
+- CUDA 工具链: `${DTOPD_ROOT}/envs/cuda128-toolchain` (nvcc 12.8.61)
+- verl backend: `${DTOPD_ROOT}/fc-opd-storage/backends/verl-va-opd-e0031631-clean` (e0031631 + VA-OPD 3-file patch)
+- vLLM wheel: `${DTOPD_ROOT}/fc-opd-storage/wheelhouse/va-opd-cu128-r595-v1/vllm-0.12.0-cp312-cp312-linux_x86_64.whl` (744MB)
+- 约束文件: `configs/environment/verl_va_opd_e003_cu128.constraints.txt`
+- 构建脚本: `scripts/hpc/build_fresh_cu128_opd_env.sh`
