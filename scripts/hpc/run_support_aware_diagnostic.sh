@@ -158,8 +158,40 @@ else
 fi
 
 # Python environment
-python -c "import torch; print(f'PyTorch {torch.__version__}, CUDA available: {torch.cuda.is_available()}')" || {
-    echo "FATAL: Python/torch not available" >&2
+# Prefer $DTOPD_PYTHON, then any `python` that already has torch, then the
+# vision-opd-cu128 env python on this HPC.  Avoids "No module named torch"
+# when the calling shell's default python is not the research env.
+resolve_python() {
+    if [[ -n "${DTOPD_PYTHON:-}" && -x "${DTOPD_PYTHON}" ]]; then
+        echo "${DTOPD_PYTHON}"
+        return
+    fi
+    if command -v python >/dev/null 2>&1 && python -c 'import torch' >/dev/null 2>&1; then
+        echo "python"
+        return
+    fi
+    local envs_root
+    envs_root="$(cd "$(dirname "${DTOPD_ROOT}")/envs" 2>/dev/null && pwd || true)"
+    for candidate in "${envs_root}/vision-opd-cu128/bin/python" \
+                     "/inspire/hdd/global_user/mengweicheng-240108120092/lzy/envs/vision-opd-cu128/bin/python"; do
+        if [[ -x "${candidate}" ]]; then
+            echo "${candidate}"
+            return
+        fi
+    done
+    echo ""
+}
+
+PYTHON_BIN="$(resolve_python)"
+if [[ -z "${PYTHON_BIN}" ]]; then
+    echo "FATAL: no Python with torch found." >&2
+    echo "       Activate the research env (conda activate vision-opd-cu128)" >&2
+    echo "       or set DTOPD_PYTHON to an interpreter that has torch." >&2
+    exit 1
+fi
+
+"${PYTHON_BIN}" -c "import torch; print(f'PyTorch {torch.__version__}, CUDA available: {torch.cuda.is_available()}')" || {
+    echo "FATAL: Python/torch not available (PYTHON_BIN=${PYTHON_BIN})" >&2
     exit 1
 }
 
@@ -176,7 +208,7 @@ echo ""
 echo "=== Running diagnostic (mode=${MODE}) ==="
 
 CMD=(
-    python -u -m dual_track_opd.support_aware.diagnostic
+    "${PYTHON_BIN}" -u -m dual_track_opd.support_aware.diagnostic
     --config "${CONFIG_PATH}"
     --mode "${MODE}"
     --student-model-path "${STUDENT_MODEL}"
