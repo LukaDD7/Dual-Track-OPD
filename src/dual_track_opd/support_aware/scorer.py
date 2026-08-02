@@ -12,13 +12,14 @@ StudentScorer
 
 from __future__ import annotations
 
-import json
 import os
 from dataclasses import dataclass
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 
 import torch
 from PIL import Image
+
+from dual_track_opd.fc_opd.dataset_signal_audit import hash_token_ids
 
 
 # ---------------------------------------------------------------------------
@@ -30,6 +31,7 @@ from PIL import Image
 class TeacherScorerConfig:
     base_url: str = "http://127.0.0.1:18080"
     timeout_seconds: float = 120.0
+    expected_tokenizer_hash: str | None = None
 
 
 class TeacherScorer:
@@ -41,6 +43,7 @@ class TeacherScorer:
         self._cfg = config or TeacherScorerConfig()
         self._client = TeacherClient(
             self._cfg.base_url,
+            expected_tokenizer_hash=self._cfg.expected_tokenizer_hash,
             timeout_seconds=self._cfg.timeout_seconds,
         )
 
@@ -52,6 +55,10 @@ class TeacherScorer:
     def model_id(self) -> str:
         return self._client.metadata.model_id
 
+    @property
+    def metadata(self):
+        return self._client.metadata
+
     def health(self) -> bool:
         return self._client.health()
 
@@ -62,6 +69,9 @@ class TeacherScorer:
         request_id: str
         sampled_token_log_probs: tuple[float, ...]
         mean_logp: float
+        scored_token_ids: tuple[int, ...] = ()
+        scored_token_hash: str = ""
+        response_mask: tuple[bool, ...] = ()
         error: str | None = None
 
     def score(
@@ -127,11 +137,15 @@ class TeacherScorer:
 
         sampled = tuple(float(v) for v in topk.sampled_log_probs.flatten().tolist())
         mean_logp = float(sum(sampled) / max(len(sampled), 1))
+        scored_token_ids = tuple(int(token_id) for token_id in response_token_ids)
 
         return TeacherScorer.ScoreResult(
             request_id=request_id,
             sampled_token_log_probs=sampled,
             mean_logp=mean_logp,
+            scored_token_ids=scored_token_ids,
+            scored_token_hash=hash_token_ids(scored_token_ids),
+            response_mask=(True,) * len(scored_token_ids),
         )
 
     def score_batch(
@@ -155,6 +169,16 @@ class TeacherScorer:
         n = len(request_ids)
         if response_texts is None:
             response_texts = [""] * n
+        lengths = {
+            len(request_ids),
+            len(questions),
+            len(image_paths),
+            len(prompt_texts),
+            len(response_token_ids_list),
+            len(response_texts),
+        }
+        if n == 0 or lengths != {n}:
+            raise ValueError("teacher batch scorer inputs must have one non-empty shared length")
 
         # Build samples — all share the same condition_inputs (same prompt).
         # Pass the exact student prompt (image + text) so the teacher conditions
@@ -211,6 +235,16 @@ class TeacherScorer:
             ]
 
         results: list[TeacherScorer.ScoreResult] = []
+        if len(batch_results) != n:
+            return [
+                TeacherScorer.ScoreResult(
+                    request_id=rid,
+                    sampled_token_log_probs=(),
+                    mean_logp=float("nan"),
+                    error="teacher batch result count does not match request count",
+                )
+                for rid in request_ids
+            ]
         for i, cond_map in enumerate(batch_results):
             topk = cond_map.get(Condition.FULL)
             if topk is None or topk.sampled_log_probs is None:
@@ -223,10 +257,16 @@ class TeacherScorer:
             else:
                 sampled = tuple(float(v) for v in topk.sampled_log_probs.flatten().tolist())
                 mean_logp = float(sum(sampled) / max(len(sampled), 1))
+                scored_token_ids = tuple(
+                    int(token_id) for token_id in response_token_ids_list[i]
+                )
                 results.append(TeacherScorer.ScoreResult(
                     request_id=request_ids[i],
                     sampled_token_log_probs=sampled,
                     mean_logp=mean_logp,
+                    scored_token_ids=scored_token_ids,
+                    scored_token_hash=hash_token_ids(scored_token_ids),
+                    response_mask=(True,) * len(scored_token_ids),
                 ))
         return results
 
@@ -261,17 +301,22 @@ class StudentScorer:
         # result.mean_logp, result.sampled_token_log_probs
     """
 
-    def __init__(self, config: StudentScorerConfig):
-        from transformers import AutoModelForImageTextToText, AutoProcessor
+    def __init__(self, config: StudentScorerConfig, *, model=None, processor=None):
+        if (model is None) != (processor is None):
+            raise ValueError("model and processor must be provided together")
+        if model is None:
+            from transformers import AutoModelForImageTextToText, AutoProcessor
 
-        resolved = os.path.expandvars(config.model_path.removeprefix("hf:"))
-        self._processor = AutoProcessor.from_pretrained(resolved)
-        torch_dtype = (
-            getattr(torch, config.dtype) if config.dtype != "float32" else torch.float32
-        )
-        self._model = AutoModelForImageTextToText.from_pretrained(
-            resolved, torch_dtype=torch_dtype, device_map="auto"
-        )
+            resolved = os.path.expandvars(config.model_path.removeprefix("hf:"))
+            processor = AutoProcessor.from_pretrained(resolved)
+            torch_dtype = (
+                getattr(torch, config.dtype) if config.dtype != "float32" else torch.float32
+            )
+            model = AutoModelForImageTextToText.from_pretrained(
+                resolved, torch_dtype=torch_dtype, device_map="auto"
+            )
+        self._processor = processor
+        self._model = model
         self._model.eval()
         self._tokenizer = self._processor.tokenizer
         self._device_str = config.device  # stored for reference
@@ -291,6 +336,9 @@ class StudentScorer:
         sampled_token_log_probs: tuple[float, ...]
         mean_logp: float
         token_count: int
+        scored_token_ids: tuple[int, ...] = ()
+        scored_token_hash: str = ""
+        response_mask: tuple[bool, ...] = ()
         error: str | None = None
 
     def build_chat_prompt(
@@ -322,91 +370,19 @@ class StudentScorer:
         response_text: str,
         response_token_ids: Sequence[int],
     ) -> "StudentScorer.ScoreResult":
-        """Student-force score one response.
+        """Force-score the exact generated token IDs for one response.
 
-        Concatenates prompt + response, runs one forward pass, and extracts
-        the log-probability of each response token.
-
-        Args:
-            question: The geometry problem text (used in chat template).
-            image: The diagram as a PIL Image.
-            prompt_text: The full prompt text shown to the student.
-            response_text: The decoded response (used for tokenization).
-            response_token_ids: Pre-computed token IDs of the response.
+        ``response_text`` is display/verifier metadata only.  It is
+        intentionally never re-tokenized because decoding is not invertible.
         """
-        import torch.nn.functional as F
 
-        response_ids = tuple(int(t) for t in response_token_ids)
-        if not response_ids:
-            return StudentScorer.ScoreResult(
-                sampled_token_log_probs=(),
-                mean_logp=float("nan"),
-                token_count=0,
-                error="empty response",
-            )
-
-        # Build the chat prompt (without generation prompt so we can append response)
-        messages = [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "image", "image": image},
-                    {"type": "text", "text": prompt_text},
-                ],
-            }
-        ]
-        chat_text = self._processor.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
-        )
-
-        # Tokenize prompt + response together for exact alignment
-        # We tokenize the full text, then identify where the response starts
-        full_text = chat_text + response_text
-        full_enc = self._processor(text=[full_text], images=[image], return_tensors="pt")
-        full_ids = full_enc["input_ids"]
-
-        # Tokenize just the prompt (with generation prompt) to find boundary
-        prompt_enc = self._processor(text=[chat_text], images=[image], return_tensors="pt")
-        prompt_len = prompt_enc["input_ids"].shape[1]
-
-        # Move to device
-        model_inputs: dict[str, torch.Tensor] = {}
-        for key, value in full_enc.items():
-            if key in {"input_ids", "attention_mask"}:
-                continue
-            model_inputs[key] = value.to(self._model_device)
-        model_inputs["input_ids"] = full_ids.to(self._model_device)
-        model_inputs["attention_mask"] = torch.ones_like(full_ids, device=self._model_device)
-
-        with torch.no_grad():
-            logits = self._model(**model_inputs).logits
-
-        # Extract log-probs at response positions
-        # logits[t] predicts token t+1, so for response positions [prompt_len, prompt_len+T-1],
-        # we use logits[prompt_len-1 : prompt_len+T-1]
-        T = full_ids.shape[1] - prompt_len
-        if T <= 0:
-            return StudentScorer.ScoreResult(
-                sampled_token_log_probs=(),
-                mean_logp=float("nan"),
-                token_count=0,
-                error="response tokenization misalignment",
-            )
-
-        response_logits = logits[0, prompt_len - 1 : prompt_len + T - 1, :]
-        response_ids_tensor = full_ids[0, prompt_len:].to(self._model_device)
-
-        log_probs = F.log_softmax(response_logits.float(), dim=-1)
-        sampled = log_probs[range(len(response_ids_tensor)), response_ids_tensor]
-
-        sampled_tuple = tuple(float(v.item()) for v in sampled)
-        mean_logp = float(sum(sampled_tuple) / len(sampled_tuple))
-
-        return StudentScorer.ScoreResult(
-            sampled_token_log_probs=sampled_tuple,
-            mean_logp=mean_logp,
-            token_count=len(sampled_tuple),
-        )
+        return self.score_batch(
+            questions=[question],
+            images=[image],
+            prompt_texts=[prompt_text],
+            response_texts=[response_text],
+            response_token_ids_list=[response_token_ids],
+        )[0]
 
     def score_batch(
         self,
@@ -417,7 +393,7 @@ class StudentScorer:
         response_texts: Sequence[str],
         response_token_ids_list: Sequence[Sequence[int]],
     ) -> list["StudentScorer.ScoreResult"]:
-        """Student-force score multiple responses in a single batched forward pass.
+        """Force-score exact IDs for responses sharing one prompt/image.
 
         All items must reference the same prompt (same question + image) so the
         chat template prefix is identical.  Items differ only in the response suffix.
@@ -427,6 +403,33 @@ class StudentScorer:
         n = len(questions)
         if n == 0:
             return []
+        lengths = {
+            len(questions),
+            len(images),
+            len(prompt_texts),
+            len(response_texts),
+            len(response_token_ids_list),
+        }
+        if lengths != {n}:
+            raise ValueError("student batch scorer inputs must have the same length")
+        if any(question != questions[0] for question in questions):
+            raise ValueError("student batch scorer requires one shared question")
+        if any(prompt_text != prompt_texts[0] for prompt_text in prompt_texts):
+            raise ValueError("student batch scorer requires one shared prompt")
+
+        exact_ids = [tuple(int(token_id) for token_id in ids) for ids in response_token_ids_list]
+        valid_indices = [index for index, ids in enumerate(exact_ids) if ids]
+        results: list[StudentScorer.ScoreResult] = [
+            StudentScorer.ScoreResult(
+                sampled_token_log_probs=(),
+                mean_logp=float("nan"),
+                token_count=0,
+                error="empty response",
+            )
+            for _ in range(n)
+        ]
+        if not valid_indices:
+            return results
 
         # Build chat prompt for the shared prefix (use first item's inputs)
         messages = [
@@ -442,73 +445,104 @@ class StudentScorer:
             messages, tokenize=False, add_generation_prompt=True
         )
 
-        # Tokenize the shared prompt prefix to locate the response boundary.
-        prompt_enc = self._processor(text=[chat_text], images=[images[0]], return_tensors="pt")
-        prompt_len = prompt_enc["input_ids"].shape[1]
-
-        # Encode every (prompt + response) row in one processor call so each row
-        # carries its own image tensors (pixel_values, image_grid_thw,
-        # mm_token_type_ids) padded to a common batch length.  Reusing the
-        # single-image tensors from prompt_enc with a multi-row input_ids makes
-        # Qwen3-VL's placeholder check fail ("Image features and image tokens do
-        # not match"): the batch holds n image-token blocks but only one image's
-        # features.  It would also break M-RoPE, since mm_token_type_ids would
-        # not be padded to the batch's (n, max_len) shape.
-        empty_flags = [
-            not tuple(int(t) for t in response_token_ids_list[i]) for i in range(n)
-        ]
-        full_texts = [chat_text + response_texts[i] for i in range(n)]
-        batch_enc = self._processor(
-            text=full_texts,
-            images=[images[0]] * n,
+        # Process the prompt/image only.  The response suffix is appended from
+        # the exact IDs returned by generation; display text is never an input.
+        batch_size = len(valid_indices)
+        prompt_enc = self._processor(
+            text=[chat_text] * batch_size,
+            images=[images[index] for index in valid_indices],
             return_tensors="pt",
             padding=True,
         )
-        actual_lens = batch_enc["attention_mask"].sum(dim=1).tolist()
-        all_response_lens = [
-            0 if empty_flags[i] else int(actual_lens[i]) - prompt_len
-            for i in range(n)
-        ]
-
-        # Move to device
         device = self._model_device
+        prompt_enc = {key: value.to(device) for key, value in prompt_enc.items()}
+        prompt_ids = prompt_enc["input_ids"]
+        prompt_width = int(prompt_ids.shape[1])
+
+        valid_ids = [exact_ids[index] for index in valid_indices]
+        response_lens = [len(ids) for ids in valid_ids]
+        max_response_len = max(response_lens)
+        pad_id = self._tokenizer.pad_token_id
+        if pad_id is None:
+            pad_id = self._tokenizer.eos_token_id
+        if pad_id is None:
+            pad_id = 0
+        padded_responses = torch.full(
+            (batch_size, max_response_len),
+            int(pad_id),
+            dtype=prompt_ids.dtype,
+            device=device,
+        )
+        for row, ids in enumerate(valid_ids):
+            padded_responses[row, : len(ids)] = torch.tensor(
+                ids,
+                dtype=prompt_ids.dtype,
+                device=device,
+            )
+        response_mask = (
+            torch.arange(max_response_len, device=device).unsqueeze(0)
+            < torch.tensor(response_lens, device=device).unsqueeze(1)
+        )
+
         model_inputs: dict[str, torch.Tensor] = {
-            key: value.to(device) for key, value in batch_enc.items()
+            key: value
+            for key, value in prompt_enc.items()
+            if key not in {"input_ids", "attention_mask", "position_ids"}
         }
+        model_inputs["input_ids"] = torch.cat([prompt_ids, padded_responses], dim=1)
+        model_inputs["attention_mask"] = torch.cat(
+            [
+                prompt_enc["attention_mask"],
+                response_mask.to(prompt_enc["attention_mask"].dtype),
+            ],
+            dim=1,
+        )
+        for key in ("token_type_ids", "mm_token_type_ids"):
+            if key in model_inputs:
+                extension = torch.zeros(
+                    batch_size,
+                    max_response_len,
+                    dtype=model_inputs[key].dtype,
+                    device=device,
+                )
+                model_inputs[key] = torch.cat([model_inputs[key], extension], dim=-1)
 
         with torch.no_grad():
-            logits = self._model(**model_inputs).logits  # (n, max_len, vocab)
+            logits = self._model(**model_inputs).logits
 
-        # Extract per-item log-probs
-        results: list[StudentScorer.ScoreResult] = []
-        padded_ids = model_inputs["input_ids"]
-        for i in range(n):
-            T = all_response_lens[i]
-            if T <= 0:
-                results.append(StudentScorer.ScoreResult(
-                    sampled_token_log_probs=(),
-                    mean_logp=float("nan"),
-                    token_count=0,
-                    error="empty response" if T == 0 else "response tokenization misalignment",
-                ))
-                continue
-
-            # Response tokens are at positions [prompt_len, prompt_len+T)
-            # logits[t] predicts token t+1, so we use logits[i, prompt_len-1 : prompt_len+T-1]
-            response_logits = logits[i, prompt_len - 1 : prompt_len + T - 1, :]
-            response_ids = padded_ids[i, prompt_len : prompt_len + T]
+        for row, original_index in enumerate(valid_indices):
+            response_ids = valid_ids[row]
+            response_len = len(response_ids)
+            response_logits = logits[
+                row,
+                prompt_width - 1 : prompt_width - 1 + response_len,
+                :,
+            ]
+            if int(response_logits.shape[0]) != response_len:
+                raise RuntimeError("student response logits do not align with exact response IDs")
+            response_ids_tensor = torch.tensor(
+                response_ids,
+                dtype=torch.long,
+                device=device,
+            )
 
             log_probs = F.log_softmax(response_logits.float(), dim=-1)
-            sampled = log_probs[range(len(response_ids)), response_ids]
+            sampled = log_probs[
+                torch.arange(response_len, device=device),
+                response_ids_tensor,
+            ]
 
             sampled_tuple = tuple(float(v.item()) for v in sampled)
             mean_logp = float(sum(sampled_tuple) / len(sampled_tuple))
 
-            results.append(StudentScorer.ScoreResult(
+            results[original_index] = StudentScorer.ScoreResult(
                 sampled_token_log_probs=sampled_tuple,
                 mean_logp=mean_logp,
                 token_count=len(sampled_tuple),
-            ))
+                scored_token_ids=response_ids,
+                scored_token_hash=hash_token_ids(response_ids),
+                response_mask=(True,) * response_len,
+            )
 
         return results
 

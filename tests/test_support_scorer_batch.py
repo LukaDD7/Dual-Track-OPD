@@ -162,11 +162,85 @@ def _stub_scorer(processor) -> tuple[StudentScorer, _StubModel]:
     return scorer, model
 
 
+class _ExactIdTokenizer:
+    pad_token_id = 0
+    eos_token_id = 9
+
+    def encode(self, text):
+        del text
+        return [8]  # deliberately differs from every raw-ID test response
+
+
+class _ExactIdProcessor:
+    tokenizer = _ExactIdTokenizer()
+
+    def apply_chat_template(self, messages, *, tokenize, add_generation_prompt):
+        del messages, tokenize, add_generation_prompt
+        return "PROMPT"
+
+    def __call__(self, *, text, images, return_tensors, padding=True):
+        del images, return_tensors, padding
+        batch = len(text)
+        return {
+            "input_ids": torch.tensor([[3, 4]] * batch, dtype=torch.long),
+            "attention_mask": torch.ones((batch, 2), dtype=torch.long),
+            "mm_token_type_ids": torch.ones((batch, 2), dtype=torch.long),
+            # Prompt-only position IDs must not be forwarded after suffix append.
+            "position_ids": torch.arange(2).repeat(batch, 1),
+        }
+
+
+class _PositionSensitiveModel:
+    def __init__(self):
+        self.received = {}
+        self._param = torch.zeros(1)
+
+    def parameters(self):
+        return iter([self._param])
+
+    def eval(self):
+        return self
+
+    def __call__(self, **kwargs):
+        self.received = {key: value.clone() for key, value in kwargs.items()}
+        batch, width = kwargs["input_ids"].shape
+        logits = torch.zeros((batch, width, 12), dtype=torch.float32)
+        for row in range(batch):
+            for position in range(width):
+                logits[row, position, (row + position + 1) % 12] = 4.0
+        return SimpleNamespace(logits=logits)
+
+
+def test_score_batch_appends_raw_ids_and_never_retokenizes_display_text():
+    processor = _ExactIdProcessor()
+    model = _PositionSensitiveModel()
+    scorer = object.__new__(StudentScorer)
+    scorer._processor = processor
+    scorer._tokenizer = processor.tokenizer
+    scorer._model = model
+
+    raw_ids = [(5, 9), (6,)]
+    results = scorer.score_batch(
+        questions=["q", "q"],
+        images=[_image(), _image()],
+        prompt_texts=["prompt", "prompt"],
+        response_texts=["display loses eos", "another display"],
+        response_token_ids_list=raw_ids,
+    )
+
+    assert model.received["input_ids"].tolist() == [[3, 4, 5, 9], [3, 4, 6, 0]]
+    assert model.received["attention_mask"].tolist() == [[1, 1, 1, 1], [1, 1, 1, 0]]
+    assert model.received["mm_token_type_ids"].tolist() == [[1, 1, 0, 0], [1, 1, 0, 0]]
+    assert "position_ids" not in model.received
+    assert [result.scored_token_ids for result in results] == raw_ids
+    assert [result.response_mask for result in results] == [(True, True), (True,)]
+    assert [result.token_count for result in results] == [2, 1]
+
+
 @requires_model
 def test_score_batch_forward_receives_per_row_multimodal_tensors(processor):
     """score_batch must hand the model n images / grids and padded token ids."""
     image = _image()
-    chat = _chat_text(processor, image)
     responses = _responses()
     n = len(responses)
     questions = ["Find x."] * n

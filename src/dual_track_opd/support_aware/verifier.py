@@ -10,15 +10,11 @@ import math
 import re
 from typing import Any
 
+from dual_track_opd.fc_opd.answer_extraction import extract_final_answer_candidate
+
 # ---------------------------------------------------------------------------
 # Patterns
 # ---------------------------------------------------------------------------
-
-# Match "Answer: <stuff>" or "answer: <stuff>" or "**Answer:** <stuff>"
-_ANSWER_MARKER_RE = re.compile(
-    r"(?:^|\n)\s*(?:\*\*)?\s*Answer\s*:?\s*(?:\*\*)?\s*(.+?)\s*$",
-    re.IGNORECASE | re.MULTILINE,
-)
 
 # Numeric: integer, decimal, negative, optional units
 _NUMERIC_RE = re.compile(r"[-+]?(?:\d+\.?\d*|\.\d+)")
@@ -42,27 +38,14 @@ _LATEX_NORMALIZE = [
 def extract_answer(response_text: str) -> str | None:
     """Extract the final answer from a student/teacher response.
 
-    Strategy (in order):
-    1. Look for "Answer:" marker and extract text after it.
-    2. Fall back to the last non-empty line.
-    3. From that text, extract a number or LaTeX expression.
+    The shared FC-OPD extractor requires an explicit final-answer marker and
+    deliberately rejects unmarked reasoning numbers.  This adapter retains
+    Geometry3K's LaTeX normalization after that conservative extraction step.
     """
-    if not response_text or not response_text.strip():
+    candidate_text = extract_final_answer_candidate(response_text)
+    if candidate_text is None:
         return None
-
-    # Try explicit answer marker first
-    candidate_text = response_text
-    marker_matches = list(_ANSWER_MARKER_RE.finditer(response_text))
-    if marker_matches:
-        candidate_text = marker_matches[-1].group(1)
-
-    # Try to extract from the candidate text
-    extracted = _extract_from_text(candidate_text)
-    if extracted is not None:
-        return extracted
-
-    # Fall back: scan the whole response
-    return _extract_from_text(response_text)
+    return _extract_from_text(candidate_text)
 
 
 def _extract_from_text(text: str) -> str | None:

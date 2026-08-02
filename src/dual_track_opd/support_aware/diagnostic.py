@@ -24,13 +24,17 @@ import random
 import sys
 import tempfile
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Literal, Mapping, Sequence
 
 import numpy as np
 import torch
 from PIL import Image
+
+from dual_track_opd.fc_opd.dataset_signal_audit import hash_token_ids
+from dual_track_opd.fc_opd.student_rollout_signal_audit import build_rollout_prompt
+from dual_track_opd.fc_opd.teacher_protocol import tokenizer_fingerprint
 
 from .reporter import (
     DiagnosticRunMeta,
@@ -62,8 +66,10 @@ _PROMPT_TEMPLATE = """{question}
 Think step by step about this geometry problem. First analyze the diagram carefully, then reason through the solution, and finally give your answer as "Answer: <number>"."""
 
 
-def build_prompt(question: str) -> str:
-    return _PROMPT_TEMPLATE.format(question=question.strip())
+def build_prompt(question: str, response_format: str = "legacy_answer") -> str:
+    if response_format == "legacy_answer":
+        return _PROMPT_TEMPLATE.format(question=question.strip())
+    return build_rollout_prompt(question, response_format=response_format).text
 
 
 # ---------------------------------------------------------------------------
@@ -90,6 +96,15 @@ class DiagnosticConfig:
     run_id_override: str | None = None
     prompt_start: int = 0
     prompt_end: int | None = None
+    response_format: str = "legacy_answer"
+    malformed_rate_max: float = 0.10
+    duplicate_rate_max: float = 0.25
+    min_correct_tails: int = 20
+    teacher_gap_auc_min: float = 0.60
+    correct_tail_rank1_above_random: bool = True
+    truncation_rate_max: float = 0.15
+    bootstrap_seed: int = 42
+    bootstrap_resamples: int = 10_000
 
     @property
     def resolved_num_prompts(self) -> int:
@@ -103,6 +118,17 @@ class DiagnosticConfig:
             return 2
         return self.rollouts_per_prompt
 
+    @property
+    def gate_config(self) -> dict[str, Any]:
+        return {
+            "malformed_rate_max": self.malformed_rate_max,
+            "duplicate_rate_max": self.duplicate_rate_max,
+            "min_correct_tails": self.min_correct_tails,
+            "teacher_gap_auc_min": self.teacher_gap_auc_min,
+            "correct_tail_rank1_above_random": self.correct_tail_rank1_above_random,
+            "truncation_rate_max": self.truncation_rate_max,
+        }
+
 
 # ---------------------------------------------------------------------------
 # Data loading
@@ -114,7 +140,7 @@ def load_and_select_prompts(
     num_prompts: int,
     *,
     seed: int = 42,
-) -> tuple[list[dict[str, Any]], Path]:
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Load Geometry3K parquet and select prompts deterministically.
 
     Selection rule: sort by SHA256(sample_uid), take first N.
@@ -144,6 +170,7 @@ def load_and_select_prompts(
     # Record selection manifest
     manifest = {
         "dataset_path": str(path),
+        "dataset_sha256": _sha256_file(path),
         "total_rows": len(df),
         "valid_rows": len(records),
         "selected_rows": len(selected),
@@ -154,6 +181,14 @@ def load_and_select_prompts(
     }
 
     return selected, manifest
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def slice_prompts(
@@ -240,6 +275,89 @@ def rollout_seed(base_seed: int, source_index: int, rollout_id: int) -> int:
     return base_seed + source_index * 1000 + rollout_id
 
 
+@dataclass(frozen=True)
+class GenerationRecord:
+    """Lossless generation output plus display-only text and stop metadata."""
+
+    response_token_ids_raw: tuple[int, ...]
+    response_text_display: str
+    response_text_raw: str
+    response_token_hash: str
+    prompt_token_hash: str
+    finish_reason: Literal["stop", "length", "unknown"]
+    terminal_token_id: int | None
+    content_mask: tuple[bool, ...]
+
+
+def _generation_stop_token_ids(model, tokenizer) -> set[int]:
+    raw_ids: list[Any] = [getattr(tokenizer, "eos_token_id", None)]
+    generation_config = getattr(model, "generation_config", None)
+    if generation_config is not None:
+        configured = getattr(generation_config, "eos_token_id", None)
+        if isinstance(configured, Sequence) and not isinstance(configured, (str, bytes)):
+            raw_ids.extend(configured)
+        else:
+            raw_ids.append(configured)
+    return {int(token_id) for token_id in raw_ids if token_id is not None}
+
+
+def generation_record_from_token_ids(
+    *,
+    model,
+    tokenizer,
+    response_token_ids: Sequence[int],
+    prompt_token_ids: Sequence[int],
+    max_new_tokens: int,
+    response_text_display: str | None = None,
+) -> GenerationRecord:
+    """Build auditable generation metadata without changing the action IDs.
+
+    This helper is shared by live generation and append-only migration of old
+    runs.  In particular, display decoding is never used to reconstruct the
+    response token sequence.
+    """
+
+    response_ids = tuple(int(token_id) for token_id in response_token_ids)
+    prompt_ids = tuple(int(token_id) for token_id in prompt_token_ids)
+    if response_text_display is None:
+        response_text_display = tokenizer.decode(
+            response_ids,
+            skip_special_tokens=True,
+            clean_up_tokenization_spaces=False,
+        )
+    response_text_raw = tokenizer.decode(
+        response_ids,
+        skip_special_tokens=False,
+        clean_up_tokenization_spaces=False,
+    )
+    stop_token_ids = _generation_stop_token_ids(model, tokenizer)
+    terminal_token_id = (
+        response_ids[-1]
+        if response_ids and response_ids[-1] in stop_token_ids
+        else None
+    )
+    if terminal_token_id is not None:
+        finish_reason: Literal["stop", "length", "unknown"] = "stop"
+    elif len(response_ids) >= max_new_tokens:
+        finish_reason = "length"
+    else:
+        finish_reason = "unknown"
+    content_mask = tuple(
+        not (terminal_token_id is not None and index == len(response_ids) - 1)
+        for index in range(len(response_ids))
+    )
+    return GenerationRecord(
+        response_token_ids_raw=response_ids,
+        response_text_display=response_text_display,
+        response_text_raw=response_text_raw,
+        response_token_hash=hash_token_ids(response_ids),
+        prompt_token_hash=hash_token_ids(prompt_ids),
+        finish_reason=finish_reason,
+        terminal_token_id=terminal_token_id,
+        content_mask=content_mask,
+    )
+
+
 def generate_response(
     model,
     processor,
@@ -252,10 +370,11 @@ def generate_response(
     max_new_tokens: int,
     seed: int,
     device: str,
-) -> tuple[str, tuple[int, ...]]:
+) -> GenerationRecord:
     """Generate one response from the student model.
 
-    Returns (response_text, response_token_ids).
+    Display text is decoded separately; exact scoring must use the returned raw
+    token IDs and never re-tokenize the text.
     """
     random.seed(seed)
     torch.manual_seed(seed)
@@ -299,10 +418,15 @@ def generate_response(
 
     input_len = inputs["input_ids"].shape[-1]
     generated_ids = outputs[0, input_len:]
-    response_text = processor.tokenizer.decode(generated_ids, skip_special_tokens=True)
     response_token_ids = tuple(int(t) for t in generated_ids.tolist())
-
-    return response_text, response_token_ids
+    prompt_ids = tuple(int(token_id) for token_id in inputs["input_ids"][0].tolist())
+    return generation_record_from_token_ids(
+        model=model,
+        tokenizer=processor.tokenizer,
+        response_token_ids=response_token_ids,
+        prompt_token_ids=prompt_ids,
+        max_new_tokens=max_new_tokens,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -314,6 +438,168 @@ def compute_mean_logp(sampled_log_probs: Sequence[float]) -> float:
     if not sampled_log_probs:
         return float("nan")
     return float(sum(sampled_log_probs) / len(sampled_log_probs))
+
+
+def compute_masked_logp(
+    sampled_log_probs: Sequence[float],
+    mask: Sequence[bool],
+) -> tuple[float, float, int]:
+    """Return sum, mean, and count under an explicit token mask."""
+
+    if len(sampled_log_probs) != len(mask):
+        raise ValueError("log-probabilities and token mask must have equal length")
+    selected = [float(value) for value, keep in zip(sampled_log_probs, mask, strict=True) if keep]
+    if not selected:
+        return 0.0, float("nan"), 0
+    return float(sum(selected)), float(sum(selected) / len(selected)), len(selected)
+
+
+def assert_exact_score_alignment(
+    *,
+    expected_token_ids: Sequence[int],
+    teacher_result: TeacherScorer.ScoreResult,
+    student_result: StudentScorer.ScoreResult,
+) -> None:
+    """Fail closed unless both scorers evaluated the generated action sequence."""
+
+    expected = tuple(int(token_id) for token_id in expected_token_ids)
+    expected_mask = (True,) * len(expected)
+    if teacher_result.scored_token_ids != expected:
+        raise RuntimeError("teacher scored token IDs differ from generated response IDs")
+    if student_result.scored_token_ids != expected:
+        raise RuntimeError("student scored token IDs differ from generated response IDs")
+    if teacher_result.response_mask != expected_mask:
+        raise RuntimeError("teacher response mask differs from generated response mask")
+    if student_result.response_mask != expected_mask:
+        raise RuntimeError("student response mask differs from generated response mask")
+    expected_hash = hash_token_ids(expected)
+    if teacher_result.scored_token_hash != expected_hash:
+        raise RuntimeError("teacher scored token hash differs from generated response hash")
+    if student_result.scored_token_hash != expected_hash:
+        raise RuntimeError("student scored token hash differs from generated response hash")
+    if len(teacher_result.sampled_token_log_probs) != len(expected):
+        raise RuntimeError("teacher log-probability count differs from generated token count")
+    if len(student_result.sampled_token_log_probs) != len(expected):
+        raise RuntimeError("student log-probability count differs from generated token count")
+
+
+def build_exact_scored_record(
+    *,
+    base_record: Mapping[str, Any],
+    generation: GenerationRecord,
+    verdict: Mapping[str, Any],
+    teacher_result: TeacherScorer.ScoreResult,
+    student_result: StudentScorer.ScoreResult,
+) -> dict[str, Any]:
+    """Combine one immutable rollout with exact-ID scorer/verifier evidence."""
+
+    record_errors = [
+        message
+        for message in (
+            f"teacher_error={teacher_result.error}" if teacher_result.error else None,
+            f"student_error={student_result.error}" if student_result.error else None,
+        )
+        if message is not None
+    ]
+    exact_token_alignment = False
+    if not record_errors:
+        assert_exact_score_alignment(
+            expected_token_ids=generation.response_token_ids_raw,
+            teacher_result=teacher_result,
+            student_result=student_result,
+        )
+        exact_token_alignment = True
+
+    teacher_sampled = teacher_result.sampled_token_log_probs
+    student_sampled = student_result.sampled_token_log_probs
+    if exact_token_alignment:
+        teacher_sum_all, teacher_mean_all, teacher_count_all = compute_masked_logp(
+            teacher_sampled, (True,) * len(teacher_sampled)
+        )
+        student_sum_all, student_mean_all, student_count_all = compute_masked_logp(
+            student_sampled, (True,) * len(student_sampled)
+        )
+        teacher_sum_content, teacher_mean_content, teacher_count_content = compute_masked_logp(
+            teacher_sampled, generation.content_mask
+        )
+        student_sum_content, student_mean_content, student_count_content = compute_masked_logp(
+            student_sampled, generation.content_mask
+        )
+    else:
+        teacher_sum_all = student_sum_all = float("nan")
+        teacher_mean_all = student_mean_all = float("nan")
+        teacher_sum_content = student_sum_content = float("nan")
+        teacher_mean_content = student_mean_content = float("nan")
+        teacher_count_all = student_count_all = 0
+        teacher_count_content = student_count_content = 0
+
+    teacher_gap = (
+        teacher_mean_content - student_mean_content
+        if math.isfinite(teacher_mean_content) and math.isfinite(student_mean_content)
+        else float("nan")
+    )
+    teacher_gap_all = (
+        teacher_mean_all - student_mean_all
+        if math.isfinite(teacher_mean_all) and math.isfinite(student_mean_all)
+        else float("nan")
+    )
+    teacher_terminal_logp = (
+        float(teacher_sampled[-1])
+        if generation.terminal_token_id is not None and teacher_sampled
+        else None
+    )
+    student_terminal_logp = (
+        float(student_sampled[-1])
+        if generation.terminal_token_id is not None and student_sampled
+        else None
+    )
+
+    record = {
+        **dict(base_record),
+        "response_text": generation.response_text_display,
+        "response_text_display": generation.response_text_display,
+        "response_text_raw": generation.response_text_raw,
+        "response_token_ids": generation.response_token_ids_raw,
+        "response_token_hash": generation.response_token_hash,
+        "response_token_count": len(generation.response_token_ids_raw),
+        "content_token_count": sum(generation.content_mask),
+        "content_mask": generation.content_mask,
+        "finish_reason": generation.finish_reason,
+        "terminal_token_id": generation.terminal_token_id,
+        "response_hash": hashlib.sha256(
+            generation.response_text_display.encode()
+        ).hexdigest(),
+        "correct": verdict.get("correct"),
+        "answer_extracted": verdict.get("answer_extracted"),
+        "gold_answer": verdict.get("gold_answer", base_record.get("gold_answer")),
+        "format_valid": verdict.get("format_valid", False),
+        "malformed": verdict.get("malformed", False),
+        "teacher_sum_logp": teacher_sum_content,
+        "teacher_mean_logp": teacher_mean_content,
+        "teacher_sum_logp_all": teacher_sum_all,
+        "teacher_mean_logp_all": teacher_mean_all,
+        "teacher_terminal_logp": teacher_terminal_logp,
+        "teacher_scored_token_count": teacher_count_all,
+        "teacher_content_token_count": teacher_count_content,
+        "teacher_scored_token_hash": teacher_result.scored_token_hash,
+        "teacher_response_mask": teacher_result.response_mask,
+        "teacher_sampled_token_log_probs": teacher_sampled,
+        "student_sum_logp": student_sum_content,
+        "student_mean_logp": student_mean_content,
+        "student_sum_logp_all": student_sum_all,
+        "student_mean_logp_all": student_mean_all,
+        "student_terminal_logp": student_terminal_logp,
+        "student_scored_token_count": student_count_all,
+        "student_content_token_count": student_count_content,
+        "student_scored_token_hash": student_result.scored_token_hash,
+        "student_response_mask": student_result.response_mask,
+        "student_sampled_token_log_probs": student_sampled,
+        "teacher_gap": teacher_gap,
+        "teacher_gap_all": teacher_gap_all,
+        "exact_token_alignment": exact_token_alignment,
+        "errors": record_errors,
+    }
+    return record
 
 
 @dataclass
@@ -392,6 +678,38 @@ def _load_resume_state(output_dir: Path) -> _ResumeState:
     )
 
 
+def _validate_resume_state_for_config(
+    state: _ResumeState,
+    config: DiagnosticConfig,
+) -> None:
+    """Prevent mixing historical text-retokenized rows with exact-ID rows."""
+
+    for record in state.all_rollouts:
+        uid = str(record.get("sample_uid") or "unknown")
+        rollout_id = record.get("rollout_id")
+        response_ids = tuple(
+            int(token_id) for token_id in record.get("response_token_ids") or ()
+        )
+        expected_hash = hash_token_ids(response_ids) if response_ids else ""
+        expected_mask = [True] * len(response_ids)
+        if (
+            not response_ids
+            or record.get("response_token_hash") != expected_hash
+            or record.get("exact_token_alignment") is not True
+            or not record.get("prompt_token_hash")
+            or record.get("prompt_version") != config.response_format
+            or record.get("teacher_scored_token_hash") != expected_hash
+            or record.get("student_scored_token_hash") != expected_hash
+            or list(record.get("teacher_response_mask") or ()) != expected_mask
+            or list(record.get("student_response_mask") or ()) != expected_mask
+        ):
+            raise ValueError(
+                f"{uid}:rollout-{rollout_id} predates or violates the exact-token "
+                "scoring contract; do not mix it with new rows. Recover/finish the "
+                "cohort separately and use support_aware.rescore into a new output."
+            )
+
+
 def _build_summary(
     *,
     run_id: str,
@@ -410,6 +728,10 @@ def _build_summary(
     selection_manifest: Mapping[str, Any],
     git_commit: str,
     git_dirty: bool,
+    gate_config: Mapping[str, Any] | None = None,
+    bootstrap_seed: int = 42,
+    bootstrap_resamples: int = 10_000,
+    shard_completeness_rate: float = 1.0,
     verbose: bool = True,
 ) -> dict[str, Any]:
     """Aggregate rollouts/prompt summaries into the final summary dict + gates.
@@ -441,7 +763,46 @@ def _build_summary(
     )
 
     # Correct-tail rank metrics
-    correct_tail_rank = _compute_correct_tail_ranks(prompt_summaries, stochastic_rollouts)
+    correct_tail_rank = _compute_correct_tail_ranks(
+        prompt_summaries,
+        stochastic_rollouts,
+        seed=bootstrap_seed,
+        resamples=bootstrap_resamples,
+    )
+    prompt_signal_all = _compute_prompt_signal_metrics(
+        stochastic_rollouts,
+        seed=bootstrap_seed + 10,
+        resamples=bootstrap_resamples,
+    )
+    prompt_signal_by_finish_reason = {
+        finish_reason: _compute_prompt_signal_metrics(
+            [
+                rollout
+                for rollout in stochastic_rollouts
+                if finish_reason == "all" or rollout.get("finish_reason") == finish_reason
+            ],
+            seed=bootstrap_seed + 20 + index * 10,
+            resamples=bootstrap_resamples,
+        )
+        for index, finish_reason in enumerate(("all", "stop", "length"))
+    }
+    length_bins = {
+        "le_512": lambda length: length <= 512,
+        "513_2048": lambda length: 512 < length <= 2048,
+        "gt_2048": lambda length: length > 2048,
+    }
+    prompt_signal_by_length_bin = {
+        label: _compute_prompt_signal_metrics(
+            [
+                rollout
+                for rollout in stochastic_rollouts
+                if predicate(int(rollout.get("response_token_count") or 0))
+            ],
+            seed=bootstrap_seed + 100 + index * 10,
+            resamples=bootstrap_resamples,
+        )
+        for index, (label, predicate) in enumerate(length_bins.items())
+    }
 
     # Response length stats
     lengths = [r.get("response_token_count", 0) for r in all_rollouts]
@@ -465,6 +826,24 @@ def _build_summary(
     greedy_correct_count = sum(1 for r in greedy_rollouts if r.get("correct") is True)
     greedy_accuracy = greedy_correct_count / max(len(greedy_rollouts), 1)
 
+    finish_reason_counts = {
+        reason: sum(1 for rollout in all_rollouts if rollout.get("finish_reason") == reason)
+        for reason in ("stop", "length", "unknown")
+    }
+    truncation_rate = finish_reason_counts["length"] / max(total_rollouts, 1)
+    exact_alignment_count = sum(
+        1 for rollout in all_rollouts if rollout.get("exact_token_alignment") is True
+    )
+    exact_alignment_rate = exact_alignment_count / max(total_rollouts, 1)
+    prompt_token_hash_count = sum(
+        1 for rollout in all_rollouts if bool(rollout.get("prompt_token_hash"))
+    )
+    prompt_token_hash_rate = prompt_token_hash_count / max(total_rollouts, 1)
+    prompt_version_counts: dict[str, int] = {}
+    for rollout in all_rollouts:
+        version = str(rollout.get("prompt_version") or "unavailable")
+        prompt_version_counts[version] = prompt_version_counts.get(version, 0) + 1
+
     # Empirical pass@1 and pass@K
     correct_tails = [p for p in prompt_summaries if p["support_state"] == "correct_tail"]
     exposed = [p for p in prompt_summaries if p["support_state"] == "exposed"]
@@ -485,7 +864,19 @@ def _build_summary(
         "auc_teacher_mean_logp_correct_vs_wrong": auc_teacher_mean,
         "auc_student_mean_logp_correct_vs_wrong": auc_student_mean,
         "correct_tail_rank_metrics": correct_tail_rank,
+        "prompt_signal_metrics": prompt_signal_all,
+        "prompt_signal_by_finish_reason": prompt_signal_by_finish_reason,
+        "prompt_signal_by_length_bin": prompt_signal_by_length_bin,
         "response_length_percentiles": length_percentiles,
+        "finish_reason_counts": finish_reason_counts,
+        "truncation_rate": truncation_rate,
+        "exact_token_alignment_count": exact_alignment_count,
+        "exact_token_alignment_rate": exact_alignment_rate,
+        "prompt_token_hash_count": prompt_token_hash_count,
+        "prompt_token_hash_rate": prompt_token_hash_rate,
+        "prompt_version_counts": prompt_version_counts,
+        "shard_completeness_rate": float(shard_completeness_rate),
+        "scoring_policy": "exact_raw_ids_content_primary_terminal_separate_v1",
         "overall_duplicate_rollout_rate": overall_dup_rate,
         "malformed_response_count": malformed_count,
         "malformed_response_rate": malformed_count / max(total_rollouts, 1),
@@ -499,10 +890,13 @@ def _build_summary(
         "selection_manifest": dict(selection_manifest),
         "git_commit": git_commit,
         "git_dirty": git_dirty,
+        "bootstrap_seed": bootstrap_seed,
+        "bootstrap_resamples": bootstrap_resamples,
+        "gate_config": dict(gate_config or {}),
     }
 
     # -- Acceptance gates ------------------------------------------------------
-    gates = _check_gates(summary, mode)
+    gates = _check_gates(summary, mode, gate_config=gate_config)
     summary["acceptance_gates"] = gates
     if verbose:
         print("\n[6/6] Acceptance gates...")
@@ -518,72 +912,268 @@ def merge_shard_runs(
     *,
     mode: str = "full",
 ) -> dict[str, Any]:
-    """Combine rollouts/prompt summaries from sharded runs into one summary.
+    """Strictly validate and combine a complete set of disjoint shard runs."""
+    import yaml
 
-    Each shard writes its own run directory (prompts are disjoint after
-    ``slice_prompts``).  This reloads the JSONL files, dedupes defensively, and
-    recomputes the aggregate summary + acceptance gates exactly like the single
-    full run would.
-    """
+    if not shard_dirs:
+        raise ValueError("at least one shard directory is required")
     rollouts: list[dict[str, Any]] = []
     summaries: list[dict[str, Any]] = []
+    selected_prompts: list[dict[str, Any]] = []
     seen_rollout: set[tuple[str, bool, int]] = set()
     seen_uids: set[str] = set()
-    manifests: list[dict[str, Any]] = []
+    shard_summaries: list[dict[str, Any]] = []
+    run_manifests: list[dict[str, Any]] = []
+    resolved_configs: list[dict[str, Any]] = []
+    shard_intervals: list[tuple[int, int, list[str]]] = []
+
+    def read_jsonl(path: Path) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        with path.open(encoding="utf-8") as handle:
+            for line_number, line in enumerate(handle, start=1):
+                if not line.strip():
+                    continue
+                value = json.loads(line)
+                if not isinstance(value, dict):
+                    raise ValueError(f"{path}:{line_number}: expected a JSON object")
+                rows.append(value)
+        return rows
+
+    def normalized_config(config: Mapping[str, Any]) -> dict[str, Any]:
+        ignored = {
+            "prompt_start",
+            "prompt_end",
+            "run_id_override",
+            "resume_run_id",
+            # Per-shard append-only migration provenance; validated through
+            # each run_manifest/source artifact hash rather than equality.
+            "source_run",
+            "output_dir",
+        }
+        return {str(key): value for key, value in config.items() if key not in ignored}
 
     for d in shard_dirs:
         p = Path(d)
-        rollouts_path = p / "rollouts.jsonl"
-        if rollouts_path.exists():
-            with rollouts_path.open(encoding="utf-8") as fh:
-                for line in fh:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    rec = json.loads(line)
-                    key = (
-                        str(rec.get("sample_uid")),
-                        bool(rec.get("is_greedy")),
-                        int(rec.get("rollout_id", -1)),
-                    )
-                    if key in seen_rollout:
-                        continue
-                    seen_rollout.add(key)
-                    rollouts.append(rec)
-        summaries_path = p / "prompt_support_summary.jsonl"
-        if summaries_path.exists():
-            with summaries_path.open(encoding="utf-8") as fh:
-                for line in fh:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    rec = json.loads(line)
-                    uid = str(rec.get("sample_uid"))
-                    if uid in seen_uids:
-                        continue
-                    seen_uids.add(uid)
-                    summaries.append(rec)
-        summary_path = p / "summary.json"
-        if summary_path.exists():
-            try:
-                with summary_path.open(encoding="utf-8") as fh:
-                    manifests.append(json.load(fh))
-            except (OSError, ValueError):
-                pass
+        required = (
+            "rollouts.jsonl",
+            "prompt_support_summary.jsonl",
+            "selected_prompts.jsonl",
+            "summary.json",
+            "run_manifest.json",
+            "resolved_config.yaml",
+        )
+        missing = [name for name in required if not (p / name).is_file()]
+        if missing:
+            raise ValueError(f"{p}: incomplete shard; missing {missing}")
 
-    if not rollouts:
-        raise ValueError("no rollouts found in shard dirs")
-    if not summaries:
-        raise ValueError("no prompt summaries found in shard dirs")
+        shard_rollouts = read_jsonl(p / "rollouts.jsonl")
+        shard_prompt_summaries = read_jsonl(p / "prompt_support_summary.jsonl")
+        shard_selected = read_jsonl(p / "selected_prompts.jsonl")
+        shard_summary = json.loads((p / "summary.json").read_text(encoding="utf-8"))
+        run_manifest = json.loads((p / "run_manifest.json").read_text(encoding="utf-8"))
+        resolved_config = yaml.safe_load((p / "resolved_config.yaml").read_text(encoding="utf-8")) or {}
+        if not isinstance(resolved_config, dict):
+            raise ValueError(f"{p}: resolved_config.yaml must contain a mapping")
+        if run_manifest.get("exit_status") not in {"PASS", "GATE_FAIL"}:
+            raise ValueError(f"{p}: shard is not complete (exit_status={run_manifest.get('exit_status')})")
 
-    hashes = {str(r.get("tokenizer_hash")) for r in rollouts}
-    if len(hashes) > 1:
-        raise ValueError(f"tokenizer hash mismatch across shards: {hashes}")
+        shard_uids = [str(row.get("sample_uid", "")) for row in shard_selected]
+        if any(not uid for uid in shard_uids) or len(shard_uids) != len(set(shard_uids)):
+            raise ValueError(f"{p}: selected prompt UIDs are empty or duplicated")
+        summary_uids = {str(row.get("sample_uid", "")) for row in shard_prompt_summaries}
+        if (
+            len(shard_prompt_summaries) != len(shard_uids)
+            or summary_uids != set(shard_uids)
+        ):
+            raise ValueError(f"{p}: selected prompts and prompt summaries do not match")
+        if seen_uids.intersection(shard_uids):
+            overlap = sorted(seen_uids.intersection(shard_uids))[:10]
+            raise ValueError(f"{p}: shard UID overlap detected: {overlap}")
+
+        shard_k_values = {int(row.get("K", -1)) for row in shard_prompt_summaries}
+        if len(shard_k_values) != 1:
+            raise ValueError(f"{p}: inconsistent K within shard: {shard_k_values}")
+        shard_k = next(iter(shard_k_values))
+        expected_keys = {
+            (uid, is_greedy, rollout_id)
+            for uid in shard_uids
+            for is_greedy, rollout_id in (
+                [(True, 0)] + [(False, rollout_id) for rollout_id in range(1, shard_k + 1)]
+            )
+        }
+        actual_keys: set[tuple[str, bool, int]] = set()
+        for record in shard_rollouts:
+            key = (
+                str(record.get("sample_uid", "")),
+                bool(record.get("is_greedy")),
+                int(record.get("rollout_id", -1)),
+            )
+            if key in actual_keys or key in seen_rollout:
+                raise ValueError(f"{p}: duplicate rollout key {key}")
+            actual_keys.add(key)
+        if actual_keys != expected_keys:
+            missing_keys = sorted(expected_keys - actual_keys)[:10]
+            extra_keys = sorted(actual_keys - expected_keys)[:10]
+            raise ValueError(
+                f"{p}: incomplete rollout key set; missing={missing_keys}, extra={extra_keys}"
+            )
+
+        for record in shard_rollouts:
+            response_ids = tuple(int(token_id) for token_id in record.get("response_token_ids") or ())
+            response_hash = hash_token_ids(response_ids) if response_ids else ""
+            if not response_ids or record.get("response_token_hash") != response_hash:
+                raise ValueError(f"{p}: missing/invalid raw response token hash")
+            if record.get("exact_token_alignment") is not True:
+                raise ValueError(f"{p}: rollout lacks proven exact-token alignment")
+            if not record.get("prompt_token_hash"):
+                raise ValueError(f"{p}: rollout lacks prompt token hash")
+            if record.get("teacher_scored_token_hash") != response_hash:
+                raise ValueError(f"{p}: teacher scored-token hash differs from raw response")
+            if record.get("student_scored_token_hash") != response_hash:
+                raise ValueError(f"{p}: student scored-token hash differs from raw response")
+            expected_mask = [True] * len(response_ids)
+            if list(record.get("teacher_response_mask") or ()) != expected_mask:
+                raise ValueError(f"{p}: teacher response mask differs from exact response mask")
+            if list(record.get("student_response_mask") or ()) != expected_mask:
+                raise ValueError(f"{p}: student response mask differs from exact response mask")
+
+        start = int(resolved_config.get("prompt_start") or 0)
+        raw_end = resolved_config.get("prompt_end")
+        end = start + len(shard_uids) if raw_end in (None, "None", "") else int(raw_end)
+        if end - start != len(shard_uids):
+            raise ValueError(
+                f"{p}: configured prompt interval [{start}, {end}) does not match "
+                f"{len(shard_uids)} selected prompts"
+            )
+        shard_intervals.append((start, end, shard_uids))
+
+        seen_uids.update(shard_uids)
+        seen_rollout.update(actual_keys)
+        rollouts.extend(shard_rollouts)
+        summaries.extend(shard_prompt_summaries)
+        selected_prompts.extend(shard_selected)
+        shard_summaries.append(shard_summary)
+        run_manifests.append(run_manifest)
+        resolved_configs.append(resolved_config)
+
+    reference_config = normalized_config(resolved_configs[0])
+    for index, resolved_config in enumerate(resolved_configs[1:], start=1):
+        if normalized_config(resolved_config) != reference_config:
+            raise ValueError(f"shard {index} resolved config differs from shard 0")
+
+    selection_manifests = [
+        summary.get("selection_manifest") or {} for summary in shard_summaries
+    ]
+    selection_total_counts = {
+        int(manifest["selection_total_rows"])
+        for manifest in selection_manifests
+        if manifest.get("selection_total_rows") is not None
+    }
+    if len(selection_total_counts) > 1:
+        raise ValueError(
+            f"selection total mismatch across shards: {selection_total_counts}"
+        )
+    expected_prompt_count = (
+        next(iter(selection_total_counts))
+        if selection_total_counts
+        else int(reference_config.get("num_prompts", len(seen_uids)))
+    )
+    if len(seen_uids) != expected_prompt_count:
+        raise ValueError(
+            f"incomplete shard coverage: got {len(seen_uids)} prompts, expected {expected_prompt_count}"
+        )
+    cursor = 0
+    for start, end, _ in sorted(shard_intervals):
+        if start != cursor:
+            raise ValueError(
+                f"incomplete/overlapping shard intervals: expected start {cursor}, got {start}"
+            )
+        cursor = end
+    if cursor != expected_prompt_count:
+        raise ValueError(
+            f"incomplete shard intervals: covered [0, {cursor}), expected [0, {expected_prompt_count})"
+        )
+
     ks = {p.get("K") for p in summaries if p.get("K") is not None}
-    if len(ks) > 1:
+    if len(ks) != 1:
         raise ValueError(f"rollouts_per_prompt mismatch across shards: {ks}")
+    K = int(next(iter(ks)))
+    student_hashes = {
+        str(record.get("student_tokenizer_hash") or record.get("tokenizer_hash") or "")
+        for record in rollouts
+    }
+    teacher_hashes = {
+        str(record.get("teacher_tokenizer_hash") or record.get("tokenizer_hash") or "")
+        for record in rollouts
+    }
+    if len(student_hashes) != 1 or "" in student_hashes:
+        raise ValueError(f"student tokenizer hash mismatch across shards: {student_hashes}")
+    if len(teacher_hashes) != 1 or "" in teacher_hashes:
+        raise ValueError(f"teacher tokenizer hash mismatch across shards: {teacher_hashes}")
+    student_hash = next(iter(student_hashes))
+    teacher_hash = next(iter(teacher_hashes))
+    if student_hash != teacher_hash:
+        raise ValueError("student and teacher tokenizer hashes differ")
 
-    tokenizer_hash = next(iter(hashes))
+    teacher_model_ids = {str(record.get("teacher_model_id") or "") for record in rollouts}
+    student_model_paths = {str(record.get("student_model_path") or "") for record in rollouts}
+    if (
+        len(teacher_model_ids) != 1
+        or "" in teacher_model_ids
+        or len(student_model_paths) != 1
+        or "" in student_model_paths
+    ):
+        raise ValueError("model identity mismatch across shards")
+    git_commits = {str(manifest.get("git_commit") or "") for manifest in run_manifests}
+    if len(git_commits) != 1 or "" in git_commits:
+        raise ValueError(f"git commit mismatch across shards: {git_commits}")
+    git_dirty_states = {bool(manifest.get("git_dirty")) for manifest in run_manifests}
+    if len(git_dirty_states) != 1:
+        raise ValueError(f"git dirty state mismatch across shards: {git_dirty_states}")
+
+    dataset_hashes = {str(manifest.get("dataset_sha256") or "") for manifest in selection_manifests}
+    selection_hashes = {str(manifest.get("selection_sha256") or "") for manifest in selection_manifests}
+    if len(dataset_hashes) != 1 or "" in dataset_hashes:
+        raise ValueError(f"dataset content hash mismatch/missing across shards: {dataset_hashes}")
+    if len(selection_hashes) != 1 or "" in selection_hashes:
+        raise ValueError(f"selection manifest hash mismatch/missing across shards: {selection_hashes}")
+
+    uid_order = sorted(
+        seen_uids,
+        key=lambda uid: hashlib.sha256(uid.encode()).hexdigest(),
+    )
+    for start, end, shard_uids in shard_intervals:
+        if shard_uids != uid_order[start:end]:
+            raise ValueError(
+                f"shard UID order/content does not match deterministic selection slice "
+                f"[{start}, {end})"
+            )
+    union_selection_hash = hashlib.sha256(
+        json.dumps(uid_order, sort_keys=True).encode()
+    ).hexdigest()
+    source_selection_hash = next(iter(selection_hashes))
+    if union_selection_hash != source_selection_hash:
+        raise ValueError(
+            "merged UID union does not match the source selection manifest hash"
+        )
+
+    prompt_versions = {str(record.get("prompt_version") or "") for record in rollouts}
+    expected_prompt_version = str(reference_config.get("response_format") or "")
+    if (
+        len(prompt_versions) != 1
+        or "" in prompt_versions
+        or (expected_prompt_version and next(iter(prompt_versions)) != expected_prompt_version)
+    ):
+        raise ValueError(
+            f"prompt version mismatch across shards/config: {prompt_versions}, "
+            f"config={expected_prompt_version!r}"
+        )
+    scoring_policies = {
+        str(summary.get("scoring_policy") or "") for summary in shard_summaries
+    }
+    if scoring_policies != {"exact_raw_ids_content_primary_terminal_separate_v1"}:
+        raise ValueError(f"scoring policy mismatch/missing across shards: {scoring_policies}")
+
     malformed_count = sum(1 for r in rollouts if r.get("malformed"))
     non_finite_count = sum(
         1
@@ -591,48 +1181,94 @@ def merge_shard_runs(
         if _is_nonfinite(r.get("teacher_mean_logp"))
         or _is_nonfinite(r.get("student_mean_logp"))
     )
-    missing_image = sum(int(m.get("missing_image_count") or 0) for m in manifests)
-
-    first_manifest = (
-        (manifests[0].get("selection_manifest") or {})
-        if manifests
-        else {}
-    )
+    missing_image = sum(int(summary.get("missing_image_count") or 0) for summary in shard_summaries)
+    first_manifest = selection_manifests[0]
     selection_manifest = {
         "dataset_path": first_manifest.get("dataset_path"),
+        "dataset_sha256": next(iter(dataset_hashes)),
         "valid_rows": first_manifest.get("valid_rows"),
         "merged_from": [str(Path(d).name) for d in shard_dirs],
+        "selection_total_rows": expected_prompt_count,
         "selected_rows": len(summaries),
         "selection_rule": "sort_by_sha256_sample_uid (sharded merge)",
-        "selection_sha256": hashlib.sha256(
-            json.dumps([p["sample_uid"] for p in summaries], sort_keys=True).encode()
-        ).hexdigest(),
+        "selection_sha256": source_selection_hash,
     }
 
     out = Path(output_dir)
-    out.mkdir(parents=True, exist_ok=True)
+    if out.exists():
+        raise FileExistsError(f"merge output already exists: {out}")
+    gate_config = shard_summaries[0].get("gate_config") or {}
+    bootstrap_seed = int(shard_summaries[0].get("bootstrap_seed") or 42)
+    bootstrap_resamples = int(shard_summaries[0].get("bootstrap_resamples") or 10_000)
+    git_commit = next(iter(git_commits))
+    git_dirty = next(iter(git_dirty_states))
     summary = _build_summary(
         run_id=out.name or "merged",
         mode=mode,
         num_prompts=len(summaries),
-        K=next(iter(ks)) if ks else 8,
+        K=K,
         all_rollouts=rollouts,
         prompt_summaries=summaries,
         malformed_count=malformed_count,
         missing_image=missing_image,
         non_finite_count=non_finite_count,
-        student_hash=tokenizer_hash,
-        teacher_hash=tokenizer_hash,
-        teacher_model_id=rollouts[0].get("teacher_model_id", ""),
-        student_model_path=rollouts[0].get("student_model_path", ""),
+        student_hash=student_hash,
+        teacher_hash=teacher_hash,
+        teacher_model_id=next(iter(teacher_model_ids)),
+        student_model_path=next(iter(student_model_paths)),
         selection_manifest=selection_manifest,
-        git_commit="merged",
-        git_dirty=True,
+        git_commit=git_commit,
+        git_dirty=git_dirty,
+        gate_config=gate_config,
+        bootstrap_seed=bootstrap_seed,
+        bootstrap_resamples=bootstrap_resamples,
+        shard_completeness_rate=1.0,
         verbose=False,
     )
-    write_rollouts_jsonl(out, rollouts)
-    write_prompt_support_summary_jsonl(out, summaries)
-    write_summary_json(out, summary)
+    uid_rank = {uid: index for index, uid in enumerate(uid_order)}
+    rollouts.sort(
+        key=lambda row: (
+            uid_rank[str(row["sample_uid"])],
+            0 if row.get("is_greedy") else 1,
+            int(row.get("rollout_id") or 0),
+        )
+    )
+    summaries.sort(key=lambda row: uid_rank[str(row["sample_uid"])])
+    selected_prompts.sort(key=lambda row: uid_rank[str(row["sample_uid"])])
+    merged_config = dict(resolved_configs[0])
+    merged_config["prompt_start"] = "0"
+    merged_config["prompt_end"] = str(expected_prompt_count)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    temp_out = Path(tempfile.mkdtemp(prefix=f".{out.name}.tmp-", dir=out.parent))
+    try:
+        write_rollouts_jsonl(temp_out, rollouts)
+        write_prompt_support_summary_jsonl(temp_out, summaries)
+        write_selected_prompts_jsonl(temp_out, selected_prompts)
+        write_summary_json(temp_out, summary)
+        write_resolved_config_yaml(temp_out, merged_config)
+        write_run_manifest(temp_out, DiagnosticRunMeta(
+            run_id=out.name,
+            output_dir=out,
+            config=merged_config,
+            git_commit=git_commit,
+            git_dirty=git_dirty,
+            num_prompts=len(summaries),
+            rollouts_per_prompt=K,
+            seed=int(reference_config.get("seed", 42)),
+            start_time=time.time(),
+            end_time=time.time(),
+            exit_status=(
+                "PASS"
+                if all(passed for _, passed, _ in summary["acceptance_gates"])
+                else "GATE_FAIL"
+            ),
+        ))
+        temp_out.rename(out)
+    except Exception:
+        import shutil
+
+        shutil.rmtree(temp_out, ignore_errors=True)
+        raise
     return summary
 
 
@@ -685,6 +1321,14 @@ def run_diagnostic(config: DiagnosticConfig) -> dict[str, Any]:
 
     # Reload incremental state when resuming a partial run.
     resume_state = _load_resume_state(output_dir) if config.resume_run_id else None
+    if resume_state is not None:
+        try:
+            _validate_resume_state_for_config(resume_state, config)
+        except ValueError as exc:
+            rollouts_fh.close()
+            summaries_fh.close()
+            print(f"FATAL: incompatible resume state: {exc}", file=sys.stderr)
+            return {"error": "incompatible_resume", "detail": str(exc), "run_id": run_id}
 
     print(f"=== Support-Aware Diagnostic: {run_id} ===")
     print(f"Output: {output_dir}")
@@ -702,12 +1346,14 @@ def run_diagnostic(config: DiagnosticConfig) -> dict[str, Any]:
         config.dataset_path,
         config.resolved_num_prompts,
     )
+    selection_total_rows = int(selection_manifest["selected_rows"])
     prompts, slice_manifest = slice_prompts(
         prompts, config.prompt_start, config.prompt_end
     )
     selection_manifest = {
         **selection_manifest,
         **slice_manifest,
+        "selection_total_rows": selection_total_rows,
         "selected_rows": len(prompts),
     }
     print(f"  Selected {len(prompts)} prompts from {selection_manifest['valid_rows']} valid rows")
@@ -725,36 +1371,46 @@ def run_diagnostic(config: DiagnosticConfig) -> dict[str, Any]:
     )
     model.eval()
 
-    # Student scorer (uses the same model for forced scoring)
+    student_hash = tokenizer_fingerprint(processor.tokenizer)
+
+    # Student scorer reuses the live rollout model.  Loading a second 4B copy
+    # wastes memory and risks processor/version drift.
     student_scorer = StudentScorer(
         StudentScorerConfig(
             model_path=config.student_model_path,
             device=config.device,
             dtype=config.dtype,
-        )
+        ),
+        model=model,
+        processor=processor,
     )
 
-    # Teacher scorer
-    teacher = TeacherScorer(TeacherScorerConfig(base_url=config.teacher_url))
+    # Fail during construction if the teacher does not share the student's
+    # exact response-token action space.
+    teacher = TeacherScorer(TeacherScorerConfig(
+        base_url=config.teacher_url,
+        expected_tokenizer_hash=student_hash,
+    ))
 
     # -- Pre-flight checks ------------------------------------------------------
     print("\n[3/6] Pre-flight checks...")
 
     if not teacher.health():
         print(f"  ERROR: Teacher service at {config.teacher_url} is not healthy")
-        print(f"  Start it first: bash scripts/hpc/start_fc_teacher.sh")
+        print("  Start it first: bash scripts/hpc/start_fc_teacher.sh")
         return _fail_run(output_dir, config, start_time, git_commit, git_dirty)
 
-    student_hash = student_scorer.tokenizer_hash()
+    scorer_student_hash = student_scorer.tokenizer_hash()
     teacher_hash = teacher.tokenizer_hash
     print(f"  Student tokenizer: {student_hash[:16]}...")
     print(f"  Teacher tokenizer: {teacher_hash[:16]}...")
-    if student_hash != teacher_hash:
-        print(f"  FATAL: Tokenizer mismatch! Token-aligned RKL is not possible.")
+    if student_hash != scorer_student_hash or student_hash != teacher_hash:
+        print("  FATAL: Tokenizer mismatch! Token-aligned RKL is not possible.")
         print(f"  Student: {student_hash}")
+        print(f"  Student scorer: {scorer_student_hash}")
         print(f"  Teacher: {teacher_hash}")
         return _fail_run(output_dir, config, start_time, git_commit, git_dirty)
-    print(f"  ✓ Tokenizers match — token-aligned scoring is viable")
+    print("  ✓ Tokenizers match — token-aligned scoring is viable")
 
     # -- Image extraction & temp storage ----------------------------------------
     temp_dir = Path(tempfile.mkdtemp(prefix="support_aware_images_"))
@@ -786,7 +1442,7 @@ def run_diagnostic(config: DiagnosticConfig) -> dict[str, Any]:
         question = str(prompt.get("question", "")).strip()
         image = extract_image(prompt)
         image_path = save_image_for_teacher(image, temp_dir)
-        prompt_text = build_prompt(question)
+        prompt_text = build_prompt(question, config.response_format)
         prompt_hash = hashlib.sha256(prompt_text.encode()).hexdigest()
         image_hash = hashlib.sha256(image.tobytes()).hexdigest()
         gold_answer = prompt.get("answer")
@@ -802,18 +1458,25 @@ def run_diagnostic(config: DiagnosticConfig) -> dict[str, Any]:
 
         # Greedy
         greedy_seed = rollout_seed(config.seed, int(prompt.get("source_index", pi)), 0)
-        greedy_text, greedy_ids = generate_response(
+        greedy_generation = generate_response(
             model, processor, question, image, prompt_text,
             temperature=0.0, top_p=1.0,
             max_new_tokens=config.max_new_tokens,
             seed=greedy_seed,
             device=config.device,
         )
-        greedy_verdict = verify_answer(greedy_text, gold_answer)
+        greedy_verdict = verify_answer(
+            greedy_generation.response_text_display,
+            gold_answer,
+        )
         greedy_correct = greedy_verdict.get("correct")
+        if greedy_verdict.get("malformed"):
+            malformed_count += 1
         batch_meta.append(dict(
             rollout_id=0, is_greedy=True, generation_seed=greedy_seed,
-            response_text=greedy_text, response_token_ids=greedy_ids,
+            generation=greedy_generation,
+            response_text=greedy_generation.response_text_display,
+            response_token_ids=greedy_generation.response_token_ids_raw,
             verdict=greedy_verdict,
         ))
 
@@ -822,7 +1485,7 @@ def run_diagnostic(config: DiagnosticConfig) -> dict[str, Any]:
         prompt_rollout_hashes: list[str] = []
         for rollout_id in range(1, K + 1):
             gen_seed = rollout_seed(config.seed, int(prompt.get("source_index", pi)), rollout_id)
-            resp_text, resp_ids = generate_response(
+            generation = generate_response(
                 model, processor, question, image, prompt_text,
                 temperature=config.temperature,
                 top_p=config.top_p,
@@ -830,17 +1493,19 @@ def run_diagnostic(config: DiagnosticConfig) -> dict[str, Any]:
                 seed=gen_seed,
                 device=config.device,
             )
-            verdict = verify_answer(resp_text, gold_answer)
+            verdict = verify_answer(generation.response_text_display, gold_answer)
             if verdict.get("correct"):
                 correct_count += 1
             if verdict.get("malformed"):
                 malformed_count += 1
             batch_meta.append(dict(
                 rollout_id=rollout_id, is_greedy=False, generation_seed=gen_seed,
-                response_text=resp_text, response_token_ids=resp_ids,
+                generation=generation,
+                response_text=generation.response_text_display,
+                response_token_ids=generation.response_token_ids_raw,
                 verdict=verdict,
             ))
-            prompt_rollout_hashes.append(hashlib.sha256(resp_text.encode()).hexdigest())
+            prompt_rollout_hashes.append(generation.response_token_hash)
 
         # -- Phase B: Batch-score all responses ------------------------------------
         # Teacher batch: one HTTP call for all 9 rollouts
@@ -871,58 +1536,59 @@ def run_diagnostic(config: DiagnosticConfig) -> dict[str, Any]:
         for i, meta in enumerate(batch_meta):
             t_result = t_results[i] if i < len(t_results) else None
             s_result = s_results[i] if i < len(s_results) else None
-            # Fallback for batch failures
-            teacher_sampled = t_result.sampled_token_log_probs if t_result else ()
-            teacher_mean_logp = t_result.mean_logp if t_result else float("nan")
-            student_sampled = s_result.sampled_token_log_probs if s_result else ()
-            student_mean_logp = s_result.mean_logp if s_result else float("nan")
+            generation: GenerationRecord = meta["generation"]
+            if t_result is None:
+                t_result = TeacherScorer.ScoreResult(
+                    request_id=batch_request_ids[i],
+                    sampled_token_log_probs=(),
+                    mean_logp=float("nan"),
+                    error="missing teacher batch result",
+                )
+            if s_result is None:
+                s_result = StudentScorer.ScoreResult(
+                    sampled_token_log_probs=(),
+                    mean_logp=float("nan"),
+                    token_count=0,
+                    error="missing student batch result",
+                )
 
-            import math
-            teacher_gap = (
-                teacher_mean_logp - student_mean_logp
-                if (not math.isnan(teacher_mean_logp) and not math.isnan(student_mean_logp))
-                else float("nan")
+            record = build_exact_scored_record(
+                base_record={
+                    "run_id": run_id,
+                    "sample_uid": sample_uid,
+                    "source_index": int(prompt.get("source_index", pi)),
+                    "split": "train",
+                    "rollout_id": meta["rollout_id"],
+                    "is_greedy": meta["is_greedy"],
+                    "generation_seed": meta["generation_seed"],
+                    "temperature": 0.0 if meta["is_greedy"] else config.temperature,
+                    "top_p": 1.0 if meta["is_greedy"] else config.top_p,
+                    "max_new_tokens": config.max_new_tokens,
+                    "prompt_hash": prompt_hash,
+                    "prompt_token_hash": generation.prompt_token_hash,
+                    "prompt_version": config.response_format,
+                    "image_hash": image_hash,
+                    "gold_answer": gold_answer,
+                    "teacher_model_id": teacher.model_id,
+                    "student_model_path": config.student_model_path,
+                    "tokenizer_hash": student_hash,
+                    "student_tokenizer_hash": student_hash,
+                    "teacher_tokenizer_hash": teacher_hash,
+                },
+                generation=generation,
+                verdict=meta["verdict"],
+                teacher_result=t_result,
+                student_result=s_result,
             )
-            if math.isnan(teacher_mean_logp) or math.isnan(student_mean_logp):
+            if not math.isfinite(float(record["teacher_mean_logp"])) or not math.isfinite(
+                float(record["student_mean_logp"])
+            ):
                 nf_container[0] += 1
-            if t_result and t_result.error:
-                errors.append(f"{sample_uid}:rollout-{meta['rollout_id']}: teacher_error={t_result.error}")
-            if s_result and s_result.error:
-                errors.append(f"{sample_uid}:rollout-{meta['rollout_id']}: student_error={s_result.error}")
 
             rollout_uid = f"{sample_uid}:greedy" if meta["is_greedy"] else f"{sample_uid}:rollout-{meta['rollout_id']}"
-            all_rollouts.append({
-                "run_id": run_id,
-                "sample_uid": sample_uid,
-                "source_index": pi,
-                "split": "train",
-                "rollout_id": meta["rollout_id"],
-                "is_greedy": meta["is_greedy"],
-                "generation_seed": meta["generation_seed"],
-                "temperature": 0.0 if meta["is_greedy"] else config.temperature,
-                "top_p": 1.0 if meta["is_greedy"] else config.top_p,
-                "max_new_tokens": config.max_new_tokens,
-                "prompt_hash": prompt_hash,
-                "image_hash": image_hash,
-                "gold_answer": gold_answer,
-                "response_text": meta["response_text"],
-                "response_token_ids": meta["response_token_ids"],
-                "response_token_count": len(meta["response_token_ids"]),
-                "response_hash": hashlib.sha256(meta["response_text"].encode()).hexdigest(),
-                "correct": meta["verdict"].get("correct"),
-                "answer_extracted": meta["verdict"].get("extracted"),
-                "format_valid": meta["verdict"].get("format_valid", True),
-                "malformed": meta["verdict"].get("malformed", False),
-                "teacher_mean_logp": teacher_mean_logp,
-                "teacher_sampled_token_log_probs": teacher_sampled,
-                "student_mean_logp": student_mean_logp,
-                "student_sampled_token_log_probs": student_sampled,
-                "teacher_gap": teacher_gap,
-                "teacher_model_id": teacher.model_id,
-                "student_model_path": config.student_model_path,
-                "tokenizer_hash": student_hash,
-                "errors": [e for e in errors if e.startswith(f"{sample_uid}:")],
-            })
+            for error in record["errors"]:
+                errors.append(f"{rollout_uid}: {error}")
+            all_rollouts.append(record)
             _write_rollout_line(rollouts_fh, all_rollouts[-1])
             total_rollouts += 1
 
@@ -991,6 +1657,9 @@ def run_diagnostic(config: DiagnosticConfig) -> dict[str, Any]:
         selection_manifest=selection_manifest,
         git_commit=git_commit,
         git_dirty=git_dirty,
+        gate_config=config.gate_config,
+        bootstrap_seed=config.bootstrap_seed,
+        bootstrap_resamples=config.bootstrap_resamples,
     )
     gates = summary["acceptance_gates"]
 
@@ -1033,7 +1702,7 @@ def run_diagnostic(config: DiagnosticConfig) -> dict[str, Any]:
     print(f"\nDone. Outputs: {output_dir}")
     print(f"  rollouts.jsonl                — {len(all_rollouts)} rows")
     print(f"  prompt_support_summary.jsonl  — {len(prompt_summaries)} rows")
-    print(f"  summary.json")
+    print("  summary.json")
 
     return summary
 
@@ -1103,109 +1772,6 @@ def _fail_run(
     )
     write_run_manifest(output_dir, meta)
     return {"error": "preflight_failed", "run_id": output_dir.name}
-
-
-def _score_and_record(
-    all_rollouts: list[dict[str, Any]],
-    teacher: TeacherScorer,
-    student_scorer: StudentScorer,
-    *,
-    run_id: str,
-    sample_uid: str,
-    question: str,
-    image: Image.Image,
-    image_path: str,
-    image_hash: str,
-    prompt_text: str,
-    prompt_hash: str,
-    response_text: str,
-    response_token_ids: tuple[int, ...],
-    config: DiagnosticConfig,
-    prompt_index: int,
-    rollout_id: int,
-    is_greedy: bool,
-    gold_answer: Any,
-    generation_seed: int,
-    tokenizer_hash: str,
-    teacher_model_id: str,
-    non_finite_count: list[int],  # mutable container so caller sees increments
-    errors: list[str],
-) -> None:
-    """Score one rollout and append to all_rollouts."""
-    rollout_uid = f"{sample_uid}:{'greedy' if is_greedy else f'rollout-{rollout_id}'}"
-    verdict = verify_answer(response_text, gold_answer)
-
-    # Teacher score
-    t_result = teacher.score(
-        request_id=rollout_uid,
-        question=question,
-        image_path=image_path,
-        prompt_text=prompt_text,
-        response_token_ids=response_token_ids,
-        response_text=response_text,
-    )
-    teacher_mean_logp = t_result.mean_logp
-    teacher_sampled = t_result.sampled_token_log_probs
-
-    # Student score
-    s_result = student_scorer.score(
-        question=question,
-        image=image,
-        prompt_text=prompt_text,
-        response_text=response_text,
-        response_token_ids=response_token_ids,
-    )
-    student_mean_logp = s_result.mean_logp
-    student_sampled = s_result.sampled_token_log_probs
-
-    # Teacher gap
-    import math
-    teacher_gap = (
-        teacher_mean_logp - student_mean_logp
-        if (not math.isnan(teacher_mean_logp) and not math.isnan(student_mean_logp))
-        else float("nan")
-    )
-
-    if math.isnan(teacher_mean_logp) or math.isnan(student_mean_logp):
-        non_finite_count[0] += 1
-
-    if t_result.error:
-        errors.append(f"{rollout_uid}: teacher_error={t_result.error}")
-    if s_result.error:
-        errors.append(f"{rollout_uid}: student_error={s_result.error}")
-
-    all_rollouts.append({
-        "run_id": run_id,
-        "sample_uid": sample_uid,
-        "source_index": prompt_index,
-        "split": "train",
-        "rollout_id": rollout_id,
-        "is_greedy": is_greedy,
-        "generation_seed": generation_seed,
-        "temperature": 0.0 if is_greedy else config.temperature,
-        "top_p": 1.0 if is_greedy else config.top_p,
-        "max_new_tokens": config.max_new_tokens,
-        "response_text": response_text,
-        "response_token_ids": list(response_token_ids),
-        "response_token_count": len(response_token_ids),
-        "response_hash": hashlib.sha256(response_text.encode()).hexdigest(),
-        "answer_extracted": verdict.get("answer_extracted"),
-        "gold_answer": verdict.get("gold_answer"),
-        "format_valid": verdict.get("format_valid", True),
-        "correct": verdict.get("correct"),
-        "malformed": verdict.get("malformed", False),
-        "student_sampled_token_log_probs": list(student_sampled),
-        "teacher_sampled_token_log_probs": list(teacher_sampled),
-        "student_mean_logp": student_mean_logp,
-        "teacher_mean_logp": teacher_mean_logp,
-        "teacher_gap": teacher_gap,
-        "student_model_path": config.student_model_path,
-        "teacher_model_id": teacher_model_id,
-        "prompt_hash": prompt_hash,
-        "image_hash": image_hash,
-        "tokenizer_hash": tokenizer_hash,
-        "errors": [e for e in (t_result.error, s_result.error) if e],
-    })
 
 
 def _compute_ranking_metrics(
@@ -1284,57 +1850,212 @@ def _compute_auc(
         return auc / (n_pos * n_neg)
 
 
+def _random_first_correct_mrr(K: int, correct_count: int) -> float:
+    """Exact E[1/R] for the first correct rank in a random permutation."""
+
+    if K <= 0 or correct_count <= 0 or correct_count > K:
+        return float("nan")
+    denominator = math.comb(K, correct_count)
+    return float(sum(
+        (math.comb(K - rank, correct_count - 1) / denominator) / rank
+        for rank in range(1, K - correct_count + 2)
+    ))
+
+
+def _bootstrap_mean_ci(
+    values: Sequence[float],
+    *,
+    seed: int,
+    resamples: int,
+) -> dict[str, Any]:
+    finite = np.asarray([float(value) for value in values if math.isfinite(float(value))])
+    if finite.size == 0:
+        return {
+            "mean": None,
+            "ci95_low": None,
+            "ci95_high": None,
+            "count": 0,
+            "bootstrap_seed": seed,
+            "bootstrap_resamples": resamples,
+        }
+    if finite.size == 1 or resamples <= 0:
+        mean = float(finite.mean())
+        return {
+            "mean": mean,
+            "ci95_low": mean,
+            "ci95_high": mean,
+            "count": int(finite.size),
+            "bootstrap_seed": seed,
+            "bootstrap_resamples": max(int(resamples), 0),
+        }
+    rng = np.random.default_rng(seed)
+    draws = rng.choice(finite, size=(int(resamples), int(finite.size)), replace=True)
+    means = draws.mean(axis=1)
+    return {
+        "mean": float(finite.mean()),
+        "ci95_low": float(np.quantile(means, 0.025)),
+        "ci95_high": float(np.quantile(means, 0.975)),
+        "count": int(finite.size),
+        "bootstrap_seed": seed,
+        "bootstrap_resamples": int(resamples),
+    }
+
+
+def _compute_prompt_signal_metrics(
+    rollouts: Sequence[dict[str, Any]],
+    *,
+    allowed_uids: set[str] | None = None,
+    seed: int = 42,
+    resamples: int = 10_000,
+) -> dict[str, Any]:
+    """Macro, within-prompt teacher-gap discrimination and rank lift."""
+
+    by_prompt: dict[str, list[dict[str, Any]]] = {}
+    for rollout in rollouts:
+        if rollout.get("is_greedy"):
+            continue
+        uid = str(rollout.get("sample_uid", ""))
+        if allowed_uids is not None and uid not in allowed_uids:
+            continue
+        gap = rollout.get("teacher_gap")
+        correct = rollout.get("correct")
+        if correct is None or gap is None or not math.isfinite(float(gap)):
+            continue
+        by_prompt.setdefault(uid, []).append(rollout)
+
+    auc_values: list[float] = []
+    rank1_values: list[float] = []
+    random_rank1_values: list[float] = []
+    rank1_lifts: list[float] = []
+    mrr_values: list[float] = []
+    random_mrr_values: list[float] = []
+    mrr_lifts: list[float] = []
+    prompt_rows: list[dict[str, Any]] = []
+
+    for uid, prompt_rollouts in sorted(by_prompt.items()):
+        correct_rows = [row for row in prompt_rollouts if row.get("correct") is True]
+        wrong_rows = [row for row in prompt_rollouts if row.get("correct") is False]
+        if not correct_rows or not wrong_rows:
+            continue
+        pair_credits = [
+            1.0 if float(correct["teacher_gap"]) > float(wrong["teacher_gap"])
+            else 0.5 if float(correct["teacher_gap"]) == float(wrong["teacher_gap"])
+            else 0.0
+            for correct in correct_rows
+            for wrong in wrong_rows
+        ]
+        prompt_auc = float(np.mean(pair_credits))
+        ranked = sorted(
+            prompt_rollouts,
+            key=lambda row: float(row["teacher_gap"]),
+            reverse=True,
+        )
+        max_gap = float(ranked[0]["teacher_gap"])
+        top_ties = [row for row in ranked if float(row["teacher_gap"]) == max_gap]
+        rank1_credit = sum(row.get("correct") is True for row in top_ties) / len(top_ties)
+        first_correct_rank = next(
+            rank
+            for rank, row in enumerate(ranked, start=1)
+            if row.get("correct") is True
+        )
+        mrr = 1.0 / first_correct_rank
+        K = len(prompt_rollouts)
+        correct_count = len(correct_rows)
+        random_rank1 = correct_count / K
+        random_mrr = _random_first_correct_mrr(K, correct_count)
+
+        auc_values.append(prompt_auc)
+        rank1_values.append(rank1_credit)
+        random_rank1_values.append(random_rank1)
+        rank1_lifts.append(rank1_credit - random_rank1)
+        mrr_values.append(mrr)
+        random_mrr_values.append(random_mrr)
+        mrr_lifts.append(mrr - random_mrr)
+        prompt_rows.append({
+            "sample_uid": uid,
+            "K": K,
+            "correct_count": correct_count,
+            "within_prompt_auc": prompt_auc,
+            "rank1_credit": rank1_credit,
+            "random_rank1": random_rank1,
+            "rank1_lift": rank1_credit - random_rank1,
+            "mrr": mrr,
+            "random_mrr": random_mrr,
+            "mrr_lift": mrr - random_mrr,
+        })
+
+    return {
+        "eligible_prompt_count": len(prompt_rows),
+        "within_prompt_auc": _bootstrap_mean_ci(
+            auc_values, seed=seed, resamples=resamples
+        ),
+        "rank1": _bootstrap_mean_ci(
+            rank1_values, seed=seed + 1, resamples=resamples
+        ),
+        "random_rank1": float(np.mean(random_rank1_values)) if random_rank1_values else None,
+        "rank1_lift": _bootstrap_mean_ci(
+            rank1_lifts, seed=seed + 2, resamples=resamples
+        ),
+        "mrr": _bootstrap_mean_ci(
+            mrr_values, seed=seed + 3, resamples=resamples
+        ),
+        "random_mrr": float(np.mean(random_mrr_values)) if random_mrr_values else None,
+        "mrr_lift": _bootstrap_mean_ci(
+            mrr_lifts, seed=seed + 4, resamples=resamples
+        ),
+        "per_prompt": prompt_rows,
+    }
+
+
 def _compute_correct_tail_ranks(
     prompt_summaries: list[dict[str, Any]],
     all_rollouts: list[dict[str, Any]],
+    *,
+    seed: int = 42,
+    resamples: int = 10_000,
 ) -> dict[str, Any]:
-    """Compute rank metrics specifically for correct_tail prompts."""
+    """Compute corrected rank metrics specifically for correct-tail prompts."""
     correct_tail_uids = {
         p["sample_uid"]
         for p in prompt_summaries
         if p["support_state"] == "correct_tail"
     }
-
-    tail_rollouts = [r for r in all_rollouts if r["sample_uid"] in correct_tail_uids and not r["is_greedy"]]
-
-    if not tail_rollouts:
-        return {
-            "rank1": None,
-            "mrr": None,
-            "num_prompts": 0,
-            "num_rollouts": 0,
-        }
-
-    # Group by prompt
-    by_prompt: dict[str, list[dict[str, Any]]] = {}
-    for r in tail_rollouts:
-        by_prompt.setdefault(r["sample_uid"], []).append(r)
-
-    reciprocal_ranks = []
-    top1_hits = 0
-    for uid, rollouts in by_prompt.items():
-        by_gap = sorted(rollouts, key=lambda r: r.get("teacher_gap", float("-inf")), reverse=True)
-        for rank, r in enumerate(by_gap):
-            if r.get("correct") is True:
-                reciprocal_ranks.append(1.0 / (rank + 1))
-                if rank == 0:
-                    top1_hits += 1
-                break
-
-    return {
-        "rank1": top1_hits / max(len(by_prompt), 1),
-        "mrr": float(np.mean(reciprocal_ranks)) if reciprocal_ranks else None,
-        "num_prompts": len(by_prompt),
-        "num_rollouts": len(tail_rollouts),
-    }
+    metrics = _compute_prompt_signal_metrics(
+        all_rollouts,
+        allowed_uids=correct_tail_uids,
+        seed=seed,
+        resamples=resamples,
+    )
+    # Preserve the old scalar keys for downstream readers while adding the
+    # corrected baselines and confidence intervals.
+    metrics["num_prompts"] = metrics["eligible_prompt_count"]
+    metrics["num_rollouts"] = sum(
+        1
+        for rollout in all_rollouts
+        if rollout.get("sample_uid") in correct_tail_uids and not rollout.get("is_greedy")
+    )
+    metrics["rank1_mean"] = metrics["rank1"]["mean"]
+    metrics["mrr_mean"] = metrics["mrr"]["mean"]
+    return metrics
 
 
 def _check_gates(
     summary: dict[str, Any],
     mode: str,
+    *,
+    gate_config: Mapping[str, Any] | None = None,
 ) -> list[tuple[str, bool, str]]:
     """Check protocol and signal gates (runbook §4.7)."""
     gates: list[tuple[str, bool, str]] = []
+    configured = {
+        "malformed_rate_max": 0.10,
+        "duplicate_rate_max": 0.25,
+        "min_correct_tails": 20,
+        "teacher_gap_auc_min": 0.60,
+        "correct_tail_rank1_above_random": True,
+        "truncation_rate_max": 0.15,
+        **dict(gate_config or {}),
+    }
 
     # Protocol gates
     tokenizer_match = summary.get("tokenizer_match", False)
@@ -1359,40 +2080,91 @@ def _check_gates(
     ))
 
     malformed_rate = summary.get("malformed_response_rate", 0.0)
+    malformed_max = float(configured["malformed_rate_max"])
     gates.append((
         "malformed_rate_ok",
-        malformed_rate <= 0.10,
-        f"malformed rate = {malformed_rate:.3f} (threshold: 0.10)",
+        malformed_rate <= malformed_max,
+        f"malformed rate = {malformed_rate:.3f} (threshold: {malformed_max:.3f})",
     ))
 
     dup_rate = summary.get("overall_duplicate_rollout_rate", 0.0)
+    duplicate_max = float(configured["duplicate_rate_max"])
     gates.append((
         "duplicate_rate_ok",
-        dup_rate <= 0.25,
-        f"duplicate rate = {dup_rate:.3f} (threshold: 0.25)",
+        dup_rate <= duplicate_max,
+        f"duplicate rate = {dup_rate:.3f} (threshold: {duplicate_max:.3f})",
+    ))
+
+    exact_alignment_rate = float(summary.get("exact_token_alignment_rate", 0.0))
+    gates.append((
+        "exact_token_identity",
+        exact_alignment_rate == 1.0,
+        f"exact generated/student/teacher token identity rate = {exact_alignment_rate:.3f}",
+    ))
+
+    prompt_hash_rate = float(summary.get("prompt_token_hash_rate", 0.0))
+    gates.append((
+        "prompt_token_hash_available",
+        prompt_hash_rate == 1.0,
+        f"prompt token hash availability rate = {prompt_hash_rate:.3f}",
+    ))
+
+    completeness_rate = float(summary.get("shard_completeness_rate", 0.0))
+    gates.append((
+        "complete_rollout_coverage",
+        completeness_rate == 1.0,
+        f"validated rollout/shard completeness rate = {completeness_rate:.3f}",
+    ))
+
+    truncation_rate = float(summary.get("truncation_rate", 1.0))
+    truncation_max = float(configured["truncation_rate_max"])
+    gates.append((
+        "truncation_rate_ok",
+        truncation_rate <= truncation_max,
+        f"length-truncation rate = {truncation_rate:.3f} (threshold: {truncation_max:.3f})",
     ))
 
     # Signal gates (only for full mode)
     if mode == "full":
         correct_tail_count = summary.get("correct_tail_count", 0)
+        min_correct_tails = int(configured["min_correct_tails"])
         gates.append((
             "sufficient_correct_tails",
-            correct_tail_count >= 20,
-            f"{correct_tail_count} correct_tail prompts (need ≥ 20; try 256 if < 20)",
+            correct_tail_count >= min_correct_tails,
+            f"{correct_tail_count} correct_tail prompts (need ≥ {min_correct_tails})",
         ))
 
-        auc = summary.get("auc_teacher_gap_correct_vs_wrong")
-        if auc is not None:
+        signal = summary.get("correct_tail_rank_metrics") or {}
+        auc_info = signal.get("within_prompt_auc") or {}
+        auc = auc_info.get("mean")
+        auc_low = auc_info.get("ci95_low")
+        auc_min = float(configured["teacher_gap_auc_min"])
+        if auc is not None and auc_low is not None:
+            auc_passed = float(auc) >= auc_min and float(auc_low) > 0.50
             gates.append((
-                "teacher_gap_auc",
-                auc >= 0.60,
-                f"teacher_gap AUC = {auc:.3f} (threshold: 0.60)",
+                "teacher_gap_within_prompt_auc",
+                auc_passed,
+                f"macro AUC = {float(auc):.3f}, CI95 low = {float(auc_low):.3f} "
+                f"(point threshold: {auc_min:.3f}; lower bound must exceed 0.50)",
             ))
         else:
             gates.append((
-                "teacher_gap_auc",
+                "teacher_gap_within_prompt_auc",
                 False,
-                "AUC undefined (possibly all correct or all wrong)",
+                "within-prompt AUC/CI undefined",
+            ))
+
+        if bool(configured["correct_tail_rank1_above_random"]):
+            rank_lift = signal.get("rank1_lift") or {}
+            rank_lift_mean = rank_lift.get("mean")
+            rank_lift_low = rank_lift.get("ci95_low")
+            passed = rank_lift_low is not None and float(rank_lift_low) > 0.0
+            gates.append((
+                "correct_tail_rank1_above_random",
+                passed,
+                "rank@1 lift = "
+                f"{rank_lift_mean if rank_lift_mean is not None else 'undefined'}, "
+                f"CI95 low = {rank_lift_low if rank_lift_low is not None else 'undefined'}",
             ))
 
     return gates
@@ -1568,6 +2340,39 @@ def main(argv: Sequence[str] | None = None) -> int:
         run_id_override=args.run_id,
         prompt_start=args.prompt_start if args.prompt_start is not None else 0,
         prompt_end=args.prompt_end,
+        response_format=_nested_get(
+            yaml_cfg,
+            "diagnostic",
+            "response_format",
+            default="legacy_answer",
+        ),
+        malformed_rate_max=_nested_get(
+            yaml_cfg, "gates", "malformed_rate_max", default=0.10
+        ),
+        duplicate_rate_max=_nested_get(
+            yaml_cfg, "gates", "duplicate_rate_max", default=0.25
+        ),
+        min_correct_tails=_nested_get(
+            yaml_cfg, "gates", "min_correct_tails", default=20
+        ),
+        teacher_gap_auc_min=_nested_get(
+            yaml_cfg, "gates", "teacher_gap_auc_min", default=0.60
+        ),
+        correct_tail_rank1_above_random=_nested_get(
+            yaml_cfg,
+            "gates",
+            "correct_tail_rank1_above_random",
+            default=True,
+        ),
+        truncation_rate_max=_nested_get(
+            yaml_cfg, "gates", "truncation_rate_max", default=0.15
+        ),
+        bootstrap_seed=_nested_get(
+            yaml_cfg, "diagnostic", "bootstrap_seed", default=42
+        ),
+        bootstrap_resamples=_nested_get(
+            yaml_cfg, "diagnostic", "bootstrap_resamples", default=10_000
+        ),
     )
 
     if not config.dataset_path:

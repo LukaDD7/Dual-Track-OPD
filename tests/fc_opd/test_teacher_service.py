@@ -153,3 +153,20 @@ def test_service_error_is_explicit_and_never_falls_back():
         client = TeacherClient(_url(server))
         with pytest.raises(TeacherServiceError, match="outside the synthetic vocabulary"):
             client.score([bad_request])
+
+
+def test_client_rejects_teacher_response_with_changed_token_id(monkeypatch):
+    scorer = SyntheticTeacherScorer(vocab_size=32, top_k=4, tokenizer_hash="same")
+    with running_teacher_server(scorer) as server:
+        client = TeacherClient(_url(server), expected_tokenizer_hash="same")
+        original_request = client._request_json
+
+        def tampered_request(method, path, payload=None):
+            result = original_request(method, path, payload)
+            if path == "/score":
+                result["responses"][0]["token_ids"][1] = 6
+            return result
+
+        monkeypatch.setattr(client, "_request_json", tampered_request)
+        with pytest.raises(TeacherServiceError, match="exact student request"):
+            client.score([_request(Condition.FULL, "same")])

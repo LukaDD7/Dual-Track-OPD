@@ -4,9 +4,13 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from dual_track_opd.support_aware.diagnostic import (
+    DiagnosticConfig,
     _is_nonfinite,
     _load_resume_state,
+    _validate_resume_state_for_config,
 )
 
 
@@ -52,6 +56,12 @@ def test_load_resume_state_keeps_completed_prompts_only(tmp_path):
     assert state.malformed_count == 0
     assert state.non_finite_count == 0
     assert state.errors == []
+
+    with pytest.raises(ValueError, match="do not mix it with new rows"):
+        _validate_resume_state_for_config(
+            state,
+            DiagnosticConfig(dataset_path="dataset", student_model_path="student"),
+        )
 
 
 def test_load_resume_state_counts_errors_malformed_and_nonfinite(tmp_path):

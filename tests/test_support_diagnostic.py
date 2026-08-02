@@ -28,9 +28,6 @@ from dual_track_opd.support_aware.verifier import (
         ("Some reasoning\nanswer: 120", "120"),
         ("**Answer:** 90", "90"),
         ("Answer: 3.14", "3.14"),
-        # Last number extraction (no explicit marker)
-        ("The value of x is 42", "42"),
-        ("Therefore x = 27 and y = 35", "35"),  # last number
         # LaTeX expressions
         ("Answer: 2 \\SQRT { 221 }", "2sqrt(221)"),
         ("Answer: 12 \\PI", "12pi"),
@@ -48,9 +45,21 @@ def test_extract_answer_empty():
 
 
 def test_extract_answer_malformed():
-    # Should still try to find something
+    # Unmarked reasoning numbers are not reliable final answers.
     result = extract_answer("The answer might be around 42 or 43")
-    assert result is not None  # finds a number
+    assert result is None
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        "The value of x is 42",
+        "Therefore x = 27 and y = 35",
+        "A long truncated trace with intermediate 42",
+    ],
+)
+def test_extract_answer_rejects_unmarked_reasoning(response):
+    assert extract_answer(response) is None
 
 
 # -- normalize_gold_answer -----------------------------------------------------

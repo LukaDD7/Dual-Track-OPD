@@ -80,10 +80,10 @@ class TeacherClient:
         for request, response in zip(requests, responses, strict=True):
             if response.request_id != request.request_id or response.condition != request.condition:
                 raise TeacherServiceError("teacher response identity does not match its request")
-            # NOTE: token_ids may differ from the original request when the
-            # teacher repaired them for tokenizer alignment (32B vs 4B).
-            # We skip strict alignment here; shape validation happens later
-            # in _validate_teacher_scores (online_batch.py).
+            if response.token_ids != request.response_token_ids:
+                raise TeacherServiceError(
+                    "teacher response token IDs do not match the exact student request"
+                )
             validate_score_response(response, self.metadata)
         return responses
 

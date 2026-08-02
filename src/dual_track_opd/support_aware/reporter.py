@@ -6,9 +6,8 @@ Produces the artifact contract specified in runbook §4.6.
 from __future__ import annotations
 
 import json
-import os
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -28,6 +27,7 @@ class DiagnosticRunMeta:
     start_time: float
     end_time: float | None = None
     exit_status: str = "running"
+    extra: Mapping[str, Any] = field(default_factory=dict)
 
 
 def _default(obj: Any) -> Any:
@@ -101,6 +101,7 @@ def write_run_manifest(
     """Write run manifest to ``run_manifest.json``."""
     path = output_dir / "run_manifest.json"
     manifest = {
+        **dict(meta.extra),
         "run_id": meta.run_id,
         "output_dir": str(meta.output_dir),
         "config": dict(meta.config),

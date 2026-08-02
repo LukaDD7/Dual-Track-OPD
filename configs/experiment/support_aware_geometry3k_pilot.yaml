@@ -38,6 +38,11 @@ diagnostic:
   top_p: 0.95
   max_new_tokens: 4096
   seed: 42
+  # Preserve the prompt contract of the already-running 4096-token shards.
+  # New structured-v2 runs must use a new run_id rather than resume this one.
+  response_format: legacy_answer
+  bootstrap_seed: 42
+  bootstrap_resamples: 10000
 
 teacher:
   url: http://127.0.0.1:18080
@@ -60,3 +65,4 @@ gates:
   min_correct_tails: 20
   teacher_gap_auc_min: 0.60
   correct_tail_rank1_above_random: true
+  truncation_rate_max: 0.15
