@@ -254,6 +254,39 @@ increase to 4096. Check `_partial_summary.json` during the run to monitor.
    one batched processor call so each row has its own image tensors + padded
    `mm_token_type_ids`
 
+## 2026-08-02: 2048-token full run finished, gate FAILED, measurement invalid
+
+`diag_full_20260801_163119` (commit 5fd8f1a) completed 128/128 with two defects:
+
+1. **Teacher batch scoring silently dropped the exact student prompt.** The
+   batch path built 3-tuple samples with `prompt=None`, so the teacher backend
+   fell back to `render_teacher_prompt()` (`"Question:\n{question}"`), while the
+   student actually saw the `_PROMPT_TEMPLATE` with the step-by-step instruction.
+   `prompt_texts` was accepted by `TeacherScorer.score_batch` but never used.
+   Result: for 331 identical response texts shared with the 512-token run,
+   `teacher_mean_logp` differed by mean abs 0.18 (corr 0.86) while
+   `student_mean_logp` differed by 0.0012 (corr 0.999).  The batch teacher
+   scores were also length-invariant (corr with response length ≈ 0.01), so
+   `teacher_gap` became dominated by the student's length penalty, inverting
+   `teacher_gap` AUC to 0.309 (vs 0.665 on the per-item 512 run).
+   Cross-check: `diag_full_20260801_123045` (same batch path, older instance)
+   reproduced 163119's scores bit-for-bit (corr 1.0), so the batch path is
+   deterministic — it was just conditioning the teacher on the wrong prompt.
+   Fixed: `TeacherScorer.score_batch` now forwards the exact rollout messages
+   (image + `prompt_texts[i]`), matching the per-item `score()` path.  Regression
+   test: `test_teacher_score_batch_preserves_exact_student_prompt`.
+
+2. **Truncation at 2048 tokens is still 44%** (507/1152 rollouts), with 5.1%
+   accuracy on truncated vs 69.5% on non-truncated responses — the same confound
+   as the 512-token run, just weaker.  Per the runbook threshold (>15% → bump),
+   `max_new_tokens` is now **4096** in
+   `configs/experiment/support_aware_geometry3k_pilot.yaml`.
+
+Because both defects invalidate the pooled AUC/rank metrics, the 163119
+`teacher_gap_auc` gate failure is **not** evidence that the Step-1 signal is
+absent.  A fresh full run (new run id — do NOT `--resume` 163119, its teacher
+scores are invalid) is required before a Step 2 go/no-go decision.
+
 ## Step 2 Prerequisites
 
 Before starting Step 2 (50-step micro-training pilot):

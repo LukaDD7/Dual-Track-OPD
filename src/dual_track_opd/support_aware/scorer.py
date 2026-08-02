@@ -156,8 +156,15 @@ class TeacherScorer:
         if response_texts is None:
             response_texts = [""] * n
 
-        # Build samples — all share the same condition_inputs (same prompt)
-        samples: list[tuple[Sequence[int], str, ConditionInputs]] = []
+        # Build samples — all share the same condition_inputs (same prompt).
+        # Pass the exact student prompt (image + text) so the teacher conditions
+        # on the same history the student saw.  Omitting it makes the backend
+        # fall back to render_teacher_prompt(), which prepends a "Question:\n"
+        # prefix the student never saw and drops the step-by-step instruction —
+        # different conditioning, different forced log-probs.
+        samples: list[
+            tuple[Sequence[int], str, ConditionInputs, Sequence[Mapping[str, Any]]]
+        ] = []
         for i in range(n):
             condition_inputs = ConditionInputs(
                 full_image=ImageInput(path=image_paths[i]),
@@ -168,10 +175,20 @@ class TeacherScorer:
                 free_caption="placeholder",
                 task_evidence="placeholder",
             )
+            prompt = (
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image", "image": image_paths[i]},
+                        {"type": "text", "text": prompt_texts[i]},
+                    ],
+                },
+            )
             samples.append((
                 tuple(int(t) for t in response_token_ids_list[i]),
                 questions[i],
                 condition_inputs,
+                prompt,
             ))
 
         try:

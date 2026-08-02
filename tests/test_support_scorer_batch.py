@@ -200,3 +200,78 @@ def test_score_batch_forward_receives_per_row_multimodal_tensors(processor):
     assert results[0].token_count > 0
     assert results[2].token_count > 0
     assert all(r.mean_logp == results[0].mean_logp for r in results if r.token_count)
+
+
+def test_teacher_score_batch_preserves_exact_student_prompt(monkeypatch):
+    """TeacherScorer.score_batch must forward the exact student prompt.
+
+    Regression: the batch path built 3-tuple samples with ``prompt=None``, so
+    the teacher backend fell back to ``render_teacher_prompt()`` ("Question:\n"
+    + question) instead of the exact rollout messages the student saw.  That
+    changes the teacher's conditioning and therefore its forced log-probs.
+    """
+    from unittest.mock import MagicMock
+
+    import torch
+
+    from dual_track_opd.fc_opd import teacher_client as tc_mod
+    from dual_track_opd.fc_opd.conditions import Condition
+    from dual_track_opd.fc_opd.signal_decomposer import TeacherTopK
+    from dual_track_opd.support_aware.scorer import TeacherScorer, TeacherScorerConfig
+
+    captured: dict[str, object] = {}
+
+    def fake_multi_sample(
+        *,
+        samples,
+        conditions,
+        teacher_client,
+        response_texts=None,
+        request_prefix="score",
+    ):
+        captured["samples"] = samples
+        captured["response_texts"] = response_texts
+        results = []
+        for sample in samples:
+            token_ids = tuple(sample[0])
+            t = len(token_ids)
+            results.append({Condition.FULL: TeacherTopK(
+                token_ids=torch.zeros((1, t, 1), dtype=torch.int64),
+                log_probs=torch.full((1, t, 1), -0.5),
+                sampled_log_probs=torch.full((1, t), -0.25),
+                valid_mask=torch.ones((1, t), dtype=torch.bool),
+            )})
+        return results
+
+    monkeypatch.setattr(tc_mod, "score_teacher_conditions_multi_sample", fake_multi_sample)
+    monkeypatch.setattr(tc_mod, "TeacherClient", lambda *args, **kwargs: MagicMock())
+
+    prompt_text = (
+        "Find x.\n\n"
+        "Think step by step about this geometry problem. First analyze the diagram "
+        'carefully, then reason through the solution, and finally give your answer '
+        'as "Answer: <number>".'
+    )
+    scorer = TeacherScorer(TeacherScorerConfig())
+    results = scorer.score_batch(
+        request_ids=["geo3k:1:greedy", "geo3k:1:rollout-1"],
+        questions=["Find x."] * 2,
+        image_paths=["/tmp/img_a.png"] * 2,
+        prompt_texts=[prompt_text] * 2,
+        response_token_ids_list=[[1, 2, 3], [4, 5]],
+        response_texts=["resp one", "resp two"],
+    )
+
+    samples = captured["samples"]
+    assert len(samples) == 2
+    assert captured["response_texts"] == ["resp one", "resp two"]
+    for sample in samples:
+        # 4-tuple: (token_ids, question, condition_inputs, exact prompt messages)
+        assert len(sample) == 4
+        messages = sample[3]
+        assert messages[0]["role"] == "user"
+        content = messages[0]["content"]
+        assert content[0]["image"] == "/tmp/img_a.png"
+    assert content[1]["text"] == prompt_text
+
+    assert [r.mean_logp for r in results] == pytest.approx([-0.25, -0.25])
