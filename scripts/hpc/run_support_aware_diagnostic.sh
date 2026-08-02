@@ -51,6 +51,7 @@ RESUME=""
 PROMPT_START=""
 PROMPT_END=""
 NUM_PROMPTS=""
+RUN_ID=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -80,6 +81,8 @@ while [[ $# -gt 0 ]]; do
             PROMPT_END="$2"; shift 2 ;;
         --num-prompts)
             NUM_PROMPTS="$2"; shift 2 ;;
+        --run-id)
+            RUN_ID="$2"; shift 2 ;;
         --preflight-only)
             PREFLIGHT_ONLY=true; shift ;;
         *)
@@ -246,6 +249,10 @@ fi
 
 if [[ -n "${NUM_PROMPTS}" ]]; then
     CMD+=(--num-prompts "${NUM_PROMPTS}")
+fi
+
+if [[ -n "${RUN_ID}" ]]; then
+    CMD+=(--run-id "${RUN_ID}")
 fi
 
 echo "Command: ${CMD[*]}"

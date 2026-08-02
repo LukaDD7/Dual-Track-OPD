@@ -87,6 +87,7 @@ class DiagnosticConfig:
     output_root: str = ""
     mode: str = "smoke"  # "smoke" or "full"
     resume_run_id: str | None = None
+    run_id_override: str | None = None
     prompt_start: int = 0
     prompt_end: int | None = None
 
@@ -657,6 +658,11 @@ def run_diagnostic(config: DiagnosticConfig) -> dict[str, Any]:
     output_root = Path(os.path.expandvars(config.output_root))
     if config.resume_run_id:
         run_id = config.resume_run_id
+    elif config.run_id_override:
+        run_id = config.run_id_override
+    else:
+        run_id = _make_run_id(config.mode)
+    if config.resume_run_id:
         output_dir = output_root / "support_aware_opd" / run_id
         if not (output_dir / "prompt_support_summary.jsonl").exists():
             output_dir.mkdir(parents=True, exist_ok=True)
@@ -666,7 +672,6 @@ def run_diagnostic(config: DiagnosticConfig) -> dict[str, Any]:
             )
             return _fail_run(output_dir, config, start_time, git_commit, git_dirty)
     else:
-        run_id = _make_run_id(config.mode)
         output_dir = output_root / "support_aware_opd" / run_id
     output_dir.mkdir(parents=True, exist_ok=True)
     log_dir = output_dir / "logs"
@@ -1474,6 +1479,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Resume an existing partial run by run_id (e.g. diag_full_20260801_123045)",
     )
     parser.add_argument(
+        "--run-id",
+        type=str,
+        default=None,
+        help="Explicit run directory name (avoids timestamp collisions for "
+        "parallel pipelines started in the same second)",
+    )
+    parser.add_argument(
         "--prompt-start",
         type=int,
         default=None,
@@ -1553,6 +1565,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         output_root=args.output_root or _nested_get(yaml_cfg, "output", "root", default=os.path.expandvars("$DTOPD_OUTPUT_ROOT")),
         mode=args.mode,
         resume_run_id=args.resume,
+        run_id_override=args.run_id,
         prompt_start=args.prompt_start if args.prompt_start is not None else 0,
         prompt_end=args.prompt_end,
     )
