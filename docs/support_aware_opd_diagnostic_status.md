@@ -4,6 +4,10 @@
 **Author**: LukaDD7
 **Handoff to**: codex
 
+> **2026-08-02 更新**：最新详细交接文档见
+> [`docs/support_aware_step1_handoff_20260802.md`](support_aware_step1_handoff_20260802.md)
+> （bug 历史、分片/合并/resume 手册、当前 4 条流水线状态、Step 2 判据）。
+
 ---
 
 ## Overview
