@@ -188,6 +188,22 @@ bash scripts/hpc/run_support_aware_diagnostic.sh \
 Do not start a resumed run while the original process is still alive — both
 would append to the same files.
 
+### Sharded parallel runs (2026-08-02)
+
+`--prompt-start N` / `--prompt-end M` (also passable through the run script)
+slice the deterministic SHA256-sorted selection so multiple instances can run
+disjoint prompt ranges in parallel — each shard writes its own run dir.  When
+all shards finish, combine them with:
+
+```bash
+python -m dual_track_opd.support_aware.diagnostic \
+    --merge-shards <dir_a> <dir_b> ... --merge-output <merged_dir>
+```
+
+The merge reloads rollouts/prompt summaries, dedupes, and recomputes the
+aggregate `summary.json` + acceptance gates using the exact same code path as a
+single full run.  Tests: `tests/test_support_diagnostic_shards.py`.
+
 ## Run Output Directory
 
 ```

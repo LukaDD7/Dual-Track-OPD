@@ -48,6 +48,8 @@ DEVICE="cuda"
 DTYPE="bfloat16"
 PREFLIGHT_ONLY=false
 RESUME=""
+PROMPT_START=""
+PROMPT_END=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -71,6 +73,10 @@ while [[ $# -gt 0 ]]; do
             DTYPE="$2"; shift 2 ;;
         --resume)
             RESUME="$2"; shift 2 ;;
+        --prompt-start)
+            PROMPT_START="$2"; shift 2 ;;
+        --prompt-end)
+            PROMPT_END="$2"; shift 2 ;;
         --preflight-only)
             PREFLIGHT_ONLY=true; shift ;;
         *)
@@ -225,6 +231,14 @@ fi
 
 if [[ -n "${RESUME}" ]]; then
     CMD+=(--resume "${RESUME}")
+fi
+
+if [[ -n "${PROMPT_START}" ]]; then
+    CMD+=(--prompt-start "${PROMPT_START}")
+fi
+
+if [[ -n "${PROMPT_END}" ]]; then
+    CMD+=(--prompt-end "${PROMPT_END}")
 fi
 
 echo "Command: ${CMD[*]}"

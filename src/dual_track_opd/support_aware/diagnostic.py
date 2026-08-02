@@ -87,6 +87,8 @@ class DiagnosticConfig:
     output_root: str = ""
     mode: str = "smoke"  # "smoke" or "full"
     resume_run_id: str | None = None
+    prompt_start: int = 0
+    prompt_end: int | None = None
 
     @property
     def resolved_num_prompts(self) -> int:
@@ -151,6 +153,29 @@ def load_and_select_prompts(
     }
 
     return selected, manifest
+
+
+def slice_prompts(
+    prompts: list[dict[str, Any]],
+    prompt_start: int,
+    prompt_end: int | None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Slice the deterministic prompt selection for sharded parallel runs.
+
+    Shards are processed by separate processes/instances (each writing its own
+    output dir), then combined with :func:`merge_shard_runs`.  Slicing is
+    applied after the SHA256-sorted selection, so every shard shares the same
+    ordering and resume-within-a-shard stays deterministic.
+    """
+    start = max(prompt_start, 0)
+    end = len(prompts) if prompt_end is None else min(prompt_end, len(prompts))
+    sliced = prompts[start:end]
+    manifest = {
+        "prompt_start": start,
+        "prompt_end": end,
+        "selection_rule": "sort_by_sha256_sample_uid (sharded slice)",
+    }
+    return sliced, manifest
 
 
 def _has_valid_image(record: Mapping[str, Any]) -> bool:
@@ -366,6 +391,250 @@ def _load_resume_state(output_dir: Path) -> _ResumeState:
     )
 
 
+def _build_summary(
+    *,
+    run_id: str,
+    mode: str,
+    num_prompts: int,
+    K: int,
+    all_rollouts: list[dict[str, Any]],
+    prompt_summaries: list[dict[str, Any]],
+    malformed_count: int,
+    missing_image: int,
+    non_finite_count: int,
+    student_hash: str,
+    teacher_hash: str,
+    teacher_model_id: str,
+    student_model_path: str,
+    selection_manifest: Mapping[str, Any],
+    git_commit: str,
+    git_dirty: bool,
+    verbose: bool = True,
+) -> dict[str, Any]:
+    """Aggregate rollouts/prompt summaries into the final summary dict + gates.
+
+    Shared by the full pipeline and the shard merge path so both produce
+    identical metrics.
+    """
+    if verbose:
+        print("\n[5/6] Computing summary metrics...")
+
+    total_rollouts = len(all_rollouts)
+
+    # Support state counts
+    state_counts = {
+        s.value: sum(1 for p in prompt_summaries if p["support_state"] == s.value)
+        for s in SupportState
+    }
+
+    # Correct-vs-wrong AUC for teacher_gap and teacher_mean_logp
+    stochastic_rollouts = [r for r in all_rollouts if not r["is_greedy"]]
+    auc_teacher_gap = _compute_auc(
+        stochastic_rollouts, score_key="teacher_gap", correct_key="correct"
+    )
+    auc_teacher_mean = _compute_auc(
+        stochastic_rollouts, score_key="teacher_mean_logp", correct_key="correct"
+    )
+    auc_student_mean = _compute_auc(
+        stochastic_rollouts, score_key="student_mean_logp", correct_key="correct"
+    )
+
+    # Correct-tail rank metrics
+    correct_tail_rank = _compute_correct_tail_ranks(prompt_summaries, stochastic_rollouts)
+
+    # Response length stats
+    lengths = [r.get("response_token_count", 0) for r in all_rollouts]
+    length_percentiles = {
+        "p10": int(np.percentile(lengths, 10)) if lengths else 0,
+        "p50": int(np.percentile(lengths, 50)) if lengths else 0,
+        "p90": int(np.percentile(lengths, 90)) if lengths else 0,
+        "mean": float(np.mean(lengths)) if lengths else 0.0,
+    }
+
+    # Duplicate rate (overall)
+    total_dups = sum(
+        (p.get("K", 0) - p.get("unique_response_count", 0))
+        for p in prompt_summaries
+    )
+    total_stochastic = len(stochastic_rollouts)
+    overall_dup_rate = total_dups / max(total_stochastic, 1)
+
+    # Greedy accuracy
+    greedy_rollouts = [r for r in all_rollouts if r["is_greedy"]]
+    greedy_correct_count = sum(1 for r in greedy_rollouts if r.get("correct") is True)
+    greedy_accuracy = greedy_correct_count / max(len(greedy_rollouts), 1)
+
+    # Empirical pass@1 and pass@K
+    correct_tails = [p for p in prompt_summaries if p["support_state"] == "correct_tail"]
+    exposed = [p for p in prompt_summaries if p["support_state"] == "exposed"]
+    no_correct = [p for p in prompt_summaries if p["support_state"] == "no_correct_observed"]
+
+    summary = {
+        "run_id": run_id,
+        "mode": mode,
+        "num_prompts": num_prompts,
+        "rollouts_per_prompt": K,
+        "total_rollouts": total_rollouts,
+        "greedy_accuracy": greedy_accuracy,
+        "support_state_counts": state_counts,
+        "correct_tail_count": len(correct_tails),
+        "exposed_count": len(exposed),
+        "no_correct_observed_count": len(no_correct),
+        "auc_teacher_gap_correct_vs_wrong": auc_teacher_gap,
+        "auc_teacher_mean_logp_correct_vs_wrong": auc_teacher_mean,
+        "auc_student_mean_logp_correct_vs_wrong": auc_student_mean,
+        "correct_tail_rank_metrics": correct_tail_rank,
+        "response_length_percentiles": length_percentiles,
+        "overall_duplicate_rollout_rate": overall_dup_rate,
+        "malformed_response_count": malformed_count,
+        "malformed_response_rate": malformed_count / max(total_rollouts, 1),
+        "missing_image_count": missing_image,
+        "non_finite_score_count": non_finite_count,
+        "tokenizer_match": student_hash == teacher_hash,
+        "student_tokenizer_hash": student_hash,
+        "teacher_tokenizer_hash": teacher_hash,
+        "teacher_model_id": teacher_model_id,
+        "student_model_path": student_model_path,
+        "selection_manifest": dict(selection_manifest),
+        "git_commit": git_commit,
+        "git_dirty": git_dirty,
+    }
+
+    # -- Acceptance gates ------------------------------------------------------
+    gates = _check_gates(summary, mode)
+    summary["acceptance_gates"] = gates
+    if verbose:
+        print("\n[6/6] Acceptance gates...")
+        for gate_name, passed, detail in gates:
+            status = "✓ PASS" if passed else "✗ FAIL"
+            print(f"  {status}  {gate_name}: {detail}")
+    return summary
+
+
+def merge_shard_runs(
+    shard_dirs: Sequence[str],
+    output_dir: str,
+    *,
+    mode: str = "full",
+) -> dict[str, Any]:
+    """Combine rollouts/prompt summaries from sharded runs into one summary.
+
+    Each shard writes its own run directory (prompts are disjoint after
+    ``slice_prompts``).  This reloads the JSONL files, dedupes defensively, and
+    recomputes the aggregate summary + acceptance gates exactly like the single
+    full run would.
+    """
+    rollouts: list[dict[str, Any]] = []
+    summaries: list[dict[str, Any]] = []
+    seen_rollout: set[tuple[str, bool, int]] = set()
+    seen_uids: set[str] = set()
+    manifests: list[dict[str, Any]] = []
+
+    for d in shard_dirs:
+        p = Path(d)
+        rollouts_path = p / "rollouts.jsonl"
+        if rollouts_path.exists():
+            with rollouts_path.open(encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    rec = json.loads(line)
+                    key = (
+                        str(rec.get("sample_uid")),
+                        bool(rec.get("is_greedy")),
+                        int(rec.get("rollout_id", -1)),
+                    )
+                    if key in seen_rollout:
+                        continue
+                    seen_rollout.add(key)
+                    rollouts.append(rec)
+        summaries_path = p / "prompt_support_summary.jsonl"
+        if summaries_path.exists():
+            with summaries_path.open(encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    rec = json.loads(line)
+                    uid = str(rec.get("sample_uid"))
+                    if uid in seen_uids:
+                        continue
+                    seen_uids.add(uid)
+                    summaries.append(rec)
+        summary_path = p / "summary.json"
+        if summary_path.exists():
+            try:
+                with summary_path.open(encoding="utf-8") as fh:
+                    manifests.append(json.load(fh))
+            except (OSError, ValueError):
+                pass
+
+    if not rollouts:
+        raise ValueError("no rollouts found in shard dirs")
+    if not summaries:
+        raise ValueError("no prompt summaries found in shard dirs")
+
+    hashes = {str(r.get("tokenizer_hash")) for r in rollouts}
+    if len(hashes) > 1:
+        raise ValueError(f"tokenizer hash mismatch across shards: {hashes}")
+    ks = {p.get("K") for p in summaries if p.get("K") is not None}
+    if len(ks) > 1:
+        raise ValueError(f"rollouts_per_prompt mismatch across shards: {ks}")
+
+    tokenizer_hash = next(iter(hashes))
+    malformed_count = sum(1 for r in rollouts if r.get("malformed"))
+    non_finite_count = sum(
+        1
+        for r in rollouts
+        if _is_nonfinite(r.get("teacher_mean_logp"))
+        or _is_nonfinite(r.get("student_mean_logp"))
+    )
+    missing_image = sum(int(m.get("missing_image_count") or 0) for m in manifests)
+
+    first_manifest = (
+        (manifests[0].get("selection_manifest") or {})
+        if manifests
+        else {}
+    )
+    selection_manifest = {
+        "dataset_path": first_manifest.get("dataset_path"),
+        "valid_rows": first_manifest.get("valid_rows"),
+        "merged_from": [str(Path(d).name) for d in shard_dirs],
+        "selected_rows": len(summaries),
+        "selection_rule": "sort_by_sha256_sample_uid (sharded merge)",
+        "selection_sha256": hashlib.sha256(
+            json.dumps([p["sample_uid"] for p in summaries], sort_keys=True).encode()
+        ).hexdigest(),
+    }
+
+    out = Path(output_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    summary = _build_summary(
+        run_id=out.name or "merged",
+        mode=mode,
+        num_prompts=len(summaries),
+        K=next(iter(ks)) if ks else 8,
+        all_rollouts=rollouts,
+        prompt_summaries=summaries,
+        malformed_count=malformed_count,
+        missing_image=missing_image,
+        non_finite_count=non_finite_count,
+        student_hash=tokenizer_hash,
+        teacher_hash=tokenizer_hash,
+        teacher_model_id=rollouts[0].get("teacher_model_id", ""),
+        student_model_path=rollouts[0].get("student_model_path", ""),
+        selection_manifest=selection_manifest,
+        git_commit="merged",
+        git_dirty=True,
+        verbose=False,
+    )
+    write_rollouts_jsonl(out, rollouts)
+    write_prompt_support_summary_jsonl(out, summaries)
+    write_summary_json(out, summary)
+    return summary
+
+
 # ---------------------------------------------------------------------------
 # Main pipeline
 # ---------------------------------------------------------------------------
@@ -428,6 +697,14 @@ def run_diagnostic(config: DiagnosticConfig) -> dict[str, Any]:
         config.dataset_path,
         config.resolved_num_prompts,
     )
+    prompts, slice_manifest = slice_prompts(
+        prompts, config.prompt_start, config.prompt_end
+    )
+    selection_manifest = {
+        **selection_manifest,
+        **slice_manifest,
+        "selected_rows": len(prompts),
+    }
     print(f"  Selected {len(prompts)} prompts from {selection_manifest['valid_rows']} valid rows")
 
     # -- Init models ------------------------------------------------------------
@@ -692,94 +969,25 @@ def run_diagnostic(config: DiagnosticConfig) -> dict[str, Any]:
                   f"correct={correct_count}/{K}, greedy_correct={greedy_correct}")
 
     # -- Compute summary --------------------------------------------------------
-    print(f"\n[5/6] Computing summary metrics...")
-
-    # Support state counts
-    state_counts = {
-        s.value: sum(1 for p in prompt_summaries if p["support_state"] == s.value)
-        for s in SupportState
-    }
-
-    # Correct-vs-wrong AUC for teacher_gap and teacher_mean_logp
-    stochastic_rollouts = [r for r in all_rollouts if not r["is_greedy"]]
-    auc_teacher_gap = _compute_auc(
-        stochastic_rollouts, score_key="teacher_gap", correct_key="correct"
+    summary = _build_summary(
+        run_id=run_id,
+        mode=config.mode,
+        num_prompts=len(prompts),
+        K=K,
+        all_rollouts=all_rollouts,
+        prompt_summaries=prompt_summaries,
+        malformed_count=malformed_count,
+        missing_image=missing_image,
+        non_finite_count=nf_container[0],
+        student_hash=student_hash,
+        teacher_hash=teacher_hash,
+        teacher_model_id=teacher.model_id,
+        student_model_path=config.student_model_path,
+        selection_manifest=selection_manifest,
+        git_commit=git_commit,
+        git_dirty=git_dirty,
     )
-    auc_teacher_mean = _compute_auc(
-        stochastic_rollouts, score_key="teacher_mean_logp", correct_key="correct"
-    )
-    auc_student_mean = _compute_auc(
-        stochastic_rollouts, score_key="student_mean_logp", correct_key="correct"
-    )
-
-    # Correct-tail rank metrics
-    correct_tail_rank = _compute_correct_tail_ranks(prompt_summaries, stochastic_rollouts)
-
-    # Response length stats
-    lengths = [r.get("response_token_count", 0) for r in all_rollouts]
-    length_percentiles = {
-        "p10": int(np.percentile(lengths, 10)) if lengths else 0,
-        "p50": int(np.percentile(lengths, 50)) if lengths else 0,
-        "p90": int(np.percentile(lengths, 90)) if lengths else 0,
-        "mean": float(np.mean(lengths)) if lengths else 0.0,
-    }
-
-    # Duplicate rate (overall)
-    total_dups = sum(
-        (p.get("K", 0) - p.get("unique_response_count", 0))
-        for p in prompt_summaries
-    )
-    total_stochastic = len(stochastic_rollouts)
-    overall_dup_rate = total_dups / max(total_stochastic, 1)
-
-    # Greedy accuracy
-    greedy_rollouts = [r for r in all_rollouts if r["is_greedy"]]
-    greedy_correct_count = sum(1 for r in greedy_rollouts if r.get("correct") is True)
-    greedy_accuracy = greedy_correct_count / max(len(greedy_rollouts), 1)
-
-    # Empirical pass@1 and pass@K
-    correct_tails = [p for p in prompt_summaries if p["support_state"] == "correct_tail"]
-    exposed = [p for p in prompt_summaries if p["support_state"] == "exposed"]
-    no_correct = [p for p in prompt_summaries if p["support_state"] == "no_correct_observed"]
-
-    summary = {
-        "run_id": run_id,
-        "mode": config.mode,
-        "num_prompts": len(prompts),
-        "rollouts_per_prompt": K,
-        "total_rollouts": total_rollouts,
-        "greedy_accuracy": greedy_accuracy,
-        "support_state_counts": state_counts,
-        "correct_tail_count": len(correct_tails),
-        "exposed_count": len(exposed),
-        "no_correct_observed_count": len(no_correct),
-        "auc_teacher_gap_correct_vs_wrong": auc_teacher_gap,
-        "auc_teacher_mean_logp_correct_vs_wrong": auc_teacher_mean,
-        "auc_student_mean_logp_correct_vs_wrong": auc_student_mean,
-        "correct_tail_rank_metrics": correct_tail_rank,
-        "response_length_percentiles": length_percentiles,
-        "overall_duplicate_rollout_rate": overall_dup_rate,
-        "malformed_response_count": malformed_count,
-        "malformed_response_rate": malformed_count / max(total_rollouts, 1),
-        "missing_image_count": missing_image,
-        "non_finite_score_count": nf_container[0],
-        "tokenizer_match": student_hash == teacher_hash,
-        "student_tokenizer_hash": student_hash,
-        "teacher_tokenizer_hash": teacher_hash,
-        "teacher_model_id": teacher.model_id,
-        "student_model_path": config.student_model_path,
-        "selection_manifest": selection_manifest,
-        "git_commit": git_commit,
-        "git_dirty": git_dirty,
-    }
-
-    # -- Acceptance gates ------------------------------------------------------
-    print("\n[6/6] Acceptance gates...")
-    gates = _check_gates(summary, config.mode)
-    summary["acceptance_gates"] = gates
-    for gate_name, passed, detail in gates:
-        status = "✓ PASS" if passed else "✗ FAIL"
-        print(f"  {status}  {gate_name}: {detail}")
+    gates = summary["acceptance_gates"]
 
     # -- Write outputs ---------------------------------------------------------
     print(f"\nWriting outputs to {output_dir}...")
@@ -1242,7 +1450,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Step 1 — Frozen-Policy Support Diagnostic"
     )
-    parser.add_argument("--config", type=str, required=True, help="YAML config file")
+    parser.add_argument("--config", type=str, default=None, help="YAML config file")
     parser.add_argument("--mode", type=str, default="smoke",
                         choices=["smoke", "full"],
                         help="smoke=8 prompts × 2 rollouts, full=128 prompts × 8 rollouts")
@@ -1265,11 +1473,67 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Resume an existing partial run by run_id (e.g. diag_full_20260801_123045)",
     )
+    parser.add_argument(
+        "--prompt-start",
+        type=int,
+        default=None,
+        help="First prompt index in the deterministic selection (sharded runs)",
+    )
+    parser.add_argument(
+        "--prompt-end",
+        type=int,
+        default=None,
+        help="Exclusive end prompt index in the deterministic selection",
+    )
+    parser.add_argument(
+        "--merge-shards",
+        nargs="+",
+        default=None,
+        help="Merge completed shard run directories into one summary",
+    )
+    parser.add_argument(
+        "--merge-output",
+        type=str,
+        default=None,
+        help="Output directory for a --merge-shards result",
+    )
+    parser.add_argument(
+        "--merge-mode",
+        type=str,
+        default="full",
+        choices=["smoke", "full"],
+        help="Mode to use when scoring the merged summary gates",
+    )
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+
+    # -- Shard merge mode -----------------------------------------------------
+    if args.merge_shards:
+        if not args.merge_output:
+            print("ERROR: --merge-output is required with --merge-shards", file=sys.stderr)
+            return 1
+        try:
+            summary = merge_shard_runs(
+                args.merge_shards,
+                args.merge_output,
+                mode=args.merge_mode,
+            )
+        except Exception as exc:
+            print(f"ERROR: merge failed: {exc}", file=sys.stderr)
+            return 1
+        print(f"=== Merged summary ({len(summary.get('acceptance_gates', []))} gates) ===")
+        for gate_name, passed, detail in summary["acceptance_gates"]:
+            status = "✓ PASS" if passed else "✗ FAIL"
+            print(f"  {status}  {gate_name}: {detail}")
+        print(f"Outputs: {args.merge_output}")
+        return 0
+
+    if not args.config:
+        print("ERROR: --config is required", file=sys.stderr)
+        return 1
 
     yaml_cfg = _load_yaml_config(args.config)
 
@@ -1289,6 +1553,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         output_root=args.output_root or _nested_get(yaml_cfg, "output", "root", default=os.path.expandvars("$DTOPD_OUTPUT_ROOT")),
         mode=args.mode,
         resume_run_id=args.resume,
+        prompt_start=args.prompt_start if args.prompt_start is not None else 0,
+        prompt_end=args.prompt_end,
     )
 
     if not config.dataset_path:
