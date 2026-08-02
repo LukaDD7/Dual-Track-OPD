@@ -306,6 +306,8 @@ Phase 1 通过后，改 `distillation_loss_mode=va_opd_k1 use_policy_gradient=Tr
 | `RuntimeError: python-multipart` | `pip install python-multipart` |
 | `AssertionError: processor needed` (数据有 images 列) | 创建 text_only 版 parquet（去掉了 images/condition_inputs 列） |
 | `NotImplementedError: geometry3k reward` | 将 data_source 改为 `hiyouga/geometry3k` |
+| `ModuleNotFoundError: mathruler` (geo3k reward 打分) | 从 `${DTOPD_ROOT}/envs/vision-opd-cu128` 复制 `mathruler` + `mathruler-0.1.0.dist-info` 到 `${ENV_PREFIX}/lib/python3.12/site-packages/`（纯 Python 包，已用目标 env python 验证 `verl.utils.reward_score.geo3k` import 与 compute_score） |
+| `AssertionError: number of items:[0] < k_partitions:[4]` | mathruler 缺失的次生错误：reward 全部失败 → batch 为空 → `_balance_batch` 崩溃；补装 mathruler 后消除 |
 
 ### 9.5 文本数据文件
 
@@ -326,3 +328,160 @@ Phase 1 通过后，改 `distillation_loss_mode=va_opd_k1 use_policy_gradient=Tr
 - vLLM wheel: `${DTOPD_ROOT}/fc-opd-storage/wheelhouse/va-opd-cu128-r595-v1/vllm-0.12.0-cp312-cp312-linux_x86_64.whl` (744MB)
 - 约束文件: `configs/environment/verl_va_opd_e003_cu128.constraints.txt`
 - 构建脚本: `scripts/hpc/build_fresh_cu128_opd_env.sh`
+
+### 9.8 2026-08-01 磁盘满 + checkpoint 保存失败处置（codex 接手记录）
+
+**现象**：默认配置（k1 / batch 128 / 15 epochs / save_freq=200）训练 210/210 步全部完成，最终保存
+`global_step_210` 时 `PytorchStreamWriter failed writing file ... file write failed` / `unexpected pos ...`。
+
+**根因**：共享 FS `${DTOPD_ROOT}` 所在 gpfs 卷 100% 满（0 可用），torch.save 写 zip 被截断。
+占用大头：`projects/Dual-Track-OPD` 下 284G core dump + `third_party/Vision-OPD` 下 145G core dump
+（6 月/7 月崩溃残留，已全部删除）+ 1.7T 历史实验 checkpoint（`projects/Dual-Track-OPD/checkpoints/gkd_geometry3k/`，7 月 Qwen3-VL GKD 跑批，未动）。
+
+**当前状态**：
+- 磁盘已恢复 446G 可用。
+- 完整 checkpoint 仅 `global_step_200`（model+optim+extra_state+hf config 齐全，41G）。
+- `global_step_210` 为损坏 partial（optimizer 截断、缺 extra_state），已删除。
+
+**续跑命令**（从 step_200 继续跑完剩余 10 步，约 6 分钟）：
+```bash
+ray stop --force   # 先清掉上次崩溃残留的 ray
+conda activate "${DTOPD_ROOT}/envs/va-opd-native-e003-cu128-r595-v1"
+cd "${DTOPD_ROOT}/fc-opd-storage/backends/verl-va-opd-e0031631-clean/examples/on_policy_distillation_trainer"
+bash run_qwen3_5_4b_fsdp.sh \
+  trainer.resume_mode=resume_path \
+  trainer.resume_from_path=${DTOPD_ROOT}/checkpoints/verl_distill_geo3k/qwen3_5_4b_from_qwen3_5_35b_vllm_fsdp/global_step_200
+```
+注意 resume 配置须与原跑一致（即脚本默认值，不要再覆盖 batch/loss_mode 等）。
+
+**防止复发建议**：
+- 训练脚本加 `ulimit -c 0`，避免崩溃时再落 20-40G 的 core dump。
+- 不再需要的旧实验 checkpoint（`checkpoints/gkd_geometry3k/` 1.7T）建议清理或归档到冷存储。
+
+## 10. qwen3.5/3.6 家族 cu128 训练环境（2026-08-01 codex 构建）
+
+### 10.1 背景与驱动约束
+
+GPU 节点实测 `nvidia-smi`：**Driver 570.124.06 / CUDA Version 12.8**——即本节点
+最高支持 CUDA 12.8。**cu130/cu132 用户态栈均不可用**（cu132 主线环境在本节点
+无法启动）；qwen3.5/3.6（`model_type=qwen3_5/qwen3_5_moe`）需要
+`transformers>=5` + 带 `qwen3_5` 实现的 vLLM（≥0.18，0.23 起有独立 `qwen3_5.py`），
+因此必须构建 **cu128 + transformers 5.x + vLLM ≥0.23** 的组合。
+
+### 10.2 环境
+
+| 项目 | 值 |
+|---|---|
+| prefix | `${DTOPD_ROOT}/envs/va-opd-qwen35-cu128`（新建，非克隆） |
+| python | 3.12.13 |
+| torch | 2.11.0+cu129（torchvision 0.26.0+cu129 / torchaudio 2.11.0+cu129，CUDA 12.9，2026-08-02 由 cu128 切换） |
+| vllm | 0.23.0+cu129（wheels.vllm.ai 官方 cu129 变体 wheel，477MB；依赖 flashinfer-python/cubin 0.6.12） |
+| transformers | 5.12.0 |
+| flash-attn | 2.8.3（cu128 wheel，torch 2.10 构建；verl unpad 必需，已在本栈验证 import + CUDA 扩展加载 OK） |
+| verl | 0.9.0.dev0 @ `334d9f8b`（editable，`${DTOPD_ROOT}/repos/verl-cu130-vllm`，git 干净无 patch） |
+| ray / tensordict | 2.55.1 / 0.10.0 |
+| 蒸馏 loss modes | `k1/k2/k3/kl/abs/mse/low_var_kl/forward_kl_topk` 全部注册 ✓ |
+| 其他 | mathruler 0.1.0、qwen_vl_utils 0.0.14（geo extras）、numpy 1.26.4（保持不动，torch cu129 不强制 numpy 2） |
+| 离线 wheelhouse | `${DTOPD_ROOT}/fc-opd-storage/wheelhouse/va-opd-qwen35-cu129/`（36 个 wheel + cutlass v4.4.2 源码，供 GPU 节点离线重装） |
+
+### 10.3 激活与运行前必设
+
+```bash
+export DTOPD_ROOT=/inspire/hdd/global_user/mengweicheng-240108120092/lzy
+export CUDA_HOME="${DTOPD_ROOT}/envs/cuda128-toolchain"
+export PATH="${CUDA_HOME}/bin:${PATH}"
+export LIBRARY_PATH="${CUDA_HOME}/lib64:${CUDA_HOME}/lib64/stubs:${CUDA_HOME}/lib:${CUDA_HOME}/targets/x86_64-linux/lib:${LIBRARY_PATH:-}"
+export LD_LIBRARY_PATH="${CUDA_HOME}/lib:${CUDA_HOME}/targets/x86_64-linux/lib:${LD_LIBRARY_PATH:-}"
+# flashinfer 需要可写 workspace（默认 $HOME/.cache 在部分节点只读）
+export FLASHINFER_WORKSPACE_BASE="${DTOPD_ROOT}/.cache/flashinfer"
+conda activate "${DTOPD_ROOT}/envs/va-opd-qwen35-cu128"
+```
+
+### 10.4 已验证（CPU import gate）
+
+- torch 2.11.0+cu128 / vllm 0.23.0（registry 含 `Qwen3_5ForConditionalGeneration`）/
+  transformers 5.12.0 加载 `qwen3.6-27B`（model_type=qwen3_5）✓
+- verl 蒸馏 registry + geo3k reward（mathruler）✓
+
+### 10.5 待做（GPU 节点）
+
+- **✅ 已完成**：cu129 栈 GPU 预检 + qwen3.5-4B ← qwen3.5-4B 自蒸馏 smoke（4/4 步，
+  2026-08-02），详见 10.6。
+- **正式实验**：`scripts/run_qwen35_formal.sh`（默认 qwen3.6-27B → Qwen3.5-4B，
+  k1，use_task_rewards=False，batch 56，response 2048，7+1 卡，含 teacher 预检）。
+  变量开关：`LOSS_MODE`、`USE_TASK_REWARDS`、`STUDENT`（Qwen3.5-9B）、`TEACHER`
+  （qwen3.6-35B-A3B 需 6+2 卡 + TP=2）、`TRAIN_BATCH_SIZE`（56/112/168…）。
+- qwen3.6-27B → Qwen3.5-9B 容量差实验（STUDENT 切换后复跑）。
+
+### 10.6 cu13 排除结论与最优组合（2026-08-02 调研定稿）
+
+**执行状态（2026-08-02 07:01 UTC）**：cu129 栈已在共享存储上完成切换并通过 CPU import
+gate —— torch 2.11.0+cu129 / cuda 12.9 / vllm 0.23.0+cu129 / transformers 5.12.0 /
+verl `run_ppo` import 全部 OK；`vllm/_C.abi3.so` NEEDED `libcudart.so.12`；
+cu13 组件（nvidia-cuda-runtime 13.3.29、cutlass-dsl-libs-cu13、nvcc/nvrtc/nvjitlink 13.x）已卸载；
+numpy 保持 1.26.4。全部 wheel 已离线缓存于
+`fc-opd-storage/wheelhouse/va-opd-qwen35-cu129/`，GPU 节点可用
+`scripts/setup_qwen35_cu129.sh` 随时重放。
+
+**GPU 预检（2026-08-02 07:17 UTC）**：✅ MVC 结论实测成立 —— H200 + driver 570.124.06 +
+cu129 栈，vLLM 0.23.0 引擎完整初始化成功（Qwen3_5ForConditionalGeneration、
+FlashAttention v3、FlashInfer top-k/top-p、FlashInfer GDN prefill JIT、模型加载 8.61 GiB、
+KV cache 29.28 GiB）。唯一报错为 preflight 脚本 API 兼容：vLLM 0.23 的
+`LLM.generate()` 不再接受 `max_tokens` 关键字，已改为
+`LLM.generate(..., SamplingParams(max_tokens=8))`（2026-08-02 07:26 修复）。
+首启引擎 init 耗时 219s（flashinfer JIT 一次性），JIT 缓存已写入
+`${DTOPD_ROOT}/.cache/flashinfer`，重跑会更快。
+
+**全链路 smoke（2026-08-02 08:0x UTC）**：✅ qwen3.5-4B ← qwen3.5-4B 自蒸馏 4/4 步完成，
+~35s/step（H200×8，7 actor + 1 teacher），checkpoint 落盘于
+`${DTOPD_ROOT}/repos/verl-cu130-vllm/examples/on_policy_distillation_trainer/checkpoints/
+verl_distill_qwen35/qwen3_5_4b_self_gpu_smoke/global_step_4/`。
+关键指标：actor/distillation/loss 0.0001→0.0005、rollout_corr/kl ~0.0005、
+rollout_probs_diff_mean ~0.0036（self-distillation 同模型，差小属预期）、
+reward=0.0（smoke 配置 use_task_rewards=False，蒸馏项为学习信号）。
+过程中修复：agent.num_workers=7（batch 21 切分约束）、flash_attn 2.8.3 安装
+（verl unpad 必需）。日志尾部 torchdata dataloader worker "Killed" 为训练完成后
+teardown 阶段的无害噪音（非训练失败）。
+
+**正式实验 #1（2026-08-02 09:2x UTC）**：✅ qwen3.6-27B → Qwen3.5-4B，k1，
+use_task_rewards=False，4 卡（3 actor + 1 teacher，另一实验占 GPU 4-7，FORMAL_GPUS=0,1,2,3），
+batch 24，79/79 步（1901 行），~63.5s/it，共 1h24m。
+关键指标（step 79）：actor/entropy 0.44、distillation/abs_loss 0.175（≈ 自蒸馏 smoke 的 10 倍，
+容量差信号正常）、distillation/loss 0.0805、grad_norm 1.65、rollout_probs_diff_mean 0.0028
+（学生紧跟 27B teacher）、KL 0.00032、reward 0（use_task_rewards=False 属预期）。
+checkpoint：`checkpoints/verl_distill_qwen35/qwen3_6_27b_to_qwen3_5_4b_k1_false/`
+（global_step_10..70,79；**每个约 51GB，共 407GB**，注意磁盘规划）。
+**踩坑记录**：vLLM 日志默认写 stdout（Ray 分流到 worker-*.out），诊断需
+`VLLM_LOGGING_STREAM=ext://sys.stderr` 或同时 tail .out；teacher GPU 残留/被占用时
+`request_memory` 报 free<desired；GPU 实例同时跑多个实验时必须用 FORMAL_GPUS 显式限卡。
+
+**驱动硬约束**：GPU 节点 driver 570.124.06，nvidia-smi 显示最大 CUDA 12.8。
+已实测 vllm 0.23.0 PyPI wheel（CUDA 13.0 构建，`_C.abi3.so` NEEDED `libcudart.so.13`，
+deps 含 `nvidia-cutlass-dsl[cu13]`）引擎启动报
+`CUDA driver version is insufficient for CUDA runtime version`。
+NVIDIA 官方 MVC 兼容性表确认：CUDA 12.x 应用最小驱动 >= 525（Linux，上限 <580），
+CUDA 13.x 应用最小驱动 >= 580 → **cu130/cu132 用户态栈在本节点全部不可用**。
+
+**最优组合（首选，免编译）**：
+
+| 组件 | 版本 | 来源 |
+|---|---|---|
+| torch | 2.11.0+cu129 | `https://download.pytorch.org/whl/cu129` |
+| torchvision / torchaudio | 0.26.0+cu129 / 2.11.0+cu129 | 同上 |
+| vllm | 0.23.0+cu129 | `https://wheels.vllm.ai/0.23.0/cu129/vllm/vllm-0.23.0+cu129-cp38-abi3-manylinux_2_28_x86_64.whl` |
+| flashinfer-python / -cubin | 0.6.12（cu12/cu13 无关） | PyPI（已装） |
+| nvidia-cutlass-dsl | 4.5.2 `[cu12]` 风味 | PyPI |
+| humming-kernels | 0.1.4 `[cu12]` 风味 | PyPI |
+| transformers / verl | 5.12.0 / `334d9f8b` | 不变 |
+
+要点：
+- vllm 0.23.0 默认 PyPI wheel 是 cu130；cu129 变体只发布在
+  `wheels.vllm.ai/0.23.0/cu129`，必须显式指定 URL（uv/pip 的
+  `--torch-backend=cu129` 可能仍解析回 cu130 wheel，见 vllm #44335/#42338）。
+- cu129 运行在 driver 570 依赖 MVC；若实测仍报 driver 不足（部分 kernel 特性可能
+  要求新驱动），回退方案 B 为源码构建 vllm 0.23.0（tag `91df0fad4`）于
+  cuda128-toolchain（qutlass pin `830d2c45` 与本地缓存一致；cutlass v4.4.2、
+  triton_kernels v3.5.1 需网络或降级容忍）。
+- 脚本：`scripts/setup_qwen35_cu129.sh`（切换 12.9 栈）→
+  `scripts/run_qwen35_gpu_smoke.sh`（8 卡预检 + 自蒸馏 smoke）。
+- 需要先探测 GPU 节点到 `download.pytorch.org` / `wheels.vllm.ai` 的网络。
