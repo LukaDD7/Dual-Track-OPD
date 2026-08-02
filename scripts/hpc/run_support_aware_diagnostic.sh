@@ -50,6 +50,7 @@ PREFLIGHT_ONLY=false
 RESUME=""
 PROMPT_START=""
 PROMPT_END=""
+NUM_PROMPTS=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -77,6 +78,8 @@ while [[ $# -gt 0 ]]; do
             PROMPT_START="$2"; shift 2 ;;
         --prompt-end)
             PROMPT_END="$2"; shift 2 ;;
+        --num-prompts)
+            NUM_PROMPTS="$2"; shift 2 ;;
         --preflight-only)
             PREFLIGHT_ONLY=true; shift ;;
         *)
@@ -239,6 +242,10 @@ fi
 
 if [[ -n "${PROMPT_END}" ]]; then
     CMD+=(--prompt-end "${PROMPT_END}")
+fi
+
+if [[ -n "${NUM_PROMPTS}" ]]; then
+    CMD+=(--num-prompts "${NUM_PROMPTS}")
 fi
 
 echo "Command: ${CMD[*]}"
