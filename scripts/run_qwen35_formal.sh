@@ -11,6 +11,12 @@
 #   USE_FCOP_DATASET=1                 用 FCOPDDataset 注入 "\boxed{} 输出指令" prompt
 #                                      （默认 0 用 RLHFDataset = 实验1 原始 prompt；奖励可达性见 handoff）
 #   VALIDATION_DATA_DIR=<dir>          每个 test_freq 步把 val 生成/得分 dump 到该目录（默认不 dump）
+#   RESUME_MODE=disable|auto           disable=冷启动（默认；防止实验名复用续跑旧 checkpoint）
+#   VAL_BEFORE_TRAIN=True              训练前先做一次验证并 dump（默认 False）
+#   TOTAL_TRAINING_STEPS=20            固定总训练步数（默认空 = 按 TOTAL_EPOCHS 推导）
+#   ROLLOUT_N=1                        每个 prompt 的 rollout 样本数（默认 1，与后端脚本一致）
+#   DRY_RUN=1                          只打印组合后的命令与有效配置，不碰 GPU（无卡测试用）
+#   ALLOW_EXISTING_RUN_DIR=1           resume=disable 时目标 checkpoint 目录已有内容也放行
 #   TOTAL_EPOCHS=2                     多跑几个 epoch（默认 1）
 #   TRAIN_BATCH_SIZE=112               放大 batch（默认 56；必须同时被 7 和 8 整除）
 #   CLEAN_START=1                      启动前 ray stop --force（默认 0；重复跑失败时建议开启）
@@ -82,10 +88,18 @@ DISTILLATION_TOPK=${DISTILLATION_TOPK:-64}
 PROJECT_NAME=${PROJECT_NAME:-verl_distill_qwen35}
 USE_FCOP_DATASET=${USE_FCOP_DATASET:-0}
 VALIDATION_DATA_DIR=${VALIDATION_DATA_DIR:-}
+RESUME_MODE=${RESUME_MODE:-disable}
+VAL_BEFORE_TRAIN=${VAL_BEFORE_TRAIN:-False}
+TOTAL_TRAINING_STEPS=${TOTAL_TRAINING_STEPS:-}
+ROLLOUT_N=${ROLLOUT_N:-1}
+CKPT_ROOT=${CKPT_ROOT:-${DTOPD_ROOT}/repos/verl-cu130-vllm/examples/on_policy_distillation_trainer/checkpoints}
+ALLOW_EXISTING_RUN_DIR=${ALLOW_EXISTING_RUN_DIR:-0}
+DRY_RUN=${DRY_RUN:-0}
 
 TEACHER_BASE=$(basename "${TEACHER_MODEL}" | tr 'A-Z.' 'a-z_' | tr '-' '_')
 STUDENT_BASE=$(basename "${STUDENT_MODEL}" | tr 'A-Z.' 'a-z_' | tr '-' '_')
-EXPERIMENT_NAME="${EXPERIMENT_NAME:-${TEACHER_BASE}_to_${STUDENT_BASE}_${DISTILLATION_LOSS_MODE}_$(echo ${USE_TASK_REWARDS} | tr 'A-Z' 'a-z')}"
+DATASET_TAG=$([ "${USE_FCOP_DATASET}" = "1" ] && echo fcop || echo raw)
+EXPERIMENT_NAME="${EXPERIMENT_NAME:-${TEACHER_BASE}_to_${STUDENT_BASE}_${DISTILLATION_LOSS_MODE}_task$(echo ${USE_TASK_REWARDS} | tr 'A-Z' 'a-z')_${DATASET_TAG}_n${ROLLOUT_N}}"
 
 MAX_NUM_TOKENS=$(( MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH + 1 ))
 
@@ -117,6 +131,46 @@ echo "== batch=${TRAIN_BATCH_SIZE} workers=${ROLLOUT_NUM_WORKERS} n_gpus=${NGPUS
 echo "== loss=${DISTILLATION_LOSS_MODE} use_task_rewards=${USE_TASK_REWARDS} =="
 echo "== max_len=${MAX_NUM_TOKENS} (prompt ${MAX_PROMPT_LENGTH} + response ${MAX_RESPONSE_LENGTH}) =="
 echo "== experiment=${PROJECT_NAME}/${EXPERIMENT_NAME} =="
+echo "== dataset_class=$( [ "${USE_FCOP_DATASET}" = "1" ] && echo FCOPDDataset || echo RLHFDataset ) =="
+echo "== resume_mode=${RESUME_MODE} val_before_train=${VAL_BEFORE_TRAIN} rollout_n=${ROLLOUT_N} =="
+if [ -n "${TOTAL_TRAINING_STEPS}" ]; then echo "== total_training_steps=${TOTAL_TRAINING_STEPS} =="; fi
+if [ -n "${VALIDATION_DATA_DIR}" ]; then echo "== val dump → ${VALIDATION_DATA_DIR} =="; fi
+echo "== checkpoint_dir=${CKPT_ROOT}/${PROJECT_NAME}/${EXPERIMENT_NAME}/ =="
+
+# ---- 参数组合：EXTRA_ARGS（追加在 backend 固定参数之后，Hydra 后覆盖前）----
+EXTRA_ARGS=(+actor_rollout_ref.model.override_config.attn_implementation=sdpa)
+if [ "${USE_FCOP_DATASET}" = "1" ]; then
+  # 让 Ray worker 能 import dual_track_opd（FCOPDDataset 所在包）
+  export PYTHONPATH="${DTOPD_ROOT}/projects/Dual-Track-OPD/src:${PYTHONPATH:-}"
+  EXTRA_ARGS+=(data.custom_cls.path=pkg://dual_track_opd.fc_opd.verl_dataset)
+  EXTRA_ARGS+=(data.custom_cls.name=FCOPDDataset)
+fi
+if [ -n "${VALIDATION_DATA_DIR}" ]; then
+  mkdir -p "${VALIDATION_DATA_DIR}"
+  EXTRA_ARGS+=(trainer.validation_data_dir="${VALIDATION_DATA_DIR}")
+fi
+EXTRA_ARGS+=(trainer.resume_mode="${RESUME_MODE}")
+EXTRA_ARGS+=(trainer.val_before_train="${VAL_BEFORE_TRAIN}")
+EXTRA_ARGS+=(actor_rollout_ref.rollout.n="${ROLLOUT_N}")
+if [ -n "${TOTAL_TRAINING_STEPS}" ]; then
+  EXTRA_ARGS+=(trainer.total_training_steps="${TOTAL_TRAINING_STEPS}")
+fi
+
+# ---- resume=disable 冷启动 guard：目标 checkpoint 目录已存在则拒绝（除非显式放行）----
+CKPT_DIR="${CKPT_ROOT}/${PROJECT_NAME}/${EXPERIMENT_NAME}"
+if [ "${RESUME_MODE}" = "disable" ] && [ -d "${CKPT_DIR}" ] && [ -n "$(ls -A "${CKPT_DIR}" 2>/dev/null)" ] && [ "${ALLOW_EXISTING_RUN_DIR}" != "1" ]; then
+  echo "FATAL: resume_mode=disable 但 checkpoint 目录已有内容: ${CKPT_DIR}"
+  echo "      这通常是实验名复用（会续跑旧实验）。确认是全新实验名，或显式设 ALLOW_EXISTING_RUN_DIR=1 放行（不会删除旧文件）。"
+  exit 1
+fi
+
+# ---- DRY_RUN：无卡测试，打印组合后的 backend 启动命令后退出 ----
+if [ "${DRY_RUN}" = "1" ]; then
+  echo "== [DRY_RUN] composed backend command =="
+  echo "cd ${DTOPD_ROOT}/repos/verl-cu130-vllm/examples/on_policy_distillation_trainer"
+  echo "bash run_qwen3_5_4b_fsdp.sh ${EXTRA_ARGS[*]} $*"
+  exit 0
+fi
 
 # ---- 0. GPU 状态检查：残留显存是 vLLM init 失败的常见原因 ----
 echo "== [gpu check] =="
@@ -148,22 +202,6 @@ python3 "${SCRIPTS}/qwen35_vllm_preflight.py"
 # ---- verl 启动 ----
 cd "${DTOPD_ROOT}/repos/verl-cu130-vllm/examples/on_policy_distillation_trainer"
 
-EXTRA_ARGS=(+actor_rollout_ref.model.override_config.attn_implementation=sdpa)
-if [ "${USE_FCOP_DATASET}" = "1" ]; then
-  # 让 Ray worker 能 import dual_track_opd（FCOPDDataset 所在包）
-  export PYTHONPATH="${DTOPD_ROOT}/projects/Dual-Track-OPD/src:${PYTHONPATH:-}"
-  EXTRA_ARGS+=(data.custom_cls.path=pkg://dual_track_opd.fc_opd.verl_dataset)
-  EXTRA_ARGS+=(data.custom_cls.name=FCOPDDataset)
-  echo "== dataset=FCOPDDataset（注入 boxed 输出指令）=="
-else
-  echo "== dataset=RLHFDataset（原始 prompt，无 boxed 指令）=="
-fi
-if [ -n "${VALIDATION_DATA_DIR}" ]; then
-  mkdir -p "${VALIDATION_DATA_DIR}"
-  EXTRA_ARGS+=(trainer.validation_data_dir="${VALIDATION_DATA_DIR}")
-  echo "== val dump → ${VALIDATION_DATA_DIR} =="
-fi
-
 STUDENT_MODEL="${STUDENT_MODEL}" \
 TEACHER_MODEL="${TEACHER_MODEL}" \
 TRAIN_FILE="${TRAIN_FILE}" \
@@ -192,6 +230,6 @@ USE_TASK_REWARDS="${USE_TASK_REWARDS}" \
 DISTILLATION_TOPK="${DISTILLATION_TOPK}" \
 PROJECT_NAME="${PROJECT_NAME}" \
 EXPERIMENT_NAME="${EXPERIMENT_NAME}" \
-bash run_qwen3_5_4b_fsdp.sh "${EXTRA_ARGS[@]}"
+bash run_qwen3_5_4b_fsdp.sh "${EXTRA_ARGS[@]}" "$@"
 
-echo "== DONE. checkpoint: ${DTOPD_ROOT}/repos/verl-cu130-vllm/examples/on_policy_distillation_trainer/checkpoints/${PROJECT_NAME}/${EXPERIMENT_NAME}/ =="
+echo "== DONE. checkpoint: ${CKPT_DIR}/ =="

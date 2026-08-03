@@ -1,5 +1,10 @@
 # qwen3.5/3.6 蒸馏：cu129 栈 + 正式实验交接（2026-08-02）
 
+> ⚠️ 2026-08-03 更新：执行前先读
+> `docs/qwen35_promptfix_review_for_claude.md`（commit 87225df）。本文 §4/§5 已按该
+> review 修正：实验 #2 改用唯一实验名 + `RESUME_MODE=disable`（防续跑 #1 checkpoint）、
+> 奖励分量按 0.9*acc + 0.1*format 口径、通过标准不要求 `pg_clipfrac` 非 0。
+
 ## 1. 现状一句话
 
 **qwen3.6-27B → Qwen3.5-4B 蒸馏全链路已跑通**：cu129 栈（torch 2.11.0+cu129 / vllm
@@ -66,6 +71,11 @@ PPO 项恒 0，与 #1 数值上无差别。必须先让任务奖励**可达**。
 
 `USE_FCOP_DATASET=1` —— 换用 `FCOPDDataset`，prompt 注入
 `Put the final answer in \boxed{}`（学生/老师/loss 模式/batch/卡数/use_task_rewards 全不变）。
+同时为诊断隔离加：唯一 `EXPERIMENT_NAME` + `RESUME_MODE=disable`（默认实验名
+`..._k1_false` 与实验 #1 的 checkpoint 目录相同，`trainer.resume_mode` 默认 `auto`
+会续跑 #1 的 step-79 checkpoint，导致对比无效）、`VAL_BEFORE_TRAIN=True`（step 0 就
+dump）、`TOTAL_TRAINING_STEPS=20`（20 步 smoke，不是正式结果）、`SAVE_FREQ=-1`
+（不落 ~51GB checkpoint）。
 
 ### 4.2 命令
 
@@ -75,22 +85,50 @@ NGPUS_PER_NODE=3 \
 TRAIN_BATCH_SIZE=24 \
 PPO_MINI_BATCH_SIZE=24 \
 USE_FCOP_DATASET=1 \
-VALIDATION_DATA_DIR=/inspire/hdd/global_user/mengweicheng-240108120092/lzy/fc-opd-storage/logs/val_dump_k1_promptfix \
+USE_TASK_REWARDS=False \
+ROLLOUT_N=1 \
+RESUME_MODE=disable \
+VAL_BEFORE_TRAIN=True \
+TOTAL_TRAINING_STEPS=20 \
+SAVE_FREQ=-1 \
+TEST_FREQ=5 \
+EXPERIMENT_NAME=qwen3_6_27b_to_qwen3_5_4b_k1_taskfalse_fcop_n1_promptfix_smoke \
+VALIDATION_DATA_DIR=/inspire/hdd/global_user/mengweicheng-240108120092/lzy/fc-opd-storage/logs/val_dump_k1_promptfix_smoke \
 bash /inspire/hdd/global_user/mengweicheng-240108120092/lzy/projects/Dual-Track-OPD/scripts/run_qwen35_formal.sh
 ```
 
-（`VALIDATION_DATA_DIR` 会在每次 test 时把 val 的 input/output/score/ground_truth dump 下来，
-直接看学生到底有没有输出 `\boxed{}`。）
+（`VALIDATION_DATA_DIR` 会在 step 0/5/10/15/20 把 val 的 input/output/gts/score dump 下来，
+直接看学生到底有没有输出 `\boxed{}`、奖励管线打没打对分。）
 
 ### 4.3 预期结果（对比 #1）
 
-1. `critic/rewards/mean` **从 0 变正**（只要学生开始输出 `\boxed{}` 就有 ≥0.1 格式分，
-   答对给 1.0）。
-2. val dump 里能看到 `\boxed{...}` 出现；val acc 从 0 逐步上升。
-3. `actor/distillation/loss` 量级不变（任务奖励仍未参与训练，仅观测）。
-4. 判断标准：reward 变非 0 + 学生出现 boxed 输出 = 奖励可达，具备跑实验 #3 的条件；
-   若 20 步后 reward 仍恒 0 → 看 val dump 确认输出格式，再考虑放宽 geo3k format_reward
-   （该函数与诊断实验共享，改动需评估影响）。
+先厘清奖励口径（见 review §4）：`total = 0.9 * acc + 0.1 * format`；`format` 用
+`re.fullmatch` 要求字面 `<think>...</think>...\boxed{...}`，所以「任意 boxed 输出至少
+0.1」是**错的**：
+
+| 输出 | acc | format | total |
+|---|---:|---:|---:|
+| 错误 + boxed + 无 think 标签 | 0 | 0 | 0.0 |
+| 正确 + boxed + 无 think 标签 | 1 | 0 | 0.9 |
+| 错误 + boxed + 有 think 标签 | 0 | 1 | 0.1 |
+| 正确 + boxed + 有 think 标签 | 1 | 1 | 1.0 |
+
+预期与判据：
+
+1. step 0 起 dump 的 `input` 含 boxed 指令；`gts` 有值且与 parquet 一致。
+2. `boxed_rate > 0`，且至少一个样本 total reward 非 0 —— 弱条件：prompt/reward 路径已通。
+3. **强条件（跑实验 #3 的前提）**：`accuracy_reward_rate > 0` 且 reward 有非零方差。
+   只出现常数 0.1 格式分只证明格式可达，不构成正确性判别。
+4. 分别上报 `boxed_rate` / `think_boxed_format_rate` / `accuracy_reward_rate` / total 的
+   mean·std·min·max / 0.0·0.1·0.9·1.0 计数 / `response_length/clip_ratio`（尽量按截断与否分层）。
+5. `actor/distillation/loss` 量级与 #1 相近（任务奖励仍未参与训练，仅观测）；20 步 smoke
+   **不要求** reward 单调上升。
+
+若 20 步后 reward 仍恒 0：**不要直接放宽 `geo3k.format_reward`**。按顺序诊断：
+运行时 dataset 类是否为 `FCOPDDataset`（非 `RLHFDataset`）→ dump 的 `input` 是否含注入指令
+→ 是否大量触发 2048 token 截断（#1 的 clip_ratio ≈ 0.958）→ 输出语法分类（无 box / box 畸形 /
+正确 box 无 think / think+box 完整）→ `gts` 是否为空 → 用后端 `geo3k.compute_score` 复算。
+一次只改一个变量；真要改格式奖励须新命名并标注 ablation，共享 scorer 保持原样。
 
 ## 5. 再下一步（实验 #3：任务奖励生效）
 
@@ -103,12 +141,30 @@ TRAIN_BATCH_SIZE=24 \
 PPO_MINI_BATCH_SIZE=24 \
 USE_FCOP_DATASET=1 \
 USE_TASK_REWARDS=True \
-VALIDATION_DATA_DIR=/inspire/hdd/global_user/mengweicheng-240108120092/lzy/fc-opd-storage/logs/val_dump_k1_reward \
+ROLLOUT_N=1 \
+RESUME_MODE=disable \
+VAL_BEFORE_TRAIN=True \
+TOTAL_TRAINING_STEPS=20 \
+SAVE_FREQ=-1 \
+TEST_FREQ=5 \
+EXPERIMENT_NAME=qwen3_6_27b_to_qwen3_5_4b_k1_tasktrue_fcop_n1_reward_smoke \
+VALIDATION_DATA_DIR=/inspire/hdd/global_user/mengweicheng-240108120092/lzy/fc-opd-storage/logs/val_dump_k1_reward_smoke \
 bash /inspire/hdd/global_user/mengweicheng-240108120092/lzy/projects/Dual-Track-OPD/scripts/run_qwen35_formal.sh
 ```
 
-预期：`actor/pg_clipfrac`、`actor/pg_loss` 从 0 变非 0（任务奖励参与梯度）；reward 随训练
-上升；若 reward 升但 KL/entropy 恶化 → 调 `loss_max_clamp` 或 `distillation_loss_coef`。
+前置条件（见 review §7.1）：实验 #2 已确认 custom prompt 路由正确、boxed_rate > 0、
+存在 accuracy reward、reward 非常数、截断可接受。
+
+预期（见 review §7.3）：`critic/score/*`、`critic/rewards/*` 反映非 0 任务分；
+`critic/advantages/max` 非 0；`actor/pg_loss` 非 0；蒸馏指标有限；grad_norm 有限。
+**不要**以 `actor/pg_clipfrac` 非 0 为通过标准——n=1 单样本组在 verl GRPO 里特判
+mean=0/std=1，有效任务梯度存在时 clipfrac 仍可为 0。20 步 smoke 不要求 reward 单调上升，
+学习结论需更长 seeded run。`ROLLOUT_N=1` 语义上是「无基线 REINFORCE 式」接线验证，
+研究级任务-RL 对比需另跑 `ROLLOUT_N=4/8` 并重算显存。
+
+若 reward 升但 KL/entropy 恶化 → 先看任务 pg_loss 与蒸馏 pg_loss 的量级对比、奖励的
+acc/format 分量，再考虑调 `distillation_loss_coef` 或缩放任务奖励；`loss_max_clamp`
+只裁剪逐 token 蒸馏估计器，不是通用稳定器，别盲降。
 
 ## 6. 后续实验线（每步一个变量）
 
