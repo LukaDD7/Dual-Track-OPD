@@ -44,6 +44,12 @@ def test_extract_answer_empty():
     assert extract_answer("No numbers here, just text.") is None
 
 
+def test_extract_answer_overlength_digits_no_crash():
+    """Over-length digit runs (float→inf) must not crash _normalize_number."""
+    huge = "1" + "0" * 400
+    assert extract_answer("Answer: " + huge) == huge
+
+
 def test_extract_answer_malformed():
     # Unmarked reasoning numbers are not reliable final answers.
     result = extract_answer("The answer might be around 42 or 43")

@@ -90,6 +90,10 @@ def _normalize_number(num_str: str) -> str:
     """Normalize a numeric string — round and strip trailing zeros."""
     try:
         value = float(num_str)
+        # Over-length digit runs parse to inf (model rambling); never let that
+        # reach int(value) — OverflowError kills the whole pipeline.
+        if not math.isfinite(value):
+            return num_str.strip()
         if value == int(value):
             return str(int(value))
         # Round to 4 decimal places, then strip trailing zeros
