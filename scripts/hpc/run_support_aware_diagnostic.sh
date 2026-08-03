@@ -52,6 +52,7 @@ PROMPT_START=""
 PROMPT_END=""
 NUM_PROMPTS=""
 RUN_ID=""
+EXIT_ZERO_ON_COMPLETE=false
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -85,6 +86,8 @@ while [[ $# -gt 0 ]]; do
             RUN_ID="$2"; shift 2 ;;
         --preflight-only)
             PREFLIGHT_ONLY=true; shift ;;
+        --exit-zero-on-complete)
+            EXIT_ZERO_ON_COMPLETE=true; shift ;;
         *)
             echo "Unknown argument: $1" >&2
             exit 1
@@ -253,6 +256,10 @@ fi
 
 if [[ -n "${RUN_ID}" ]]; then
     CMD+=(--run-id "${RUN_ID}")
+fi
+
+if [[ "${EXIT_ZERO_ON_COMPLETE}" == "true" ]]; then
+    CMD+=(--exit-zero-on-complete)
 fi
 
 echo "Command: ${CMD[*]}"

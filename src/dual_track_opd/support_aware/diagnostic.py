@@ -105,6 +105,9 @@ class DiagnosticConfig:
     truncation_rate_max: float = 0.15
     bootstrap_seed: int = 42
     bootstrap_resamples: int = 10_000
+    teacher_timeout_seconds: float = 120.0
+    teacher_score_chunk_size: int = 9
+    student_score_chunk_size: int = 9
 
     @property
     def resolved_num_prompts(self) -> int:
@@ -452,6 +455,19 @@ def compute_masked_logp(
     if not selected:
         return 0.0, float("nan"), 0
     return float(sum(selected)), float(sum(selected) / len(selected)), len(selected)
+
+
+def chunk_ranges(total: int, chunk_size: int) -> list[tuple[int, int]]:
+    """Return stable half-open ranges for order-preserving score chunks."""
+
+    if total < 0:
+        raise ValueError("total must be non-negative")
+    if chunk_size <= 0:
+        raise ValueError("chunk_size must be positive")
+    return [
+        (start, min(start + chunk_size, total))
+        for start in range(0, total, chunk_size)
+    ]
 
 
 def assert_exact_score_alignment(
@@ -1389,6 +1405,7 @@ def run_diagnostic(config: DiagnosticConfig) -> dict[str, Any]:
     # exact response-token action space.
     teacher = TeacherScorer(TeacherScorerConfig(
         base_url=config.teacher_url,
+        timeout_seconds=config.teacher_timeout_seconds,
         expected_tokenizer_hash=student_hash,
     ))
 
@@ -1508,29 +1525,42 @@ def run_diagnostic(config: DiagnosticConfig) -> dict[str, Any]:
             prompt_rollout_hashes.append(generation.response_token_hash)
 
         # -- Phase B: Batch-score all responses ------------------------------------
-        # Teacher batch: one HTTP call for all 9 rollouts
+        # Keep generation immutable, but score in bounded chunks.  K=32 creates
+        # 33 responses including greedy; sending all of them through the student
+        # in one padded forward can materialize tens of GB of vocabulary logits,
+        # while a single synchronous teacher request can exceed the HTTP timeout.
+        # Chunking changes neither token IDs nor result order.
         batch_size = len(batch_meta)
         batch_request_ids = [
             f"{sample_uid}:greedy" if m["is_greedy"] else f"{sample_uid}:rollout-{m['rollout_id']}"
             for m in batch_meta
         ]
-        t_results = teacher.score_batch(
-            request_ids=batch_request_ids,
-            questions=[question] * batch_size,
-            image_paths=[image_path] * batch_size,
-            prompt_texts=[prompt_text] * batch_size,
-            response_token_ids_list=[m["response_token_ids"] for m in batch_meta],
-            response_texts=[m["response_text"] for m in batch_meta],
-        )
+        t_results: list[TeacherScorer.ScoreResult] = []
+        for chunk_start, chunk_end in chunk_ranges(
+            batch_size, config.teacher_score_chunk_size
+        ):
+            chunk = batch_meta[chunk_start:chunk_end]
+            t_results.extend(teacher.score_batch(
+                request_ids=batch_request_ids[chunk_start:chunk_end],
+                questions=[question] * len(chunk),
+                image_paths=[image_path] * len(chunk),
+                prompt_texts=[prompt_text] * len(chunk),
+                response_token_ids_list=[m["response_token_ids"] for m in chunk],
+                response_texts=[m["response_text"] for m in chunk],
+            ))
 
-        # Student batch: one forward pass for all 9 rollouts
-        s_results = student_scorer.score_batch(
-            questions=[question] * batch_size,
-            images=[image] * batch_size,
-            prompt_texts=[prompt_text] * batch_size,
-            response_texts=[m["response_text"] for m in batch_meta],
-            response_token_ids_list=[m["response_token_ids"] for m in batch_meta],
-        )
+        s_results: list[StudentScorer.ScoreResult] = []
+        for chunk_start, chunk_end in chunk_ranges(
+            batch_size, config.student_score_chunk_size
+        ):
+            chunk = batch_meta[chunk_start:chunk_end]
+            s_results.extend(student_scorer.score_batch(
+                questions=[question] * len(chunk),
+                images=[image] * len(chunk),
+                prompt_texts=[prompt_text] * len(chunk),
+                response_texts=[m["response_text"] for m in chunk],
+                response_token_ids_list=[m["response_token_ids"] for m in chunk],
+            ))
 
         # -- Phase C: Build and write records --------------------------------------
         for i, meta in enumerate(batch_meta):
@@ -2288,6 +2318,14 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["smoke", "full"],
         help="Mode to use when scoring the merged summary gates",
     )
+    parser.add_argument(
+        "--exit-zero-on-complete",
+        action="store_true",
+        help=(
+            "Return zero after a complete artifact write even when statistical "
+            "acceptance gates fail. Protocol and preflight errors still fail."
+        ),
+    )
     return parser
 
 
@@ -2373,6 +2411,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         bootstrap_resamples=_nested_get(
             yaml_cfg, "diagnostic", "bootstrap_resamples", default=10_000
         ),
+        teacher_timeout_seconds=_nested_get(
+            yaml_cfg, "teacher", "timeout_seconds", default=120.0
+        ),
+        teacher_score_chunk_size=_nested_get(
+            yaml_cfg, "diagnostic", "teacher_score_chunk_size", default=9
+        ),
+        student_score_chunk_size=_nested_get(
+            yaml_cfg, "diagnostic", "student_score_chunk_size", default=9
+        ),
     )
 
     if not config.dataset_path:
@@ -2381,8 +2428,30 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not config.student_model_path:
         print("ERROR: student_model_path is required", file=sys.stderr)
         return 1
+    if config.teacher_timeout_seconds <= 0:
+        print("ERROR: teacher timeout must be positive", file=sys.stderr)
+        return 1
+    if config.teacher_score_chunk_size <= 0 or config.student_score_chunk_size <= 0:
+        print("ERROR: score chunk sizes must be positive", file=sys.stderr)
+        return 1
 
     summary = run_diagnostic(config)
+
+    if args.exit_zero_on_complete:
+        if summary.get("error"):
+            return 1
+        required_outputs = (
+            "rollouts.jsonl",
+            "prompt_support_summary.jsonl",
+            "summary.json",
+            "run_manifest.json",
+            "resolved_config.yaml",
+        )
+        run_id = str(summary.get("run_id") or "")
+        output_dir = Path(config.output_root) / "support_aware_opd" / run_id
+        if run_id and all((output_dir / name).is_file() for name in required_outputs):
+            return 0
+        return 1
 
     # Return code based on gates
     gates = summary.get("acceptance_gates", [])

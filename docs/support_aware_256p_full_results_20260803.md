@@ -215,7 +215,9 @@ greedy accuracy = 0.434。
 ### 8.2 实验（进入 bridge 前）
 
 1. **K=32 adaptive 重采样**：优先 c=0（85）、c=1–2（37）、c=8（80）候选，
-   确认边界标签后再冻结 cohort。
+   确认边界标签后再冻结 cohort。今晚可执行的固定 64-prompt、四分片方案见
+   `docs/support_aware_k32_overnight_handoff_20260804.md`；不要再用 `.codex-tmp`
+   或把新 K=32 rollout ID 与旧 K=8 行直接拼接。
 2. **冻结 matched cohort**：每 stratum ≤16、共 64 prompts，另留 disjoint held-out；
    记录 run id / prompt hash / image hash / dataset hash / checkpoint / K / 解码配置 /
    verifier 版本 / seeds。
