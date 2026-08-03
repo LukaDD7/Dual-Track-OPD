@@ -4,6 +4,12 @@ Status: implementation contract for CPU handoff and GPU execution.  The
 post-hoc frontier analyzer is executable now; the five training arms remain a
 reviewed protocol and must not be presented as implemented.
 
+Competitive evidence and the 22-paper high-resolution matrix are in
+[`trek_competitive_landscape_and_fkl_opd.md`](./trek_competitive_landscape_and_fkl_opd.md).
+In particular, use its occupancy-by-divergence four-quadrant analysis when
+implementing the TREK, exact-token OPD, and FKL-to-OPD arms; do not describe
+the comparison as KL direction alone.
+
 ## Executive decision
 
 The immediate project should use three primary research questions.  The old

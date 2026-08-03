@@ -5,6 +5,11 @@ teacher proposal learning, on-policy distillation (OPD), and sparse-reward RL
 are applied.  This is deliberately narrower than a generic RLHF or knowledge
 distillation survey.
 
+For an Agentic-OPD-style high-resolution matrix of the 22 closest papers,
+including each work's hypothesis, implementation, decisive ablation,
+limitation, and direct relation to TREK, see
+[`trek_competitive_landscape_and_fkl_opd.md`](./trek_competitive_landscape_and_fkl_opd.md).
+
 ## Bottom line
 
 There is no single public "industrial standard" in which every model is first
@@ -38,6 +43,9 @@ as a novelty statement.  The closest public precedents already show:
 The open opportunity is to identify **which operator is appropriate in which
 observed support state**, measure prompt-level state transitions, and test
 whether those transitions predict actual mixed RL groups and early-RL gains.
+The late-2026 evidence sharpens this further: TrOPD, BRTS, TOPD, SGPO, and
+Distilled RL show that KL direction cannot be interpreted separately from
+prefix occupancy, reliability region, transfer unit, and reward advantage.
 
 ## Six scientific problem families
 
@@ -84,7 +92,7 @@ student occupancy relevance from teacher reliability on replayed prefixes.
 These are valuable extensions but should follow, not precede, the basic
 operator-by-state result.
 
-## Literature matrix (38 papers)
+## Literature matrix (46 papers)
 
 `Priority` is for this project: P0 = must read deeply now, P1 = read method and
 ablations, P2 = contextual/foundational.  A paper can inform more than one
@@ -158,6 +166,19 @@ family; it is placed under its most useful role.
 | 37 | [ReAct (2210.03629)](https://arxiv.org/abs/2210.03629) | Interleave reasoning and environment actions | Foundational environment-occupancy context for why multi-turn OPD differs from static answer generation. | P2 |
 | 38 | [Reflexion (2303.11366)](https://arxiv.org/abs/2303.11366) | Verbal feedback and retry memory for agents | Demonstrates dense feedback can be episodic/textual rather than logit-level; useful comparison for future agentic extensions. | P2 |
 
+### G. Late-2026 operator, occupancy, and transfer-unit advances
+
+| # | Work | Intervention / scientific question | Implication for the TREK boundary | Priority |
+|---:|---|---|---|:---:|
+| 39 | [TrOPD (2606.01249)](https://arxiv.org/abs/2606.01249) | Use RKL in teacher-verifiable student regions, FKL on outliers, and teacher-prefix FKL for off-policy guidance | Direct evidence against a global FKL claim: full FKL on student prefixes collapses in its ablation, while region-conditioned RKL/FKL is strongest. Direction and occupancy interact. | P0 |
+| 40 | [BRTS (2605.09725)](https://arxiv.org/abs/2605.09725) | Combine student-context RKL with correctness-first, student-aligned teacher-context FKL; recover hard prompts with answer-guided teacher generation | Already implements a hybrid of OPD repair and proposal coverage. It is a stronger competitor than pure OPD for testing whether the two operators are complementary. | P0 |
+| 41 | [TOPD (2606.00305)](https://arxiv.org/abs/2606.00305) | Detect real reasoning forks with near-future OT divergence and distribute guidance over a short continuation window | Shows standard token-local OPD is an incomplete representative: roughly 30% of high-loss tokens are low-divergence false alarms, and trajectory-aware repair substantially improves OPD. | P0 |
+| 42 | [SGPO (2606.24064)](https://arxiv.org/abs/2606.24064) | Distill the distribution shift induced by a reusable strategy, with reachable-target selection, token KL clipping, adaptive pass-gap weighting, and autonomous GRPO | Expands the design space beyond full-trajectory proposal learning. The transferable object can be a strategy-level decision signal rather than surface reasoning text. | P0 |
+| 43 | [Distilled RL (2607.17247)](https://arxiv.org/abs/2607.17247) | Insert teacher/old-student importance weights into positive-advantage RL tokens, reset negative samples, and geometrically normalize each sequence | Teacher signal can be reward-conditional credit redistribution rather than an independent KL loss. It requires successful student samples, so it complements rather than replaces a zero-support bridge. | P0 |
+| 44 | [AOPD (2605.06387)](https://arxiv.org/abs/2605.06387) | Preserve positive reinforcement but replace ineffective non-positive updates with localized divergence minimization | Another example of state/advantage-local routing. It motivates comparing operators within a group rather than only as whole training phases. | P1 |
+| 45 | [DOPD (2606.30626)](https://arxiv.org/abs/2606.30626) | Route token supervision between privileged teacher and privileged student policies to separate capability transfer from privilege illusion | Warns that successful privileged proposals may depend on information unavailable at deployment; unaided fresh-rollout recovery must be a mandatory mediator. | P1 |
+| 46 | [Weak-to-Strong OPD (2607.26246)](https://arxiv.org/abs/2607.26246) | Construct a student-adjacent proxy teacher from positive/negative weak-model logit contrasts and run student-rollout RKL | Reframes the teacher as a local capability direction. This may be more scalable at the frontier than a globally stronger rollout teacher, but is a very recent preprint requiring reproduction. | P1 |
+
 ## TREK comparison: what must change in the project claim
 
 The paper named in discussion is **TREK**, not TERK.  Its central algorithm is
@@ -172,10 +193,14 @@ Teacher-Routed Exploration via Forward KL:
 - run one epoch of forward-KL/NLL consolidation;
 - return to ordinary GRPO.
 
-TREK already shows early-RL gains on math and agent tasks and directly compares
-against OPD, including an off-policy OPD control on the same teacher
-trajectories.  In its setting, forward-KL is stronger because it penalizes
-missing teacher mass, whereas OPD can only shape sampled student states.
+TREK already shows early-RL gains on math and agent tasks and directly reports
+an `OPD (self-context)` comparison.  In its setting, forward-KL is stronger
+because it penalizes missing teacher mass, whereas standard OPD shapes sampled
+student states.  The prose also says that off-policy OPD on the same teacher
+trajectories is weaker, but the public tables do not separately report that
+arm's objective, configuration, and result.  Treat the published evidence as a
+strong local comparison on low-pass prompts, not as a global direction-only
+proof that FKL dominates OPD across rollout occupancies and support states.
 
 Therefore do not claim:
 
@@ -201,7 +226,7 @@ baseline under the same prompt cohort and explicit budget ledger.
 
 ## A reading plan that builds a usable mental model
 
-Do not read 38 papers linearly.  Use four passes.
+Do not read 46 papers linearly.  Use four passes.
 
 ### Pass 1 — Build the coordinate system (half day)
 
@@ -212,7 +237,9 @@ Read the abstracts, main figure, objective, and central ablation of:
 3. Rethinking OPD;
 4. PACED;
 5. TREK;
-6. sparse-to-dense.
+6. TrOPD;
+7. BRTS;
+8. sparse-to-dense.
 
 For each, fill exactly six fields: sampling distribution, teacher information,
 loss direction, routing granularity, support assumption, downstream outcome.
@@ -221,7 +248,7 @@ same coordinate system.
 
 ### Pass 2 — Compare causal interventions (half day)
 
-Read ReGFT, SRPO, HAPO, KDRL, and Tsallis.  For each paper write:
+Read ReGFT, SRPO, HAPO, Distilled RL, SGPO, KDRL, and Tsallis.  For each paper write:
 
 - what variable is intervened on;
 - what is held fixed;
@@ -231,7 +258,7 @@ Read ReGFT, SRPO, HAPO, KDRL, and Tsallis.  For each paper write:
 
 ### Pass 3 — Learn teacher reliability (half day)
 
-Read TIP, Token Teachability, and Position-Weighted OPSD together.  Draw one
+Read TIP, Token Teachability, TOPD, and Position-Weighted OPSD together.  Draw one
 diagram from response-level state → prefix/token state → teacher correction.
 This prevents "teacher gap" from becoming an unexamined scalar.
 

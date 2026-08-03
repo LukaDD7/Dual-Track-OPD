@@ -7,6 +7,8 @@
 > TREK-like verified-FKL and FKL→OPD baselines.  Do not launch the old three-arm
 > pilot as the main study; it cannot distinguish the current claim from PACED,
 > TREK, SRPO, or the sparse-to-dense pipeline.
+> The detailed TREK algorithm, FKL/RKL boundary analysis, and 22-paper core
+> matrix are in `docs/trek_competitive_landscape_and_fkl_opd.md`.
 
 Status: implementation plan
 
