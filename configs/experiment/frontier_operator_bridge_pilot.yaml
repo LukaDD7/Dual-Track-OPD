@@ -1,0 +1,119 @@
+# Research contract for the support-conditioned bridge pilot.
+#
+# IMPORTANT: this file is intentionally protocol-only.  It is consumed by the
+# runbook/review process, not by the current verl launcher.  Claude Code must
+# implement and smoke-test each arm before changing status to executable.
+
+experiment:
+  name: frontier_operator_bridge_pilot
+  status: protocol_only_not_executable
+  objective: >
+    Compare which post-training operator moves prompts into a useful RL-group
+    frontier, then test whether that movement predicts early-RL efficiency.
+  source_diagnostic: support_aware_geometry3k_pilot
+
+support_estimation:
+  greedy_rollouts: 1
+  stochastic_rollouts: 8
+  stochastic_temperature: 0.7
+  stochastic_top_p: 0.95
+  greedy_role: deterministic_accuracy_diagnostic_only
+  posterior_prior: jeffreys_beta_0.5_0.5
+  rl_group_size: 8
+  useful_group_probability: 1-p^G-(1-p)^G
+  observed_strata:
+    no_correct_observed: c == 0
+    rare_success: 0 < c/K <= 0.25
+    mixed_support: 0.25 < c/K < 1
+    all_correct_observed: c == K
+  adaptive_confirmation:
+    enabled_for_bridge_selection: true
+    target_stochastic_rollouts: 32
+    reason: K=8 is adequate for screening but too coarse for stable boundary labels
+
+models:
+  student: ${DTOPD_MODEL_ROOT}/Qwen3-VL-4B-Instruct
+  teacher: ${DTOPD_MODEL_ROOT}/Qwen3-VL-32B-Instruct
+  shared_tokenizer_required: true
+
+bridge_arms:
+  - id: A_no_bridge
+    operator: none
+    purpose: cold_GRPO_control
+  - id: B_verified_fkl
+    operator: verified_teacher_proposal_forward_kl
+    proposal_count: 4
+    retain_count: 2
+    ranker: trimmed_length_normalized_student_nll
+    purpose: TREK_like_missing_support_baseline
+  - id: C_exact_token_opd
+    operator: student_rollout_exact_token_reverse_kl
+    teacher_condition: full
+    purpose: test_local_on_policy_correction
+  - id: D_fkl_then_opd
+    operator: verified_fkl_then_exact_token_opd
+    purpose: sparse_to_dense_and_PACED_schedule_baseline
+  - id: E_state_routed
+    operator_map:
+      no_correct_observed: verified_teacher_proposal_forward_kl
+      rare_success: exact_token_opd_if_teacher_rankable_else_verified_fkl
+      mixed_support: rl
+      all_correct_observed: skip
+    purpose: test_support_conditioned_operator_selection
+
+budget_contract:
+  bridge_optimizer_response_tokens: matched_across_B_C_D_E
+  bridge_optimizer_steps: matched_across_B_C_D_E
+  prompts_and_seed: identical_across_arms
+  record_separately:
+    - student_rollout_tokens
+    - teacher_proposal_tokens
+    - teacher_scored_tokens
+    - verifier_calls
+    - optimizer_response_tokens
+    - wall_clock_seconds
+    - gpu_hours_by_model
+  warning: >
+    Do not claim compute matching from equal optimizer steps alone; proposal
+    generation and teacher scoring have different costs.
+
+bridge_endpoint_evaluation:
+  fresh_stochastic_rollouts_per_prompt: 32
+  decoding:
+    temperature: 0.7
+    top_p: 0.95
+  required_outputs:
+    - prompt_support_summary.jsonl
+    - frontier_analysis/frontier_summary.json
+    - frontier_analysis/frontier_prompts.jsonl
+    - response_diversity_summary.json
+
+rl_phase:
+  algorithm: GRPO
+  group_size: 8
+  same_prompt_schedule_across_arms: true
+  primary_budget_axis: verifier_calls
+  secondary_budget_axes: [generated_tokens, wall_clock_seconds, optimizer_steps]
+  pilot_horizon_steps: 100
+  checkpoints: [0, 10, 25, 50, 100]
+  required_group_metrics:
+    - mixed_group_fraction
+    - all_zero_group_fraction
+    - all_one_group_fraction
+    - reward_std
+    - nonzero_advantage_token_count
+    - response_tokens
+    - policy_kl
+    - entropy
+
+primary_estimands:
+  - arm_by_prebridge_support_stratum_effect_on_delta_useful_group_probability
+  - arm_effect_on_early_RL_AUC_per_verifier_call
+  - prompt_level_delta_useful_group_probability_prediction_of_observed_mixed_groups
+
+reporting_constraints:
+  seeds_for_pilot: [42]
+  seeds_for_confirmatory_study: [42, 43, 44]
+  no_causal_mediation_claim_from_one_seed: true
+  predeclare_falsification_conditions: true
+  visual_analysis_role: optional_sanity_check_not_primary_RQ

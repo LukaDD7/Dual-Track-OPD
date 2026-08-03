@@ -1508,7 +1508,11 @@ def run_diagnostic(config: DiagnosticConfig) -> dict[str, Any]:
             prompt_rollout_hashes.append(generation.response_token_hash)
 
         # -- Phase B: Batch-score all responses ------------------------------------
-        # Teacher batch: one HTTP call for all 9 rollouts
+        # Teacher transport batch: one HTTP request for the 1 greedy + K
+        # stochastic rollouts.  The Transformers teacher backend intentionally
+        # scores requests sequentially inside that transport batch to preserve
+        # exact multimodal token alignment; this is not one B=1+K tensor
+        # forward.  See the experiment contract before changing this path.
         batch_size = len(batch_meta)
         batch_request_ids = [
             f"{sample_uid}:greedy" if m["is_greedy"] else f"{sample_uid}:rollout-{m['rollout_id']}"

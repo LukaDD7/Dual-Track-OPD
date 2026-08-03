@@ -1,5 +1,13 @@
 # Support-Aware SFT-RL-OPD Experiment Runbook
 
+> **Scope update (2026-08-03):** Step 1 remains the authoritative frozen-policy
+> diagnostic and is already running.  The old Step-2 comparison of RL-only,
+> uniform RKL, and support-gated RKL is superseded by
+> `docs/frontier_operator_causal_experiment.md`, which adds mandatory
+> TREK-like verified-FKL and FKL→OPD baselines.  Do not launch the old three-arm
+> pilot as the main study; it cannot distinguish the current claim from PACED,
+> TREK, SRPO, or the sparse-to-dense pipeline.
+
 Status: implementation plan
 
 Date: 2026-07-29
