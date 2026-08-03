@@ -131,3 +131,17 @@ def test_resume_disable_guard_allows_explicit_override(tmp_path: Path) -> None:
         }
     )
     assert res.returncode == 0, res.stdout + res.stderr
+
+
+def test_numeric_validation_rejects_mangled_env() -> None:
+    # 复现手滑把多个 env 挤成一坨（TRAIN_BATCH_SIZE=24PPO_MINI_BATCH_SIZE=24）
+    res = run_script(
+        {
+            "DRY_RUN": "1",
+            "TRAIN_BATCH_SIZE": "24PPO_MINI_BATCH_SIZE=24",
+            "PROJECT_NAME": "__unit_test__",
+            "ALLOW_EXISTING_RUN_DIR": "1",
+        }
+    )
+    assert res.returncode != 0
+    assert "FATAL: TRAIN_BATCH_SIZE" in res.stdout + res.stderr

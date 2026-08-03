@@ -103,6 +103,23 @@ EXPERIMENT_NAME="${EXPERIMENT_NAME:-${TEACHER_BASE}_to_${STUDENT_BASE}_${DISTILL
 
 MAX_NUM_TOKENS=$(( MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH + 1 ))
 
+# ---- 数值参数校验（防多个 env 被挤成一坨导致静默坏配置，如 TRAIN_BATCH_SIZE=24PPO_MINI_BATCH_SIZE=24）----
+for v in TRAIN_BATCH_SIZE PPO_MINI_BATCH_SIZE NGPUS_PER_NODE ROLLOUT_NUM_WORKERS ROLLOUT_N SAVE_FREQ TEST_FREQ; do
+  val="${!v}"
+  case "${val}" in
+    ''|*[!0-9-]*)
+      echo "FATAL: ${v} 必须为整数（当前值: '${val}'）。检查各 env 之间是否有空格。"
+      exit 1 ;;
+  esac
+done
+if [ -n "${TOTAL_TRAINING_STEPS}" ]; then
+  case "${TOTAL_TRAINING_STEPS}" in
+    *[!0-9]*)
+      echo "FATAL: TOTAL_TRAINING_STEPS 必须为非负整数（当前值: '${TOTAL_TRAINING_STEPS}'）。"
+      exit 1 ;;
+  esac
+fi
+
 # ---- 校验 ----
 for p in \
   "${STUDENT_MODEL}/config.json" \
