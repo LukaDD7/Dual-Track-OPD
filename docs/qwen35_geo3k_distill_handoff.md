@@ -29,7 +29,7 @@
 | grad_norm | 1.65 | 正常 |
 | rollout_probs_diff_mean | 0.0028（pearson 0.9997）| 学生紧跟 27B teacher |
 | rollout_corr/kl | 0.00032 | 分布对齐良好 |
-| reward / val acc | 0.0 | **预期内**：use_task_rewards=False |
+| reward / val acc | 0.0 | 见 §3：**任务奖励结构性为 0**（非仅因 use_task_rewards=False） |
 
 ### 2.3 产出
 
@@ -38,36 +38,79 @@
 - ⚠️ 每个 checkpoint ~51GB（FSDP+optimizer 全量），8 个共 407GB。**正式实验前先规划磁盘**：
   建议 `SAVE_FREQ=20` 或定期清理旧 step。
 
-## 3. 下一步（待卡空后跑）
+## 3. 关键诊断：为什么任务奖励一直是 0（2026-08-03）
 
-### 3.1 调整的变量（一次只改这一个）
+### 3.1 证据
 
-`USE_TASK_REWARDS=True` —— 打开蒸馏 loss 中的任务奖励项。其余全部不变（学生/老师/loss
-模式/batch/卡数）。
+- 正式实验 #1 的 79 步里 `critic/rewards/mean/max/min` 全部恒 0，val reward/acc 也恒 0；
+  但 `timing_s/agent_loop/compute_score` 每步都有真实耗时（0.03–4.1s），日志里
+  `RewardLoopWorker` 也在运行 → **奖励管线在算，只是结果恒 0**。
+- verl 实际加载的数据（`datasets.load_dataset("parquet", ...)`）里
+  `reward_model={'ground_truth': '3', 'style': 'rule'}`、`data_source='hiyouga/geometry3k'`
+  都正确；geo3k 奖励函数本地验证：`<think>…</think>…\boxed{3}` → 1.0，无 boxed → 0。
+- **根因**：rollout 用的是 `RLHFDataset`（启动日志 `Using dataset class: RLHFDataset`），
+  它读到的 prompt 是 parquet 里的原始题目（`<image>\nFind x.`），**没有
+  `Put the final answer in \boxed{}` 指令**。4B base 学生从不输出 `\boxed{}` → 每步奖励恒 0。
+  项目里写好的 `FCOPDDataset`（会注入 boxed 指令，见
+  `src/dual_track_opd/fc_opd/verl_dataset.py` + `prompt_contracts.py`）**没有被接线**——
+  verl 需要 `+data.custom_cls.path/name` 才会用它。
 
-### 3.2 命令
+### 3.2 结论
+
+原计划的「直接开 `USE_TASK_REWARDS=True`」在奖励恒 0 时是**无效实验**：GRPO 全 0 优势 →
+PPO 项恒 0，与 #1 数值上无差别。必须先让任务奖励**可达**。
+
+## 4. 下一步（实验 #2：修 prompt 接线，只改一个变量）
+
+### 4.1 调整的变量
+
+`USE_FCOP_DATASET=1` —— 换用 `FCOPDDataset`，prompt 注入
+`Put the final answer in \boxed{}`（学生/老师/loss 模式/batch/卡数/use_task_rewards 全不变）。
+
+### 4.2 命令
 
 ```bash
 FORMAL_GPUS=0,1,2,3 \
 NGPUS_PER_NODE=3 \
 TRAIN_BATCH_SIZE=24 \
 PPO_MINI_BATCH_SIZE=24 \
-USE_TASK_REWARDS=True \
+USE_FCOP_DATASET=1 \
+VALIDATION_DATA_DIR=/inspire/hdd/global_user/mengweicheng-240108120092/lzy/fc-opd-storage/logs/val_dump_k1_promptfix \
 bash /inspire/hdd/global_user/mengweicheng-240108120092/lzy/projects/Dual-Track-OPD/scripts/run_qwen35_formal.sh
 ```
 
-### 3.3 预期结果（对比 #1 判断依据）
+（`VALIDATION_DATA_DIR` 会在每次 test 时把 val 的 input/output/score/ground_truth dump 下来，
+直接看学生到底有没有输出 `\boxed{}`。）
 
-1. `critic/rewards/mean`、`critic/rewards/max` **从 0 变为有信号**；val 的
-   `hiyouga/geometry3k/reward/mean@1` 与 `acc/mean@1` 不再恒 0。
-2. `actor/distillation/loss` 量级/走势变化：任务奖励会与蒸馏项耦合，loss 可能升高或波动更大，
-   重点看 **grad_norm 是否稳定**、**reward 是否随训练上升**（期望：训练中 reward mean 上升）。
-3. `response_length` 行为可能改变：模型在奖励信号下倾向停止在更优长度（clip_ratio 可能从
-   0.958 下降）。
-4. 判断标准：reward 上升 + 学生仍紧跟 teacher（rollout_probs_diff 不大幅恶化）＝耦合成功；
-   reward 上升但 KL 爆炸/entropy 骤降＝需调 loss_max_clamp 或奖励权重。
+### 4.3 预期结果（对比 #1）
 
-### 3.4 后续实验线（每步一个变量）
+1. `critic/rewards/mean` **从 0 变正**（只要学生开始输出 `\boxed{}` 就有 ≥0.1 格式分，
+   答对给 1.0）。
+2. val dump 里能看到 `\boxed{...}` 出现；val acc 从 0 逐步上升。
+3. `actor/distillation/loss` 量级不变（任务奖励仍未参与训练，仅观测）。
+4. 判断标准：reward 变非 0 + 学生出现 boxed 输出 = 奖励可达，具备跑实验 #3 的条件；
+   若 20 步后 reward 仍恒 0 → 看 val dump 确认输出格式，再考虑放宽 geo3k format_reward
+   （该函数与诊断实验共享，改动需评估影响）。
+
+## 5. 再下一步（实验 #3：任务奖励生效）
+
+在实验 #2 配置基础上只改一个变量：
+
+```bash
+FORMAL_GPUS=0,1,2,3 \
+NGPUS_PER_NODE=3 \
+TRAIN_BATCH_SIZE=24 \
+PPO_MINI_BATCH_SIZE=24 \
+USE_FCOP_DATASET=1 \
+USE_TASK_REWARDS=True \
+VALIDATION_DATA_DIR=/inspire/hdd/global_user/mengweicheng-240108120092/lzy/fc-opd-storage/logs/val_dump_k1_reward \
+bash /inspire/hdd/global_user/mengweicheng-240108120092/lzy/projects/Dual-Track-OPD/scripts/run_qwen35_formal.sh
+```
+
+预期：`actor/pg_clipfrac`、`actor/pg_loss` 从 0 变非 0（任务奖励参与梯度）；reward 随训练
+上升；若 reward 升但 KL/entropy 恶化 → 调 `loss_max_clamp` 或 `distillation_loss_coef`。
+
+## 6. 后续实验线（每步一个变量）
 
 - `LOSS_MODE=k3` / `LOSS_MODE=forward_kl_topk`（同 use_task_rewards 配置下对比 loss 模式）
 - `STUDENT=/inspire/.../models/Qwen3.5-9B`（容量差 27B→9B）
@@ -75,7 +118,7 @@ bash /inspire/hdd/global_user/mengweicheng-240108120092/lzy/projects/Dual-Track-
   batch 改 48/72/96/144）
 - 卡空闲时恢复 8 卡：去掉 `FORMAL_GPUS`，`NGPUS_PER_NODE=7 TRAIN_BATCH_SIZE=56`
 
-## 4. 环境与资源约束（重要）
+## 7. 环境与资源约束（重要）
 
 - GPU 实例**同时跑多个实验**时，各实验必须用 `FORMAL_GPUS`/`CUDA_VISIBLE_DEVICES` 显式限卡，
   否则 Ray 会把 worker 排到被占的卡上（实测导致 vLLM `request_memory` 报
@@ -84,7 +127,7 @@ bash /inspire/hdd/global_user/mengweicheng-240108120092/lzy/projects/Dual-Track-
 - batch 硬约束：`TRAIN_BATCH_SIZE` 必须同时被 `NGPUS_PER_NODE` 和
   `ROLLOUT_NUM_WORKERS`(默认 8) 整除。
 
-## 5. 运行手册
+## 8. 运行手册
 
 - 一键正式实验：`bash scripts/run_qwen35_formal.sh`（含 teacher 预检 + GPU 占用检查 +
   batch 校验；`CLEAN_START=1` 可选清旧 Ray 集群）
@@ -94,7 +137,7 @@ bash /inspire/hdd/global_user/mengweicheng-240108120092/lzy/projects/Dual-Track-
 - 环境激活必设：`CUDA_HOME=cuda128-toolchain` + PATH/LIBRARY/LD_LIBRARY_PATH +
   `FLASHINFER_WORKSPACE_BASE` + `HF_HUB_OFFLINE=1`（见 environment_registry.md §10.3）
 
-## 6. 诊断经验（踩坑记录）
+## 9. 诊断经验（踩坑记录）
 
 1. **vLLM 日志默认写 stdout**，Ray 把它分流到 `worker-*.out`；调试 engine init 失败时
    `export VLLM_LOGGING_STREAM=ext://sys.stderr`，或同时看 `.err` 与 `.out`。
@@ -111,9 +154,11 @@ bash /inspire/hdd/global_user/mengweicheng-240108120092/lzy/projects/Dual-Track-
    torch 2.11.0+cu129 兼容）。
 7. 日志尾部 `DataLoader worker killed by signal` 是训练完成后 teardown 的无害噪音。
 
-## 7. 本次提交包含的改动
+## 10. 本次提交包含的改动
 
 - `scripts/run_qwen35_formal.sh`（新增）：正式实验入口（预检/校验/参数开关）
+  - `USE_FCOP_DATASET=1`：换 FCOPDDataset 注入 boxed 指令（新增）
+  - `VALIDATION_DATA_DIR=<dir>`：dump val 生成/得分（新增）
 - `scripts/run_qwen35_gpu_smoke.sh`（新增）：8 卡 smoke
 - `scripts/setup_qwen35_cu129.sh`（新增）：cu129 栈离线切换
 - `scripts/qwen35_vllm_preflight.py`（新增）：GPU 预检（支持 PREFLIGHT_* 覆盖）

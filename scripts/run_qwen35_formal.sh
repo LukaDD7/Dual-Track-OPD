@@ -8,6 +8,9 @@
 #   TEACHER=qwen3.6-35B-A3B            切换老师（默认 qwen3.6-27B；MoE 35B 需另配 TP/卡数，见下）
 #   LOSS_MODE=k3|forward_kl_topk       切换蒸馏 loss（默认 k1）
 #   USE_TASK_REWARDS=True              开启任务奖励项（默认 False，先跑稳）
+#   USE_FCOP_DATASET=1                 用 FCOPDDataset 注入 "\boxed{} 输出指令" prompt
+#                                      （默认 0 用 RLHFDataset = 实验1 原始 prompt；奖励可达性见 handoff）
+#   VALIDATION_DATA_DIR=<dir>          每个 test_freq 步把 val 生成/得分 dump 到该目录（默认不 dump）
 #   TOTAL_EPOCHS=2                     多跑几个 epoch（默认 1）
 #   TRAIN_BATCH_SIZE=112               放大 batch（默认 56；必须同时被 7 和 8 整除）
 #   CLEAN_START=1                      启动前 ray stop --force（默认 0；重复跑失败时建议开启）
@@ -77,6 +80,8 @@ USE_POLICY_GRADIENT=${USE_POLICY_GRADIENT:-True}
 USE_TASK_REWARDS=${USE_TASK_REWARDS:-False}
 DISTILLATION_TOPK=${DISTILLATION_TOPK:-64}
 PROJECT_NAME=${PROJECT_NAME:-verl_distill_qwen35}
+USE_FCOP_DATASET=${USE_FCOP_DATASET:-0}
+VALIDATION_DATA_DIR=${VALIDATION_DATA_DIR:-}
 
 TEACHER_BASE=$(basename "${TEACHER_MODEL}" | tr 'A-Z.' 'a-z_' | tr '-' '_')
 STUDENT_BASE=$(basename "${STUDENT_MODEL}" | tr 'A-Z.' 'a-z_' | tr '-' '_')
@@ -143,6 +148,22 @@ python3 "${SCRIPTS}/qwen35_vllm_preflight.py"
 # ---- verl 启动 ----
 cd "${DTOPD_ROOT}/repos/verl-cu130-vllm/examples/on_policy_distillation_trainer"
 
+EXTRA_ARGS=(+actor_rollout_ref.model.override_config.attn_implementation=sdpa)
+if [ "${USE_FCOP_DATASET}" = "1" ]; then
+  # 让 Ray worker 能 import dual_track_opd（FCOPDDataset 所在包）
+  export PYTHONPATH="${DTOPD_ROOT}/projects/Dual-Track-OPD/src:${PYTHONPATH:-}"
+  EXTRA_ARGS+=(data.custom_cls.path=pkg://dual_track_opd.fc_opd.verl_dataset)
+  EXTRA_ARGS+=(data.custom_cls.name=FCOPDDataset)
+  echo "== dataset=FCOPDDataset（注入 boxed 输出指令）=="
+else
+  echo "== dataset=RLHFDataset（原始 prompt，无 boxed 指令）=="
+fi
+if [ -n "${VALIDATION_DATA_DIR}" ]; then
+  mkdir -p "${VALIDATION_DATA_DIR}"
+  EXTRA_ARGS+=(trainer.validation_data_dir="${VALIDATION_DATA_DIR}")
+  echo "== val dump → ${VALIDATION_DATA_DIR} =="
+fi
+
 STUDENT_MODEL="${STUDENT_MODEL}" \
 TEACHER_MODEL="${TEACHER_MODEL}" \
 TRAIN_FILE="${TRAIN_FILE}" \
@@ -171,6 +192,6 @@ USE_TASK_REWARDS="${USE_TASK_REWARDS}" \
 DISTILLATION_TOPK="${DISTILLATION_TOPK}" \
 PROJECT_NAME="${PROJECT_NAME}" \
 EXPERIMENT_NAME="${EXPERIMENT_NAME}" \
-bash run_qwen3_5_4b_fsdp.sh +actor_rollout_ref.model.override_config.attn_implementation=sdpa
+bash run_qwen3_5_4b_fsdp.sh "${EXTRA_ARGS[@]}"
 
 echo "== DONE. checkpoint: ${DTOPD_ROOT}/repos/verl-cu130-vllm/examples/on_policy_distillation_trainer/checkpoints/${PROJECT_NAME}/${EXPERIMENT_NAME}/ =="
