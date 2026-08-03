@@ -146,7 +146,9 @@ if [ "${USE_FCOP_DATASET}" = "1" ]; then
   EXTRA_ARGS+=(data.custom_cls.name=FCOPDDataset)
 fi
 if [ -n "${VALIDATION_DATA_DIR}" ]; then
-  mkdir -p "${VALIDATION_DATA_DIR}"
+  if [ "${DRY_RUN}" != "1" ]; then
+    mkdir -p "${VALIDATION_DATA_DIR}"
+  fi
   EXTRA_ARGS+=(trainer.validation_data_dir="${VALIDATION_DATA_DIR}")
 fi
 EXTRA_ARGS+=(trainer.resume_mode="${RESUME_MODE}")
