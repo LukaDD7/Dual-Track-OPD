@@ -60,8 +60,8 @@ def test_default_experiment_name_has_task_dataset_rollout_semantics() -> None:
         }
     )
     assert res.returncode == 0, res.stdout + res.stderr
-    # USE_FCOP_DATASET defaults to 0 -> raw tag; USE_TASK_REWARDS defaults to False.
-    assert "qwen3_6_27b_to_qwen3_5_4b_k1_taskfalse_raw_n1" in res.stdout
+    # Defaults are raw prompt, task rewards off, rollout n=1, and the target v1 trainer.
+    assert "qwen3_6_27b_to_qwen3_5_4b_k1_taskfalse_raw_n1_v1" in res.stdout
 
 
 def test_exp2_composed_command_contains_required_overrides(tmp_path: Path) -> None:
@@ -76,8 +76,10 @@ def test_exp2_composed_command_contains_required_overrides(tmp_path: Path) -> No
         "data.custom_cls.name=FCOPDDataset",
         "trainer.resume_mode=disable",
         "trainer.val_before_train=True",
+        "trainer.use_v1=True",
         "trainer.total_training_steps=20",
         "actor_rollout_ref.rollout.n=1",
+        "hydra.run.dir=",
         f"trainer.validation_data_dir={env['VALIDATION_DATA_DIR']}",
         "qwen3_6_27b_to_qwen3_5_4b_k1_taskfalse_fcop_n1_promptfix_smoke",
     ):
@@ -96,6 +98,32 @@ def test_wrapper_forwards_cli_overrides_after_generated_args() -> None:
     )
     assert res.returncode == 0, res.stdout + res.stderr
     assert res.stdout.rstrip().endswith("trainer.test_freq=3")
+
+
+def test_wrapper_rejects_cli_override_that_would_desync_run_identity() -> None:
+    res = run_script(
+        {
+            "DRY_RUN": "1",
+            "PROJECT_NAME": "__unit_test__",
+        },
+        "trainer.use_v1=False",
+    )
+    assert res.returncode != 0
+    assert "由 wrapper 管理" in res.stdout + res.stderr
+
+
+def test_v0_override_is_explicit_in_default_name_and_hydra_args() -> None:
+    res = run_script(
+        {
+            "DRY_RUN": "1",
+            "TRAINER_USE_V1": "False",
+            "PROJECT_NAME": "__unit_test__",
+            "ALLOW_EXISTING_RUN_DIR": "1",
+        }
+    )
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert "qwen3_6_27b_to_qwen3_5_4b_k1_taskfalse_raw_n1_v0" in res.stdout
+    assert "trainer.use_v1=False" in res.stdout
 
 
 def test_resume_disable_guard_blocks_nonempty_checkpoint_dir(tmp_path: Path) -> None:
@@ -133,6 +161,41 @@ def test_resume_disable_guard_allows_explicit_override(tmp_path: Path) -> None:
     assert res.returncode == 0, res.stdout + res.stderr
 
 
+def test_resume_disable_guard_blocks_nonempty_validation_dir(tmp_path: Path) -> None:
+    validation = tmp_path / "validation"
+    validation.mkdir()
+    (validation / "0.jsonl").write_text("{}\n", encoding="utf-8")
+    res = run_script(
+        {
+            "DRY_RUN": "1",
+            "RESUME_MODE": "disable",
+            "VALIDATION_DATA_DIR": str(validation),
+            "RUN_METADATA_DIR": str(tmp_path / "metadata"),
+            "PROJECT_NAME": "__unit_test__",
+            "ALLOW_EXISTING_OUTPUT_DIR": "0",
+        }
+    )
+    assert res.returncode != 0
+    assert "validation 目录已有内容" in res.stdout + res.stderr
+
+
+def test_resume_disable_guard_blocks_nonempty_metadata_dir(tmp_path: Path) -> None:
+    metadata = tmp_path / "metadata"
+    metadata.mkdir()
+    (metadata / "run_manifest.json").write_text("{}\n", encoding="utf-8")
+    res = run_script(
+        {
+            "DRY_RUN": "1",
+            "RESUME_MODE": "disable",
+            "RUN_METADATA_DIR": str(metadata),
+            "PROJECT_NAME": "__unit_test__",
+            "ALLOW_EXISTING_OUTPUT_DIR": "0",
+        }
+    )
+    assert res.returncode != 0
+    assert "metadata 目录已有内容" in res.stdout + res.stderr
+
+
 def test_numeric_validation_rejects_mangled_env() -> None:
     # 复现手滑把多个 env 挤成一坨（TRAIN_BATCH_SIZE=24PPO_MINI_BATCH_SIZE=24）
     res = run_script(
@@ -145,3 +208,15 @@ def test_numeric_validation_rejects_mangled_env() -> None:
     )
     assert res.returncode != 0
     assert "FATAL: TRAIN_BATCH_SIZE" in res.stdout + res.stderr
+
+
+def test_boolean_validation_rejects_ambiguous_trainer_value() -> None:
+    res = run_script(
+        {
+            "DRY_RUN": "1",
+            "TRAINER_USE_V1": "maybe",
+            "PROJECT_NAME": "__unit_test__",
+        }
+    )
+    assert res.returncode != 0
+    assert "FATAL: TRAINER_USE_V1" in res.stdout + res.stderr

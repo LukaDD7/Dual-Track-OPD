@@ -4,6 +4,12 @@
 > `docs/qwen35_promptfix_review_for_claude.md`（commit 87225df）。本文 §4/§5 已按该
 > review 修正：实验 #2 改用唯一实验名 + `RESUME_MODE=disable`（防续跑 #1 checkpoint）、
 > 奖励分量按 0.9*acc + 0.1*format 口径、通过标准不要求 `pg_clipfrac` 非 0。
+>
+> ⚠️ 2026-08-03 smoke 后续：实验 #2/#3 已完成，但使用的是 v0 trainer，且训练 response
+> `clip_ratio=1.0`。下一步不要直接开长跑；按
+> `docs/qwen35_v1_truncation_next_steps_for_claude.md` 先完成 v1 对齐 smoke 和 4096-token
+> validation-only 截断消融。wrapper 现在默认 `TRAINER_USE_V1=True`，并将 trainer 版本写入
+> 实验名与 run manifest。
 
 ## 1. 现状一句话
 
