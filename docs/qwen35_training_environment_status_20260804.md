@@ -1,198 +1,95 @@
-# Dual-Track OPD current status: Qwen3.5 trainable environment and support diagnostics
+# Dual-Track OPD 当前状态：Qwen3.5 可训练环境与 support diagnostic
 
-> Status date: 2026-08-04
-> Authoritative for the current two workstreams.  Supersedes the causal length
-> interpretation in `qwen35_v1_truncation_smoke_results.md` and the proposed next
-> action in `qwen35_stepc_decision_request_for_codex.md`.
+> 状态日期：2026-08-04 ｜ 当前权威状态
+> D1/D1-L/D2 详细决策见 `qwen35_d1_d2_codex_decision_20260804.md`。
 
-## 1. Executive answer
+## 1. 总结
 
-Claude Code misidentified the core cause of the Step A/B/C truncation evidence.
-The measured clip rates are real, but all three measurements came from verl's
-**validation** sampler.  At pinned backend commit `334d9f8b`, validation defaults
-to greedy decoding:
+可训练环境的基础设施已经打通，D1/D2 也已经回答了 decoding contract 的主要问题：
 
-```yaml
-actor_rollout_ref.rollout.val_kwargs:
-  temperature: 0
-  top_p: 1.0
-  top_k: -1
-```
+- greedy 确实制造了严重重复，但不是全部截断的唯一原因；
+- sampled natural thinking 在 8192 仍有 83% 截断，质量收益不足，第一轮训练不采用；
+- `boxed_only + enable_thinking=False + sampled` 在 2048 将 clip 降到 28.5%，
+  accuracy 提到 9%，是当前训练候选；
+- 2048 尚未冻结，因为 `n=4` 下 28.5% 的 sequence clip 会大量污染 prompt group；
+  下一步 D3 只把 cap 提到 4096，之后立即进入不超过 20 步的 `n=4` smoke。
 
-Training rollout uses non-greedy sampling.  Qwen3.5's official model card warns
-that greedy decoding may cause endless repetition and recommends sampled
-decoding.  Therefore:
+当前准确表述：**train-capable，但尚未 long-run-ready。** 剩余 blocker 是先让新增的
+tokenizer-ID alignment preflight 在远端模型上通过，再选择最终 cap 并跑通 `n=4` 的
+短训练证据；不是 CUDA、Ray、FSDP、reward wiring 或 teacher template propagation。
 
-- `96% clip @2048` and `96% clip @4096` do **not** establish a training-rollout
-  clip probability;
-- they do not establish that natural longer reasoning is useless;
-- `answer_only` and hard non-thinking are not the next default intervention;
-- the missing experiment is natural thinking under non-greedy sampling.
+## 2. Track A：可训练 Qwen3.6 → Qwen3.5 OPD/GKD
 
-We currently do not know the sampled clip probability or sampled answer quality.
-Any numeric answer before Step D1/D1-L would be invented.
+### 已完成
 
-Official sources:
+1. cu129/Qwen3.5 环境已加载 student、teacher、vLLM rollout、Ray、FSDP 和在线
+   teacher scorer。
+2. 79-step K1 run 完成，loss/entropy/gradient 有限，checkpoint 可写。
+3. FCOP Geometry3K prompt 与 scorer 接线完成；20-step v1 smoke 中 3 个 batch 出现
+   正确样本和非零 task PG loss。
+4. manifest、resolved Hydra、repo/backend/dataset/model hashes、日志和 val dump 路径
+   已纳入运行记录。
+5. `n=4` 语义已确认：6 prompt rows × 4 rollouts = 24 sequences；
+   `PPO_MINI_BATCH_SIZE=6` 是 prompt 口径；8 workers 可整除 24。
+6. D1/D1-L/D2 已完成：
 
-- Qwen3.5 model card and sampling guidance:
-  https://huggingface.co/Qwen/Qwen3.5-4B
-- ModelScope Qwen3.5 GRPO/GKD practice (non-thinking fallback, 8192 completion):
-  https://github.com/modelscope/ms-swift/blob/main/docs/source_en/BestPractices/Qwen3_5-Best-Practice.md
-- Geometry3K RLinf recipe (sampled rollouts, 4096 response, length-stability fix):
-  https://rlinf.readthedocs.io/en/release-v0.3/rst_source/examples/agentic/qwen3_vl_geo3k.html
-- EasyR1 Geometry3K recipe (sampled training, 2048 response, clip metric):
-  https://github.com/hiyouga/EasyR1/blob/main/examples/config.yaml
+| arm | thinking | cap | clip | EOS | boxed | acc |
+|---|---|---:|---:|---:|---:|---:|
+| D1 | default, sampled | 2048 | 94.5% | 5.5% | 12.5% | 1.5% |
+| D1-L | default, sampled | 8192 | 83.0% | 17.0% | 24.5% | 2.5% |
+| D2 | disabled, sampled | 2048 | **28.5%** | **71.5%** | **71.5%** | **9.0%** |
 
-## 2. The two workstreams
+### teacher prefix 的最终判断
 
-### Track A — trainable Qwen3.6 -> Qwen3.5 OPD/GKD environment
+正式训练使用 pinned verl `334d9f8b` 的 agent/teacher loop。student rollout 得到的
+`prompt_ids + response_ids` 被原样传入 teacher 的 `generate(prompt_ids=...)` 计算
+prompt logprobs；teacher 不重新渲染 raw messages。因此 D2 的
+`enable_thinking=False` 前缀天然对两侧一致，`6a560b4` 提出的 teacher-side template
+传播不是正式 OPD 的 blocker。
 
-Objective: obtain a reproducible, genuinely on-policy training path with online
-teacher scoring, reachable task signal, controlled rollout length, and a valid
-`n>1` rollout configuration.
+但直接传 token IDs 要求 student/teacher 对每个 ID 的语义一致。文本渲染看起来一致
+并不能证明这一点；wrapper 现已增加 canonical ID-to-token mapping 的 fail-fast 审计，
+结果进入 `tokenizer_alignment.json` 和 run manifest。远端若不通过，必须先换成共享
+tokenizer 的模型组合，不能继续 D3/训练。
 
-Current state: **infrastructure works; sampling contract is the remaining gate.**
+项目内 standalone FC-OPD teacher service 的确会自行渲染 raw messages；它是另一条
+实现，后续如使用仍需单独贯通 `chat_template_kwargs`，但不要把它与正式 verl 路径混淆。
 
-Completed evidence:
+### 下一步顺序
 
-1. cu129/Qwen3.5 environment can load student, teacher, vLLM rollout, Ray, FSDP,
-   and the online teacher scorer.
-2. A 79-step qwen3.6-27B -> Qwen3.5-4B K1 run completed with finite loss, entropy,
-   gradients, and checkpoints.
-3. The FCOP dataset/prompt route is connected; validation receives the boxed
-   instruction and ground truth.
-4. The v1 20-step task-reward smoke completed.  Three batches contained correct
-   responses and produced nonzero task policy-gradient loss, proving the reward
-   reaches optimization.
-5. Run manifests, resolved Hydra config, dataset/model hashes, backend commit,
-   dirty diff, validation dumps, and logs are recorded outside Git.
-6. Pinned-backend `rollout.n` semantics are resolved.  For 24 effective sequences
-   at `n=4`, use 6 prompt rows and a six-prompt PPO mini-batch; eight rollout
-   workers are valid because 24 divides by 8.
+1. 在远端确认 tokenizer alignment preflight PASS；这是 D3/训练的共同前置条件。
+2. 跑 D3：
+   `scripts/hpc/run_qwen35_v1_boxedonly_nonthinking_sampled_r4096_valonly.sh`。
+3. D3 clip <=10% 且质量不降则选 4096；clip >20% 或无质量收益则选 2048，不再试
+   8192。10%–20% 按质量/token 效率决定。
+4. 用冻结 cap 跑 `n=4`、最多 20 步：6 prompt batch、6 prompt PPO mini-batch、
+   8 workers、3 actor GPUs，记录 group-level clip/EOS 与 exact teacher-token identity。
+5. smoke 通过后才冻结较长 seeded run；训练中仍须监测长度膨胀，D2/D3 不能替代
+   training-time stability evidence。
 
-Not yet established:
+## 3. Track B：support-aware frozen-policy diagnostic
 
-- sampled clip/EOS probability for the base student;
-- natural sampled response-length distribution;
-- sampled accuracy/boxed quality at 2048 versus a longer cap;
-- whether thinking should remain enabled for the first training run;
-- teacher/student rendered-prefix policy if hard non-thinking is promoted from
-  validation to training;
-- a clean `n=4`, <=20-step GPU smoke under the selected sampling contract.
+K=32 四片已完成，exact-token strict merge 有效，64 prompts / 2112 rows 无协议错误。
+但主统计 gate 未通过：
 
-Readiness statement: the environment is **train-capable but not yet experiment-
-ready for a long research run**.  The blocker is now an empirical decoding
-contract, not CUDA/Ray/FSDP or reward wiring.
+- teacher-gap within-prompt AUC 0.564（目标 >=0.60）；
+- correct-tail 11（目标 >=20）；
+- malformed 20.2%（目标 <=10%）；
+- truncation 23.6%（目标 <=15%）；
+- correct-tail rank@1 lift 为负。
 
-### Track B — support-aware frozen-policy diagnostic
+正信号只在短响应层：<=512 tokens 的 AUC 0.792，95% CI 0.625–0.932，但只有 7 个
+eligible prompts。K=8→K=32 stratum agreement 71.9%，RL-ready 从 18 调整到 27。
 
-Objective: determine whether teacher likelihood/support can identify useful rare
-student rollouts before allocating bridge or support-gated training arms.
+决策：**不启动五臂 bridge。** 冻结 K=32 frontier 的 27 个候选，先做独立、预注册的
+短响应确认/扩充短响应层；不得把整体主 gate 描述成通过。Track B 与 Track A 分开推进，
+不阻塞 D3 和 `n=4` trainability smoke。
 
-Current state: **diagnostic implementation is ready; K=32 confirmation remains a
-separate frozen-policy job.  It is not training progress.**
+## 4. 当前不做的事
 
-Completed evidence:
-
-1. K=8 full diagnostic covers 256 prompts and 2,304 exact-token scored responses.
-2. Exact generated/student/teacher token identity, prompt hashes, response masks,
-   EOS/truncation strata, resume, sharding, and strict merge checks are implemented.
-3. A deterministic 64-prompt K=32 confirmation cohort and four-shard execution
-   runbook are prepared; scoring is chunked to avoid 33-response padding/timeout
-   failures.
-
-Pending:
-
-- run the two-prompt K=32 smoke;
-- run and merge four 16-prompt K=32 shards;
-- report K=8 -> K=32 reclassification, posterior pass probability, RL-ready
-  prompt count, length/truncation strata, and exact-token protocol gates;
-- only after that decide whether a bridge/support-gated micro-training cohort is
-  scientifically justified.
-
-Track B must not consume Track A's conclusion: a support diagnostic can be valid
-while the formal Qwen3.5 training sampler is still undecided, and vice versa.
-
-## 3. Correct experiment for natural sampled length and quality
-
-Use the same ordered 200 Geometry3K validation prompts and the same
-`boxed_only` prompt throughout.
-
-| Gate | Thinking | Decoding | Cap | Question answered |
-|---|---|---|---:|---|
-| Step C (existing) | default | greedy | 2048 | Bad validation baseline; already 85.5% clipped |
-| D1 | default | `T=1.0, top_p=.95, top_k=-1` | 2048 | What is the actual current training-sampler clip/quality? |
-| D1-L | default | same as D1 | 8192 | Where does natural sampled reasoning finish, and does it improve answers? |
-| D2 (fallback) | disabled | same as D1 | 2048 | Is long thinking, rather than sampling, the remaining problem? |
-
-Why D1 uses `top_k=-1`: it reproduces the current training sampler exactly.  The
-Qwen3.5 model card recommends `top_k=20`; changing that is a later, separately
-named sampler ablation.  Do not mix it into the first greedy-versus-sampled test.
-
-### Required metrics
-
-For every arm, report both overall and paired-by-prompt comparisons:
-
-- finish reason (`eos/stop/length`) where available;
-- exact-cap clip proxy if finish reason is unavailable;
-- response length p50/p75/p90/p95/p99/max;
-- EOS rate, boxed rate, malformed rate, answer accuracy, reward mean/std;
-- accuracy split by naturally finished versus length-truncated;
-- repeated 4-gram fraction and longest repeated span;
-- generation wall time, generated tokens, and peak memory;
-- correct answers per 1,000 generated tokens as an efficiency diagnostic.
-
-Do not call a response "naturally complete" merely because it contains a box.
-Step C found boxes inside continued, usually wrong reasoning.  Completion requires
-EOS/stop or a response shorter than the cap with a valid final answer.
-
-### Decisions after measurement
-
-1. **D1 clip <=10%, quality non-decreasing:** keep thinking, cap 2048, and use
-   sampled validation for the first training smoke.
-2. **D1 clip >10%, D1-L naturally finishes >=90%:** choose the smallest cap above
-   D1-L's observed p95, rounded to a practical token boundary.  Accept the longer
-   cap only if accuracy/boxed quality improves enough to justify token cost.
-3. **D1-L clip >30%, strong repetition, or no quality gain:** reject blind
-   lengthening and run D2 hard non-thinking.
-4. **D2 improves termination but harms accuracy:** preserve thinking and treat
-   length/termination as a training-stability problem; do not adopt answer-only.
-5. Never add stop-on-first-box without a separate final-marker design: existing
-   evidence shows early boxes are often intermediate wrong answers.
-
-## 4. Track A next execution order
-
-1. Run D1: `scripts/hpc/run_qwen35_v1_boxedonly_sampled_valonly.sh`.
-2. If D1 clip is above 10%, run D1-L:
-   `scripts/hpc/run_qwen35_v1_boxedonly_sampled_r8192_valonly.sh`.
-3. Analyze paired quality/length and freeze the response cap in a versioned
-   decision record.
-4. Run D2 only if the natural sampled contract fails the rules above.
-5. Before any non-thinking training, dump student and teacher rendered prefixes
-   and explicitly align or document their template modes.
-6. Run `n=4` for at most 20 steps with:
-
-   ```text
-   TRAIN_BATCH_SIZE=6
-   PPO_MINI_BATCH_SIZE=6
-   ROLLOUT_N=4
-   ROLLOUT_NUM_WORKERS=8
-   NGPUS_PER_NODE=3
-   ```
-
-7. Require finite OPD loss/gradient, nonzero task signal on some groups, stable
-   entropy/KL, acceptable clip/repetition, correct six-prompt grouping, and no
-   OOM before any longer run.
-8. Only then freeze a first research configuration and launch a longer seeded
-   experiment.  Raw JSONL, model weights, and checkpoints remain outside Git.
-
-## 5. What is explicitly not decided
-
-- We do not yet know that sampled decoding fixes truncation; D1 measures it.
-- We do not yet know that 8192 improves quality; D1-L measures both quality and
-  token cost.
-- We do not assume Geometry3K itself causes this behavior.  Public Geometry3K
-  recipes use sampled decoding and different Qwen generations, so they are
-  supporting context, not an apples-to-apples result.
-- We do not promote `answer_only` to training.
-- We do not start Track B bridge training before K=32 confirmation.
+- 不把 natural thinking 8192 作为训练口径；
+- 不跑 answer-only 主线；
+- 不对正式 verl teacher 增加一次多余 chat-template 渲染；
+- 不以 stop-on-first-box 截断生成；
+- 不在 D3 和 `n=4` smoke 之前开长跑；
+- 不因 K=32 的短响应子组正信号直接启动 bridge training。

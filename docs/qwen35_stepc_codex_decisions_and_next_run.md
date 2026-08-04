@@ -3,6 +3,11 @@
 > Date: 2026-08-04 | Input: `docs/qwen35_stepc_decision_request_for_codex.md`
 > Backend semantics checked against verl commit `334d9f8b`.
 
+> **Outcome update:** D1/D1-L/D2 are complete.  Natural sampled thinking remained
+> 83% clipped even at 8192; native non-thinking reached 28.5% clip and 9% accuracy.
+> The current decision and corrected formal-teacher token path are in
+> `docs/qwen35_d1_d2_codex_decision_20260804.md`.
+
 ## Executive correction
 
 Do not treat the Step A/B/C clip rates as the training-rollout clip rate.  Those
@@ -149,10 +154,11 @@ both dataset rendering and the agent loop.  It also supports rollout/validation
 that before D1/D2.  A penalty-based sampler can alter the behavior policy and
 must be audited against recomputed log-prob semantics before use in OPD training.
 
-D2 is deliberately validation-only.  The external teacher service renders the
-raw messages with its own processor and currently does not receive the student's
-`data.apply_chat_template_kwargs`.  Before promoting non-thinking mode to a GKD/
-OPD training run, dump the student and teacher rendered prefixes and make an
-explicit choice: either propagate the same template mode when the teacher model
-supports it, or document that teacher-native conditioning is intentional.  Do
-not let that difference remain an unrecorded side effect.
+D2 is deliberately validation-only.  A later source audit corrected the earlier
+teacher-prefix concern: the formal pinned verl agent loop sends the student's
+exact `prompt_ids + response_ids` to the teacher vLLM `prompt_ids` interface, so
+the teacher does not independently render raw messages.  The real precondition
+is exact student/teacher token-ID semantic alignment; the Qwen35 wrapper now
+fails fast on canonical tokenizer mapping mismatch and records the audit.  The
+standalone FC-OPD teacher service is a separate raw-message-rendering path and
+must not be used to describe formal verl behavior.

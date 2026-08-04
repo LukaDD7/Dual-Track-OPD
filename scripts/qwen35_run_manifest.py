@@ -224,6 +224,9 @@ def _start(argv: list[str]) -> int:
             "student": _model(args.student_model),
             "teacher": _model(args.teacher_model),
         },
+        "tokenizer_alignment": _file(metadata_dir / "tokenizer_alignment.json")
+        if (metadata_dir / "tokenizer_alignment.json").is_file()
+        else None,
         "launch_config": {
             **_file(launch_config_path),
             "hydra_composed_config": None,

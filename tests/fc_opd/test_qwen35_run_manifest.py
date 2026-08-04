@@ -10,6 +10,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = REPO_ROOT / "scripts" / "qwen35_run_manifest.py"
+TOKENIZER_ALIGNMENT_SCRIPT = REPO_ROOT / "scripts" / "qwen35_tokenizer_alignment.py"
 WRAPPER = REPO_ROOT / "scripts" / "run_qwen35_formal.sh"
 
 
@@ -27,6 +28,10 @@ def _model(path: Path, architecture: str) -> None:
     path.mkdir()
     (path / "config.json").write_text(
         json.dumps({"model_type": "qwen3_vl", "architectures": [architecture]}) + "\n",
+        encoding="utf-8",
+    )
+    (path / "tokenizer.json").write_text(
+        json.dumps({"model": {"type": "BPE", "vocab": {"a": 0, "b": 1}}, "added_tokens": []}) + "\n",
         encoding="utf-8",
     )
 
@@ -164,6 +169,7 @@ echo 'TaskRunnerV1 stub completed'
     scripts = tmp_path / "scripts"
     scripts.mkdir()
     shutil.copy2(SCRIPT, scripts / SCRIPT.name)
+    shutil.copy2(TOKENIZER_ALIGNMENT_SCRIPT, scripts / TOKENIZER_ALIGNMENT_SCRIPT.name)
     (scripts / "qwen35_vllm_preflight.py").write_text("print('preflight stub: PASS')\n", encoding="utf-8")
 
     conda_sh = tmp_path / "conda.sh"
@@ -235,6 +241,9 @@ echo 'TaskRunnerV1 stub completed'
     assert manifest["launch_config"]["hydra_composed_config"] is not None
     assert manifest["launch_config"]["hydra_overrides"] is not None
     assert manifest["launch_config"]["train_log"] is not None
+    assert manifest["tokenizer_alignment"] is not None
+    tokenizer_alignment = json.loads((metadata / "tokenizer_alignment.json").read_text(encoding="utf-8"))
+    assert tokenizer_alignment["valid"] is True
     assert "TaskRunnerV1 stub completed" in (metadata / "train.log").read_text(encoding="utf-8")
     launch = json.loads((metadata / "resolved_launch_config.json").read_text(encoding="utf-8"))
     assert "trainer.use_v1=True" in launch["backend_argv"]

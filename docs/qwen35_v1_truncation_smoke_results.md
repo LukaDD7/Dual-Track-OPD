@@ -360,10 +360,9 @@ bash scripts/hpc/run_qwen35_v1_boxedonly_nonthinking_sampled_valonly.sh
    四条线里最低（rep4 0.187、最长重复跨度 15.7）。
 3. 仍未注入 `<think>`，format_rate 保持 0（Q4 已定：接受为已知限制，任务奖励
    开关前另立模型原生格式奖励）。
-4. **promote 到训练前的必做项（codex 边界要求）**：外部 teacher 服务用自己的
-   processor 渲染原始消息，不接收学生侧的 `apply_chat_template_kwargs`。训练前
-   需 dump 学生/teacher 渲染前缀并显式选择：要么把相同模板模式传给支持它的
-   teacher，要么记录"teacher-native conditioning 是有意为之"。
+4. **训练前仍需做 D3 cap gate**：D2 的方向已通过，但 28.5% sequence clip 对
+   `n=4` 仍偏高；下一步固定 D2 其余变量，只把 cap 改为 4096。详见
+   `docs/qwen35_d1_d2_codex_decision_20260804.md`。
 
 ## 11. 学生/teacher 渲染前缀对照（enable_thinking 决策证据）
 
@@ -376,16 +375,19 @@ bash scripts/hpc/run_qwen35_v1_boxedonly_nonthinking_sampled_valonly.sh
 | student Qwen3.5-4B | `…<\|im_end\|>\n<\|im_start\|>assistant\n<think>\n` | `…<\|im_end\|>\n<\|im_start\|>assistant\n<think>\n\n</think>\n\n` |
 | teacher qwen3.6-27B | `…<\|im_end\|>\n<\|im_start\|>assistant\n<think>\n` | `…<\|im_end\|>\n<\|im_start\|>assistant\n<think>\n\n</think>\n\n` |
 
-结论：
+结论（模板观察有效；正式训练链路解释已被后续 source audit 纠正）：
 
 1. **两个模型的 chat template 都支持 `enable_thinking` 且行为完全一致**：
    默认渲染 `<think>\n` 头；`enable_thinking=False` 渲染空的
    `<think>\n\n</think>\n\n` 块，随后生成可见输出（D2 dump 的生成里无 think
    标签，验证一致）。
-2. **当前管线 mismatch 是真实且可避免的**：teacher 服务用自己的 processor
-   渲染、不接收学生侧的 `apply_chat_template_kwargs`，因此非思考训练时
-   teacher 前缀仍带 `<think>\n` 头，与学生侧（空 think 块）不一致。
-3. **推荐（待 codex 确认）**：把 `enable_thinking=False` 同步传给 teacher
-   渲染，使两侧前缀一致（蒸馏口径更干净）；teacher 模板已证明支持该参数。
-   若选择不传播，则把"teacher-native thinking conditioning 有意保留"写入
-   manifest/runbook。
+2. **正式 pinned verl OPD 不存在上述 mismatch**：`AgentLoopWorker` 把学生的
+   `prompt_ids + response_ids` 原样作为 `sequence_ids` 交给 teacher；teacher manager
+   再调用 `client.generate(prompt_ids=sequence_ids, ...)` 计算 prompt logprobs，不会
+   从 raw messages 独立重渲染。因此学生的空 think block 已在 teacher 输入序列中。
+3. **不要给正式训练链路新增 teacher-side template propagation**。项目内 standalone
+   FC-OPD teacher service 会自己渲染 raw messages，那条路径若启用仍需单独贯通
+   `chat_template_kwargs`；它不是当前 `scripts/run_qwen35_formal.sh` 的阻塞项。
+4. 直接传学生 token IDs 的真实前置条件是两边 canonical token-ID mapping 完全一致；
+   文本前缀相同不能证明 token 对齐。wrapper 已新增 fail-fast tokenizer alignment
+   preflight，D3/训练必须先通过。

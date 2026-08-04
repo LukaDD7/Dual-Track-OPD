@@ -283,6 +283,7 @@ for p in \
   "${VAL_FILE}" \
   "${CONDA_SH}" \
   "${SCRIPTS}/qwen35_vllm_preflight.py" \
+  "${SCRIPTS}/qwen35_tokenizer_alignment.py" \
   "${SCRIPTS}/qwen35_run_manifest.py" \
   "${BACKEND_RUN_DIR}/run_qwen3_5_4b_fsdp.sh"; do
   [ -f "${p}" ] || { echo "FATAL: missing ${p}"; exit 1; }
@@ -303,6 +304,13 @@ conda activate "${ENV_PREFIX}"
 
 mkdir -p "${RUN_METADATA_DIR}"
 if [ -n "${VALIDATION_DATA_DIR}" ]; then mkdir -p "${VALIDATION_DATA_DIR}"; fi
+
+# The pinned teacher receives student-produced token IDs directly.  A shared
+# ID-to-token mapping is therefore a semantic requirement, not just metadata.
+python3 "${SCRIPTS}/qwen35_tokenizer_alignment.py" \
+  --student-model "${STUDENT_MODEL}" \
+  --teacher-model "${TEACHER_MODEL}" \
+  --output "${RUN_METADATA_DIR}/tokenizer_alignment.json"
 
 LAUNCHER_ARGS_JSON=$(python3 -c 'import json, sys; print(json.dumps(sys.argv[1:]))' "$@")
 MANIFEST_CONFIG=(
