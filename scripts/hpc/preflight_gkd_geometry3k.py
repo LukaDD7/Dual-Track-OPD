@@ -108,7 +108,7 @@ def main() -> None:
     parser.add_argument("--val-data", type=Path, required=True)
     parser.add_argument("--student-model", type=Path, required=True)
     parser.add_argument("--teacher-model", type=Path, required=True)
-    parser.add_argument("--objective", choices=("gkd", "va_opd", "va_opd_jsd"), required=True)
+    parser.add_argument("--objective", choices=("gkd", "reverse", "va_opd", "va_opd_jsd"), required=True)
     parser.add_argument("--teacher-gpu", type=int, required=True)
     parser.add_argument("--train-gpus", required=True)
     parser.add_argument("--steps", type=int, required=True)
@@ -202,7 +202,7 @@ def main() -> None:
         "rollout_n": args.rollout_n,
         "top_k": args.top_k,
         "env_path": str(args.env_path.resolve()),
-        "conditions": ["full"] if args.objective == "gkd" else ["full", "degraded"],
+        "conditions": ["full"] if args.objective in ("gkd", "reverse") else ["full", "degraded"],
         "max_prompt_length": args.max_prompt_length,
         "max_response_length": args.max_response_length,
         "gpu_memory_utilization": args.gpu_memory_utilization,

@@ -8,6 +8,7 @@ import json
 import os
 import re
 import shlex
+import signal
 import subprocess
 import sys
 import urllib.error
@@ -18,6 +19,19 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 import yaml
+
+# ---------------------------------------------------------------------------
+# Per-process signal flag – set by the SIGTERM/SIGINT handler so the main
+# loop can interrupt gracefully after the current benchmark finishes.
+# ---------------------------------------------------------------------------
+_interrupted = False
+
+
+def _handle_interrupt(signum: int, _frame: Any) -> None:
+    global _interrupted
+    _interrupted = True
+    # Re-install default handler so a second signal kills hard.
+    signal.signal(signum, signal.SIG_DFL)
 
 
 _ENV_DEFAULT_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)[:-]-(.*?)\}")
@@ -299,10 +313,17 @@ def _check_openai_endpoint(api_base: str, api_key: str) -> None:
         ) from exc
 
 
-def _print_plan(rows: Sequence[tuple[BenchmarkSpec, list[str] | None]], judge_policy: str) -> None:
+def _print_plan(
+    rows: Sequence[tuple[BenchmarkSpec, list[str] | None]],
+    judge_policy: str,
+    skip_ids: set[str] | None = None,
+) -> None:
+    skip_ids = skip_ids or set()
     print("id\tcategory\ttier\tscoring\tstatus")
     for spec, command in rows:
-        if command is None:
+        if spec.benchmark_id in skip_ids:
+            status = "skipped:resume"
+        elif command is None:
             if spec.judge_required and judge_policy == "defer":
                 status = "deferred:judge"
             else:
@@ -321,16 +342,50 @@ def _print_plan(rows: Sequence[tuple[BenchmarkSpec, list[str] | None]], judge_po
             print(f"\n# {spec.contract_name}\n{shlex.join(command)}")
 
 
+def _save_manifest(manifest_path: Path, manifest: dict[str, Any]) -> None:
+    """Atomically write the run manifest so crashes never produce a partial file."""
+    tmp = manifest_path.with_suffix(manifest_path.suffix + ".tmp")
+    tmp.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(manifest_path)
+
+
 def run_suite(args: argparse.Namespace) -> int:
+    global _interrupted
+
     suite = load_suite(args.config)
     explicit = [part for value in args.benchmarks for part in value.split(",") if part]
     specs = select_benchmarks(suite, args.profile, explicit or None)
     checkpoint = str(Path(args.checkpoint or suite.defaults["checkpoint"]).expanduser())
     api_base = str(args.api_base or suite.defaults["api_base"])
     timestamp = datetime.now().astimezone().strftime("%Y%m%d_%H%M%S_%z")
-    run_name = args.run_name or f"{args.profile}_{timestamp}"
-    output_root = Path(args.output_root or suite.defaults["output_root"]).expanduser()
-    run_dir = output_root / run_name
+
+    # ---- resume logic ---------------------------------------------------
+    existing_manifest: dict[str, Any] | None = None
+    completed_ids: set[str] = set()
+    if args.resume_from:
+        resume_path = Path(args.resume_from).expanduser()
+        if not resume_path.is_dir():
+            raise FileNotFoundError(f"resume run directory not found: {resume_path}")
+        manifest_candidate = resume_path / "run_manifest.json"
+        if not manifest_candidate.is_file():
+            raise FileNotFoundError(f"manifest not found in resume directory: {manifest_candidate}")
+        existing_manifest = json.loads(manifest_candidate.read_text(encoding="utf-8"))
+        for run_rec in existing_manifest.get("runs", []):
+            if run_rec.get("status") == "completed":
+                completed_ids.add(run_rec["benchmark_id"])
+        if completed_ids:
+            print(f"[resume] {len(completed_ids)} benchmark(s) already completed: {sorted(completed_ids)}")
+
+        # Re-use the existing run directory so cache and intermediate outputs
+        # are picked up automatically.
+        run_dir = resume_path
+        run_name = existing_manifest.get("run_name", run_dir.name)
+        output_root = run_dir.parent
+    else:
+        run_name = args.run_name or f"{args.profile}_{timestamp}"
+        output_root = Path(args.output_root or suite.defaults["output_root"]).expanduser()
+        run_dir = output_root / run_name
+
     rows = [
         (
             spec,
@@ -348,48 +403,81 @@ def run_suite(args: argparse.Namespace) -> int:
         )
         for spec in specs
     ]
-    _print_plan(rows, args.judge_policy)
+    _print_plan(rows, args.judge_policy, completed_ids)
     if not args.execute:
         return 0
 
     if args.inference_backend == "vllm" and not Path(checkpoint).is_dir():
         raise FileNotFoundError(f"Vision-OPD checkpoint not found: {checkpoint}")
-    if args.inference_backend == "openai":
+
+    # Only check the endpoint if there are actually benchmarks to run.
+    pending = [
+        (spec, cmd) for spec, cmd in rows
+        if cmd is not None and spec.benchmark_id not in completed_ids
+    ]
+    if pending and args.inference_backend == "openai":
         _check_openai_endpoint(api_base, str(suite.defaults.get("api_key", "EMPTY")))
     for spec, command in rows:
-        if command is not None and spec.runner == "replay_openai":
+        if command is not None and spec.runner == "replay_openai" and spec.benchmark_id not in completed_ids:
             source = Path(str(suite.defaults["prior_raw_root"])) / str(spec.source_file)
             if not source.is_file():
                 raise FileNotFoundError(f"prior raw replay source not found: {source}")
             dataset_root = Path(str(suite.defaults["dataset_root"]))
             if not dataset_root.is_dir():
                 raise FileNotFoundError(f"dataset root not found: {dataset_root}")
-    run_dir.mkdir(parents=True, exist_ok=False)
-    repo_root = Path(__file__).resolve().parents[3]
-    manifest: dict[str, Any] = {
-        "suite": suite.raw.get("suite", {}),
-        "profile": args.profile,
-        "run_name": run_name,
-        "started_at": datetime.now().astimezone().isoformat(),
-        "repo": _git_state(repo_root),
-        "backend": suite.backend,
-        "resolved_config": suite.raw,
-        "dataset_manifest_hash": _dataset_manifest_hash(specs, suite.backend),
-        "dataset_manifest_kind": "logical_task_registry",
-        "checkpoint_path": checkpoint,
-        "raw_output_path": str(run_dir),
-        "inference_backend": args.inference_backend,
-        "api_base": api_base,
-        "judge_policy": args.judge_policy,
-        "runs": [],
-        "notes": "Raw outputs remain outside Git; judge-dependent metrics are explicitly classified.",
-    }
+
+    # ---- new run or resume ----------------------------------------------
+    if existing_manifest is None:
+        run_dir.mkdir(parents=True, exist_ok=False)
+        repo_root = Path(__file__).resolve().parents[3]
+        manifest: dict[str, Any] = {
+            "suite": suite.raw.get("suite", {}),
+            "profile": args.profile,
+            "run_name": run_name,
+            "started_at": datetime.now().astimezone().isoformat(),
+            "repo": _git_state(repo_root),
+            "backend": suite.backend,
+            "resolved_config": suite.raw,
+            "dataset_manifest_hash": _dataset_manifest_hash(specs, suite.backend),
+            "dataset_manifest_kind": "logical_task_registry",
+            "checkpoint_path": checkpoint,
+            "raw_output_path": str(run_dir),
+            "inference_backend": args.inference_backend,
+            "api_base": api_base,
+            "judge_policy": args.judge_policy,
+            "runs": [],
+            "notes": "Raw outputs remain outside Git; judge-dependent metrics are explicitly classified.",
+        }
+    else:
+        manifest = existing_manifest
+        manifest.setdefault("notes", "")
+        manifest["notes"] += (
+            f" Resumed at {datetime.now().astimezone().isoformat()}; "
+            f"{len(completed_ids)} benchmarks already complete."
+        )
+
     manifest_path = run_dir / "run_manifest.json"
-    manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
+    _save_manifest(manifest_path, manifest)
+
+    # ---- signal handling ------------------------------------------------
+    # Install handlers so the run can be interrupted gracefully.
+    # After the current benchmark finishes the loop exits and the manifest
+    # is flushed – no partial state is lost (cache preserves LM responses).
+    signal.signal(signal.SIGTERM, _handle_interrupt)
+    signal.signal(signal.SIGINT, _handle_interrupt)
 
     env = _judge_environment() if args.judge_policy == "score" else os.environ.copy()
     overall_rc = 0
     for spec, command in rows:
+        if _interrupted:
+            print(f"\n[interrupted] stopping before {spec.contract_name}", flush=True)
+            break
+
+        # ---- skip already-completed benchmarks on resume ----------------
+        if spec.benchmark_id in completed_ids:
+            print(f"\n[skip] {spec.contract_name} (already completed in prior run)", flush=True)
+            continue
+
         record: dict[str, Any] = {
             "benchmark_id": spec.benchmark_id,
             "contract_name": spec.contract_name,
@@ -405,26 +493,31 @@ def run_suite(args: argparse.Namespace) -> int:
                 "judge required" if spec.judge_required else "OpenAI-compatible endpoint required"
             )
         else:
+            # ---- deterministic cache run-id  ---------------------------
+            # Use a stable cache key so that the same benchmark re-using
+            # the same --use_cache directory will hit previous responses.
+            run_env = env.copy()
+            run_env["LMMS_CACHE_RUN_ID"] = f"{manifest['run_name']}__{spec.benchmark_id}"
+
             print(f"\n[run] {spec.contract_name}", flush=True)
-            completed = subprocess.run(command, check=False, env=env)
+            completed = subprocess.run(command, check=False, env=run_env)
             record["returncode"] = completed.returncode
             record["status"] = "completed" if completed.returncode == 0 else "failed"
             if completed.returncode != 0:
                 overall_rc = completed.returncode
                 if not args.keep_going:
                     manifest["runs"].append(record)
-                    manifest_path.write_text(
-                        json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8"
-                    )
+                    _save_manifest(manifest_path, manifest)
                     break
         manifest["runs"].append(record)
-        manifest_path.write_text(
-            json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8"
-        )
+        _save_manifest(manifest_path, manifest)
 
     manifest["finished_at"] = datetime.now().astimezone().isoformat()
     manifest["returncode"] = overall_rc
-    manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
+    _save_manifest(manifest_path, manifest)
+
+    if _interrupted:
+        print("[interrupted] manifest saved — re-run with --resume-from to continue.", flush=True)
     return overall_rc
 
 
@@ -447,6 +540,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--limit", type=float)
     parser.add_argument("--execute", action="store_true")
     parser.add_argument("--keep-going", action="store_true")
+    parser.add_argument("--resume-from", help="Resume from a previous run directory (skip completed benchmarks).")
     return parser
 
 

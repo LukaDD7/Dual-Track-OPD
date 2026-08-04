@@ -51,7 +51,7 @@ usage() {
     cat <<'EOF'
 Usage: bash scripts/hpc/run_gkd_geometry3k_qwen3vl.sh [options]
 
-  --objective gkd|va_opd|va_opd_jsd  Pure actor objective (default: gkd)
+  --objective gkd|va_opd|va_opd_jsd|reverse  Pure actor objective (default: gkd)
   --steps N                           Optimizer updates (default: 10)
   --teacher-gpu N                     Teacher physical GPU (default: 0)
   --train-gpus LIST                   Training physical GPUs (default: 1,2,3,4)
@@ -102,7 +102,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 case "${OBJECTIVE}" in
-    gkd) CONDITIONS="[full]" ;;
+    gkd|reverse) CONDITIONS="[full]" ;;
     va_opd|va_opd_jsd) CONDITIONS="[full,degraded]"
         if ! ${ROLLOUT_N_EXPLICIT}; then ROLLOUT_N=4; fi
         ;;
@@ -300,7 +300,11 @@ PPO_MINI_BATCH_SIZE=$((TRAIN_BATCH_SIZE * ROLLOUT_N))
 REWARD_FN="file://${REPO_ROOT}/src/dual_track_opd/fc_opd/smoke_reward.py"
 VERL_CONFIG_DIR="${BACKEND_DIR}/verl/trainer/config"
 export RAY_memory_usage_threshold=0.95
-export NCCL_NVLS_ENABLE=1
+# NCCL 2.27.x has a known NVLS silent-fallback hang bug on H200 NVSwitch fabrics.
+# NVLS resource allocation can fail silently, causing allreduce to deadlock
+# (typically at step 25-27, no timeout, no crash).  Disabling NVLS forces a
+# safe Ring/Tree fallback.  Permanent fix: upgrade NCCL past 2.27.3.
+export NCCL_NVLS_ENABLE=0
 export NCCL_IBEXT_DISABLE=1
 export NCCL_BUFFSIZE=4194304
 export NCCL_TIMEOUT=1800

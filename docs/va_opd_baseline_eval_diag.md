@@ -200,50 +200,60 @@ Key files:
   conda install -c conda-forge gcc=14 -y -p .../vision-opd-cu128
   ```
 
-### Issue 11: vLLM 500 — FlashInfer linking fails: cannot find -lcuda (CURRENT)
+### Issue 11: vLLM 500 — FlashInfer JIT linking fails on fresh GPU instances (FIXED 2026-07-27)
 
-- **Symptom**: After fixing gcc, FlashInfer JIT compiles `.cu → .cuda.o` successfully, but **linking** the `.so` fails
-- **Error**:
-  ```
-  x86_64-conda-linux-gnu-c++ ... -L.../cuda128-toolchain/lib64 \
-    -L.../cuda128-toolchain/lib64/stubs -lcudart -lcuda \
-    -o .../gdn_prefill_sm90.so
-  
-  .../bin/ld: cannot find -lcuda: No such file or directory
-  collect2: error: ld returned 1 exit status
-  ```
-- **Root cause**: Conda cuda128-toolchain has a **non-standard directory layout** vs what FlashInfer expects:
+- **Symptom**: On a **fresh GPU instance** (no prior `/root/.cache/flashinfer/`), or after a failed build, FlashInfer JIT compiles `.cu → .cuda.o` but **linking** the `.so` fails with `cannot find -lcudart` or `cannot find -lcuda`.
+- **Two distinct failure modes**:
 
-  | FlashInfer expects | Conda cuda128-toolchain has |
+  **Mode A: CUDA_HOME not set → nvcc not found**
+  ```
+  RuntimeError: Could not find nvcc and default cuda_home='/usr/local/cuda' doesn't exist
+  ```
+  Fix: `export CUDA_HOME=.../cuda128-toolchain`
+
+  **Mode B: CUDA_HOME set, but conda GCC linker ignores `-L` flags**
+  ```
+  .../bin/ld: cannot find -lcudart: No such file or directory
+  ```
+  FlashInfer passes `-L$CUDA_HOME/lib64 -L$CUDA_HOME/lib64/stubs -lcudart -lcuda`, and the compat symlinks (`lib64/libcudart.so` → `targets/...`) exist, but the **conda GCC 14.3.0** linker (`x86_64-conda-linux-gnu-c++`) uses a sysroot model that ignores `-L` flags. It only searches `LIBRARY_PATH`.
+
+- **Root cause chain**:
+  1. Vision-OPD checkpoint has `model_type: qwen3_5` → vLLM 0.18.0 maps to `qwen3_next.py`
+  2. Qwen3-Next uses GDN (Gated Delta Net) attention → flashinfer calls `chunk_gated_delta_rule_fi()`
+  3. First inference triggers SM90 GDN prefill kernel JIT via ninja
+  4. Conda GCC 14.3.0 linker ignores `-L` flags → `-lcudart` / `-lcuda` unresolved
+  5. EngineCore dies → vLLM returns HTTP 500 → eval gets `Connection error`
+
+- **Fix** (4 env vars, all required):
+  ```bash
+  export CUDA_HOME=/inspire/hdd/global_user/mengweicheng-240108120092/lzy/envs/cuda128-toolchain
+  export PATH="${CUDA_HOME}/bin:${PATH}"
+  export LIBRARY_PATH="${CUDA_HOME}/lib64:${CUDA_HOME}/lib64/stubs:${CUDA_HOME}/lib:${CUDA_HOME}/targets/x86_64-linux/lib:${LIBRARY_PATH}"
+  export LD_LIBRARY_PATH="${CUDA_HOME}/lib:${CUDA_HOME}/targets/x86_64-linux/lib:${LD_LIBRARY_PATH}"
+  ```
+
+  | Variable | Why |
   |---|---|
-  | `$CUDA_HOME/bin/nvcc` ✓ | `bin/nvcc` ✓ |
-  | `$CUDA_HOME/lib64/stubs/libcuda.so` | `targets/x86_64-linux/lib/stubs/libcuda.so` |
-  | `$CUDA_HOME/lib64/libcudart.so` | `targets/x86_64-linux/lib/libcudart.so` |
+  | `CUDA_HOME` | flashinfer `get_cuda_path()` reads this first (P0 for finding nvcc) |
+  | `PATH` | Belt-and-suspenders: flashinfer fallback tries `which nvcc` |
+  | `LIBRARY_PATH` | **The key fix**: conda GCC linker ignores `-L`; searches `LIBRARY_PATH` for `-lcudart` / `-lcuda` |
+  | `LD_LIBRARY_PATH` | Compiled `.so` finds `libcudart.so.*` at dlopen time |
 
-  - `get_cuda_path()` derives `CUDA_HOME = dirname(dirname(which nvcc))` = `cuda128-toolchain/`
-  - FlashInfer hardcodes `-L$CUDA_HOME/lib64 -L$CUDA_HOME/lib64/stubs` 
-  - But `cuda128-toolchain/lib64/` **doesn't exist** — the real libs are under `targets/x86_64-linux/lib/`
+  Also clean any stale JIT cache: `rm -rf ~/.cache/flashinfer/0.6.6/90a/cached_ops/`
 
-- **FlashInfer's `get_cuda_path()` logic** (`flashinfer/jit/cpp_ext.py:48-64`):
-  1. Read `CUDA_HOME` or `CUDA_PATH` env var → return if set
-  2. Try `which nvcc` → derive CUDA_HOME from nvcc path
-  3. Fall back to `/usr/local/cuda` → check if exists
-- **Current state**: We set PATH to include nvcc (step 2 works), but step 2 derives the wrong layout prefix.
-- **Options**:
-  1. Set `CUDA_HOME` to `cuda128-toolchain/targets/x86_64-linux` — but then FlashInfer looks for `lib64/stubs/libcuda.so` not `lib/stubs/libcuda.so` (still wrong)
-  2. Create symlinks in `cuda128-toolchain/`:
-     ```bash
-     mkdir -p cuda128-toolchain/lib64/stubs
-     ln -sf ../../targets/x86_64-linux/lib/stubs/libcuda.so cuda128-toolchain/lib64/stubs/libcuda.so
-     ln -sf ../../targets/x86_64-linux/lib/libcudart.so cuda128-toolchain/lib64/libcudart.so
-     ```
-  3. Use the **system CUDA** on the GPU node (NVIDIA driver provides `/usr/local/cuda` or similar with standard layout) — set `CUDA_HOME` to the system CUDA path
-  4. Install FlashInfer from pre-built wheels (skip JIT entirely)
+- **Why `LIBRARY_PATH` is the critical fix**: The cuda128-toolchain **does** have the compat symlinks (`lib64/libcudart.so` → `targets/x86_64-linux/lib/libcudart.so`), so the `-L` path is technically correct. However, conda GCC (`x86_64-conda-linux-gnu-c++`) is built with a `--with-sysroot` that constrains library search. Unlike system GCC, conda GCC ignores `-L` for libraries outside its sysroot. `LIBRARY_PATH` bypasses this restriction because the linker reads it before applying sysroot filtering.
+
+- **Design decision**: We use the **managed cuda128-toolchain** rather than the system CUDA because:
+  1. GPU instances may not have `/usr/local/cuda` at all (this instance didn't)
+  2. The toolchain is guaranteed CUDA 12.8, matching torch's bundled CUDA
+  3. It already exists on NFS from the CPU-side environment build and needs no per-instance setup
+
+- **Not required for**: Judge server (Qwen3-VL-32B — standard self-attention, no flashinfer GDN). Adding the vars is harmless.
 
 ## Next Steps for codex
 
-1. **Fix Issue 11** (FlashInfer `-lcuda` linker error) — create compat symlinks or use system CUDA path
-2. Once vLLM multimodal inference works, run full smoke test with `--limit 8` to verify end-to-end
-3. If smoke passes, download remaining datasets for `--profile all` and run full eval
-4. Run baseline for Qwen3.5-4B base model (not just Vision-OPD checkpoint)
-5. For judge-required benchmarks (MathVerse, MathVista, MMBench, MMVet): configure judge model endpoint
+1. ~~Fix Issue 11~~ ✅ Resolved 2026-07-27: 4 env vars (`CUDA_HOME` + `PATH` + `LIBRARY_PATH` + `LD_LIBRARY_PATH`) documented in CLAUDE.md
+2. ~~Run full eval~~ ✅ Ongoing: multi-GPU parallel eval with 5 vLLM servers + judge server across GPUs 0-6
+3. Run baseline for Qwen3.5-4B base model (not just Vision-OPD checkpoint)
+4. Merge results from all parallel eval terminals into a single 15-benchmark summary
+5. Document replay benchmarks (MV-MATH, ReMI) scoring methodology

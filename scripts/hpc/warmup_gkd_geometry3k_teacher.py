@@ -30,7 +30,7 @@ def main() -> None:
     parser.add_argument("--data", required=True)
     parser.add_argument("--student-model", required=True)
     parser.add_argument("--teacher-url", required=True)
-    parser.add_argument("--objective", choices=("gkd", "va_opd", "va_opd_jsd"), required=True)
+    parser.add_argument("--objective", choices=("gkd", "reverse", "va_opd", "va_opd_jsd"), required=True)
     parser.add_argument("--diagnostic-output", type=Path)
     parser.add_argument("--max-first-eos-prob", type=float, default=0.20)
     parser.add_argument(
@@ -51,7 +51,7 @@ def main() -> None:
     )
     conditions = (
         (Condition.FULL,)
-        if args.objective == "gkd"
+        if args.objective in ("gkd", "reverse")
         else (Condition.FULL, Condition.DEGRADED)
     )
     prompt = geometry3k_training_prompt(str(row["question"]))
@@ -69,7 +69,7 @@ def main() -> None:
         score = scores[condition]
         if score.token_ids.shape[1] != len(response_ids):
             raise RuntimeError(f"teacher response length mismatch for {condition.value}: {score.token_ids.shape}")
-    if args.objective == "gkd":
+    if args.objective in ("gkd", "reverse"):
         question = str(row["question"])
         simple_prompt = ({"role": "user", "content": f"<image>\n{question}"},)
         legacy_forced_reasoning_prompt = ({

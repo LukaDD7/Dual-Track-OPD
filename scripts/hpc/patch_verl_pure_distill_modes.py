@@ -9,7 +9,7 @@ from pathlib import Path
 
 OLD = 'pure_fc_opd = fc_opd_mode in ("vgg_opd", "va_opd")'
 NEW = """pure_fc_opd = fc_opd_mode in (
-                    \"gkd\", \"gkd_forward\", \"vgg_opd\", \"va_opd\", \"va_opd_jsd\"
+                    \"gkd\", \"gkd_forward\", \"reverse\", \"vgg_opd\", \"va_opd\", \"va_opd_jsd\"
                 )"""
 
 
@@ -19,6 +19,10 @@ def main() -> None:
     args = parser.parse_args()
     actor = args.actor.resolve()
     text = actor.read_text(encoding="utf-8")
+    # Check if already current (includes "reverse" for pure reverse-KL)
+    if '"reverse"' in text and "pure_fc_opd" in text:
+        print(f"pure distillation modes: already current (includes reverse) - {actor}")
+        return
     if NEW in text:
         print(f"pure distillation modes: already current - {actor}")
         return

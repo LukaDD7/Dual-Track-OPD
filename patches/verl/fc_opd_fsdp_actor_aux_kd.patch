@@ -145,7 +145,7 @@
 +                fc_opd_denominator = None
 +                fc_opd_mode = _fc_opd_loss_mode(mini_batch_fields)
 +                pure_fc_opd = fc_opd_mode in (
-+                    "gkd", "gkd_forward", "vgg_opd", "va_opd", "va_opd_jsd"
++                    "gkd", "gkd_forward", "reverse", "vgg_opd", "va_opd", "va_opd_jsd"
 +                )
 +                if has_fc_opd_tensors(mini_batch_fields):
 +                    fc_opd_denominator = fc_opd_batch_denominator(

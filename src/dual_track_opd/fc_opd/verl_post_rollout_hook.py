@@ -67,7 +67,7 @@ def fc_opd_post_rollout_hook(
     loss_mode = str(_config_get(fc_config, "loss_mode", "forward"))
     # Vanilla GKD and VA-OPD are both pure online distillation objectives.  They
     # do not need the FC-OPD chunk router or a second student scorer service.
-    _is_plain_gkd = loss_mode in {"gkd", "gkd_forward"}
+    _is_plain_gkd = loss_mode in {"gkd", "gkd_forward", "reverse"}
     if _is_plain_gkd and conditions != (Condition.FULL,):
         raise ValueError("loss_mode=gkd requires exactly conditions=[full]")
     _is_va_opd = loss_mode in {"va_opd", "va_opd_jsd"}
@@ -237,7 +237,7 @@ def _build_teacher_scorer(
     if injected is not None:
         return injected
     loss_mode = str(_config_get(fc_config, "loss_mode", "forward"))
-    if loss_mode in {"gkd", "gkd_forward"}:
+    if loss_mode in {"gkd", "gkd_forward", "reverse"}:
         missing_prompt = [sample.sample_uid for sample in samples if not sample.prompt]
         if missing_prompt:
             raise ValueError(
@@ -572,7 +572,7 @@ def _log_pipeline_verification(
     import logging as _logging
     import sys as _sys
     _log = _logging.getLogger(__name__)
-    is_gkd = loss_mode in {"gkd", "gkd_forward"}
+    is_gkd = loss_mode in {"gkd", "gkd_forward", "reverse"}
     title = "Qwen3-VL Online GKD Pipeline Verification" if is_gkd else "VA-OPD Pipeline Verification (arXiv 2605.21924 §3.2-3.3)"
     lines = [
         "=" * 72,
@@ -585,7 +585,7 @@ def _log_pipeline_verification(
         f"  exact_lp   = {sampled_lp_shape}  (None=tail-fallback)",
         f"  Student    = raw image + canonical question  (choices allowed, no XML)",
         f"  Teacher    = raw image + same canonical question  (no format bias)",
-        f"  KL         = {'JSD(P_T, P_S)' if loss_mode == 'va_opd_jsd' else 'reverse KL(P_S || P_T)' if loss_mode == 'va_opd' else 'forward'}",
+        f"  KL         = {'JSD(P_T, P_S)' if loss_mode == 'va_opd_jsd' else 'reverse KL(P_S || P_T)' if loss_mode in ('va_opd', 'reverse') else 'forward'}",
         (
             "  Objective  = forward KL on the full-image teacher distribution "
             "(pure distillation, no GRPO)"
