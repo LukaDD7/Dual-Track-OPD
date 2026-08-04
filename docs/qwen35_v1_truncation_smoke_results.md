@@ -364,3 +364,28 @@ bash scripts/hpc/run_qwen35_v1_boxedonly_nonthinking_sampled_valonly.sh
    processor 渲染原始消息，不接收学生侧的 `apply_chat_template_kwargs`。训练前
    需 dump 学生/teacher 渲染前缀并显式选择：要么把相同模板模式传给支持它的
    teacher，要么记录"teacher-native conditioning 是有意为之"。
+
+## 11. 学生/teacher 渲染前缀对照（enable_thinking 决策证据）
+
+用 val 第 1 条 question + boxed_only prompt，分别用学生
+（Qwen3.5-4B）与 teacher（qwen3.6-27B）tokenizer 渲染
+`apply_chat_template(messages, add_generation_prompt=True)`：
+
+| 侧 | 默认（thinking）尾部 | `enable_thinking=False` 尾部 |
+|---|---|---|
+| student Qwen3.5-4B | `…<\|im_end\|>\n<\|im_start\|>assistant\n<think>\n` | `…<\|im_end\|>\n<\|im_start\|>assistant\n<think>\n\n</think>\n\n` |
+| teacher qwen3.6-27B | `…<\|im_end\|>\n<\|im_start\|>assistant\n<think>\n` | `…<\|im_end\|>\n<\|im_start\|>assistant\n<think>\n\n</think>\n\n` |
+
+结论：
+
+1. **两个模型的 chat template 都支持 `enable_thinking` 且行为完全一致**：
+   默认渲染 `<think>\n` 头；`enable_thinking=False` 渲染空的
+   `<think>\n\n</think>\n\n` 块，随后生成可见输出（D2 dump 的生成里无 think
+   标签，验证一致）。
+2. **当前管线 mismatch 是真实且可避免的**：teacher 服务用自己的 processor
+   渲染、不接收学生侧的 `apply_chat_template_kwargs`，因此非思考训练时
+   teacher 前缀仍带 `<think>\n` 头，与学生侧（空 think 块）不一致。
+3. **推荐（待 codex 确认）**：把 `enable_thinking=False` 同步传给 teacher
+   渲染，使两侧前缀一致（蒸馏口径更干净）；teacher 模板已证明支持该参数。
+   若选择不传播，则把"teacher-native thinking conditioning 有意保留"写入
+   manifest/runbook。
