@@ -14,9 +14,10 @@
 - D3 @4096 已完成：clip 19%、EOS 81%、accuracy 10%，重复度未恶化；4096 冻结为
   首个 `n=4` 短 smoke 的 cap，但还不是长期训练定稿。
 
-当前准确表述：**train-capable，但尚未 long-run-ready。** tokenizer-ID alignment
-已在真实模型上通过（248,070 IDs、0 mismatch）；当前唯一主 gate 是跑通 `n=4` 的
-20-step 训练证据并观察实际 group-level clip、任务信号与显存稳定性。
+当前准确表述：**20-step n=4 trainability 已通过，今晚进入 instrumented 120-step
+中长 run；尚不能声称有学习收益。** tokenizer-ID alignment 已在真实模型上通过
+（248,070 IDs、0 mismatch），20步内系统/数值稳定且任务信号可达，但 validation
+出现 26%→49%→21% 的暂态长度膨胀，需用每步 group 指标判断长程稳定性。
 
 ## 2. Track A：可训练 Qwen3.6 → Qwen3.5 OPD/GKD
 
@@ -31,7 +32,7 @@
    已纳入运行记录。
 5. `n=4` 语义已确认：6 prompt rows × 4 rollouts = 24 sequences；
    `PPO_MINI_BATCH_SIZE=6` 是 prompt 口径；8 workers 可整除 24。
-6. D1/D1-L/D2 已完成：
+6. D1/D1-L/D2/D3 已完成：
 
 | arm | thinking | cap | clip | EOS | boxed | acc |
 |---|---|---:|---:|---:|---:|---:|
@@ -39,6 +40,9 @@
 | D1-L | default, sampled | 8192 | 83.0% | 17.0% | 24.5% | 2.5% |
 | D2 | disabled, sampled | 2048 | **28.5%** | **71.5%** | **71.5%** | **9.0%** |
 | D3 | disabled, sampled | 4096 | **19.0%** | **81.0%** | **82.5%** | **10.0%** |
+
+7. 首个 n=4 20-step smoke 完成（rc=0）：任务奖励12/20步非零、PG 9步非零，loss/
+   grad/entropy 有限，无 OOM/Ray/teacher 错误；validation accuracy 8.5%–10%。
 
 ### teacher prefix 的最终判断
 
@@ -58,18 +62,17 @@ tokenizer 的模型组合，不能继续 D3/训练。
 
 ### 下一步顺序
 
-1. 运行 `scripts/hpc/run_qwen35_v1_n4_nonthinking_sampled_r4096_smoke.sh`：6 prompt
-   batch、6 prompt PPO mini-batch、4 rollouts、8 workers、3 actor GPUs，最多 20 步。
+1. 运行 `scripts/hpc/run_qwen35_v1_n4_overnight_sequence.sh`：先5-step rollout-dump
+   canary 并自动验证6 groups × 4，再冷启动独立120-step run。
 2. 训练和 validation 都显式固定 `temperature=1.0, top_p=.95, top_k=-1`。pinned
    backend 的训练默认其实是 `top_p=1.0`；此前“D1 完全复现默认训练 sampler”的表述
    不准确。现在选择的是 D1-D3 已验证的候选 sampler，不能依赖 backend 默认值。
 3. smoke 使用 `USE_TASK_REWARDS=True`，验证完整目标；legacy format 分量仍结构性为 0，
    因此必须分开报告 accuracy reward 和 format reward，不能把总 reward 当成格式信号。
 4. 必报 sequence/group clip、EOS、至少一条正确 rollout 的 group 比例、OPD/task loss、
-   entropy/KL、grad、吞吐和峰值显存。若 group-clip 仍高于约 60% 或出现稳定性问题，
-   回退 2048 并另立 overlong 稳定化实验，不试 8192。
-5. smoke 通过后才冻结较长 seeded run；训练中仍须监测长度膨胀，D2/D3 不能替代
-   training-time stability evidence。
+   entropy/KL、grad、吞吐和峰值显存。validation 每20步，checkpoint 每30步。
+5. 120步完成后再定 go/hold/no-go；优先补第二 seed 或固定离线 eval，不以单次曲线
+   直接批准更长训练。完整规则见 `docs/qwen35_overnight_120_plan_20260804.md`。
 
 ## 3. Track B：support-aware frozen-policy diagnostic
 

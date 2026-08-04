@@ -78,9 +78,9 @@ TOTAL_TRAINING_STEPS=20  VAL_BEFORE_TRAIN=True  TEST_FREQ=5
 
 ## 7. 下一步建议（供 codex）
 
-1. **补 group-level clip 落盘**：训练 rollout 增加 dump 或 wrapper 指标，让
-   "6 prompts × 4" 的 group-clip 可直接报告（n=4 下独立估算 ≥1 截断约
-   1−(1−0.39)^4 ≈ 86%，必须以实测为准）。
-2. **长跑前冻结本轮配置**（4096 非思考 + 显式 sampler），并把长度膨胀监测
-   （clip/EOS per step + val 轨迹）设为必报项。
-3. Track B（support-aware）可在其余 GPU 并行推进，不影响本线。
+1. `ecab13c` 已补 group-level rollout dump 与分析工具。先跑5-step instrumentation
+   canary，自动确认每步6 groups × 4 rollouts，再开始独立冷启动的120-step run。
+2. 今晚冻结本轮配置（4096 非思考 + 显式 sampler），每步落盘 rollout；validation
+   每20步、checkpoint 每30步。完整执行见
+   `docs/qwen35_overnight_120_plan_20260804.md`。
+3. Track B 只可在剩余 GPU 做小 smoke，不在 Track A 结束前启动8-GPU full job。
