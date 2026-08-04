@@ -14,6 +14,8 @@
 #                                      版本化收尾指令消融；answer_only 只用于
 #                                      validation-only gate，未经结果批准不作训练口径
 #   VALIDATION_DATA_DIR=<dir>          每个 test_freq 步把 val 生成/得分 dump 到该目录（默认不 dump）
+#   TRAIN_ROLLOUT_DATA_DIR=<dir>       每个训练步把 rollout 生成 dump 到该目录（默认不 dump；
+#                                      verl v1 trainer.rollout_data_dir，用于 group-level clip 分析）
 #   RESUME_MODE=disable|auto           disable=冷启动（默认；防止实验名复用续跑旧 checkpoint）
 #   VAL_BEFORE_TRAIN=True              训练前先做一次验证并 dump（默认 False）
 #   TOTAL_TRAINING_STEPS=20            固定总训练步数（默认空 = 按 TOTAL_EPOCHS 推导）
@@ -96,6 +98,7 @@ PROJECT_NAME=${PROJECT_NAME:-verl_distill_qwen35}
 USE_FCOP_DATASET=${USE_FCOP_DATASET:-0}
 PROMPT_VERSION=${PROMPT_VERSION:-v1}
 VALIDATION_DATA_DIR=${VALIDATION_DATA_DIR:-}
+TRAIN_ROLLOUT_DATA_DIR=${TRAIN_ROLLOUT_DATA_DIR:-}
 RESUME_MODE=${RESUME_MODE:-disable}
 VAL_BEFORE_TRAIN=${VAL_BEFORE_TRAIN:-False}
 TOTAL_TRAINING_STEPS=${TOTAL_TRAINING_STEPS:-}
@@ -139,7 +142,8 @@ for override in "$@"; do
     trainer.val_only=True|trainer.val_only=true) VAL_ONLY_REQUESTED=True ;;
     trainer.use_v1=*|trainer.resume_mode=*|trainer.val_before_train=*|trainer.total_training_steps=*|\
     trainer.validation_data_dir=*|actor_rollout_ref.rollout.n=*|hydra.run.dir=*|\
-    distillation.distillation_loss.use_task_rewards=*|data.prompt_version=*|+data.prompt_version=*)
+    distillation.distillation_loss.use_task_rewards=*|data.prompt_version=*|+data.prompt_version=*|\
+    trainer.rollout_data_dir=*)
       echo "FATAL: '${override}' 由 wrapper 管理；请使用对应环境变量，确保实验名与 manifest 一致。"
       exit 1 ;;
   esac
@@ -223,6 +227,7 @@ echo "== prompt_version=${PROMPT_VERSION} =="
 echo "== trainer=${TRAINER_TAG} resume_mode=${RESUME_MODE} val_before_train=${VAL_BEFORE_TRAIN} rollout_n=${ROLLOUT_N} =="
 if [ -n "${TOTAL_TRAINING_STEPS}" ]; then echo "== total_training_steps=${TOTAL_TRAINING_STEPS} =="; fi
 if [ -n "${VALIDATION_DATA_DIR}" ]; then echo "== val dump → ${VALIDATION_DATA_DIR} =="; fi
+if [ -n "${TRAIN_ROLLOUT_DATA_DIR}" ]; then echo "== train rollout dump → ${TRAIN_ROLLOUT_DATA_DIR} =="; fi
 echo "== checkpoint_dir=${CKPT_ROOT}/${PROJECT_NAME}/${EXPERIMENT_NAME}/ =="
 echo "== run_metadata_dir=${RUN_METADATA_DIR} =="
 
@@ -239,6 +244,9 @@ if [ "${USE_FCOP_DATASET}" = "1" ]; then
 fi
 if [ -n "${VALIDATION_DATA_DIR}" ]; then
   EXTRA_ARGS+=(trainer.validation_data_dir="${VALIDATION_DATA_DIR}")
+fi
+if [ -n "${TRAIN_ROLLOUT_DATA_DIR}" ]; then
+  EXTRA_ARGS+=(trainer.rollout_data_dir="${TRAIN_ROLLOUT_DATA_DIR}")
 fi
 EXTRA_ARGS+=(trainer.resume_mode="${RESUME_MODE}")
 EXTRA_ARGS+=(trainer.val_before_train="${VAL_BEFORE_TRAIN}")
@@ -258,6 +266,11 @@ if [ "${RESUME_MODE}" = "disable" ] && [ -d "${CKPT_DIR}" ] && [ -n "$(ls -A "${
 fi
 if [ "${RESUME_MODE}" = "disable" ] && [ -n "${VALIDATION_DATA_DIR}" ] && [ -d "${VALIDATION_DATA_DIR}" ] && [ -n "$(ls -A "${VALIDATION_DATA_DIR}" 2>/dev/null)" ] && [ "${ALLOW_EXISTING_OUTPUT_DIR}" != "1" ]; then
   echo "FATAL: resume_mode=disable 但 validation 目录已有内容: ${VALIDATION_DATA_DIR}"
+  echo "      请使用新的目录；确需复用时显式设 ALLOW_EXISTING_OUTPUT_DIR=1（不会删除旧文件）。"
+  exit 1
+fi
+if [ "${RESUME_MODE}" = "disable" ] && [ -n "${TRAIN_ROLLOUT_DATA_DIR}" ] && [ -d "${TRAIN_ROLLOUT_DATA_DIR}" ] && [ -n "$(ls -A "${TRAIN_ROLLOUT_DATA_DIR}" 2>/dev/null)" ] && [ "${ALLOW_EXISTING_OUTPUT_DIR}" != "1" ]; then
+  echo "FATAL: resume_mode=disable 但 train rollout 目录已有内容: ${TRAIN_ROLLOUT_DATA_DIR}"
   echo "      请使用新的目录；确需复用时显式设 ALLOW_EXISTING_OUTPUT_DIR=1（不会删除旧文件）。"
   exit 1
 fi
@@ -289,7 +302,7 @@ for p in \
   [ -f "${p}" ] || { echo "FATAL: missing ${p}"; exit 1; }
 done
 
-for output_dir in "${VALIDATION_DATA_DIR}" "${RUN_METADATA_DIR}"; do
+for output_dir in "${VALIDATION_DATA_DIR}" "${RUN_METADATA_DIR}" "${TRAIN_ROLLOUT_DATA_DIR}"; do
   [ -z "${output_dir}" ] && continue
   case "${output_dir}/" in
     "${PROJECT_ROOT}/"*)
@@ -304,6 +317,7 @@ conda activate "${ENV_PREFIX}"
 
 mkdir -p "${RUN_METADATA_DIR}"
 if [ -n "${VALIDATION_DATA_DIR}" ]; then mkdir -p "${VALIDATION_DATA_DIR}"; fi
+if [ -n "${TRAIN_ROLLOUT_DATA_DIR}" ]; then mkdir -p "${TRAIN_ROLLOUT_DATA_DIR}"; fi
 
 # The pinned teacher receives student-produced token IDs directly.  A shared
 # ID-to-token mapping is therefore a semantic requirement, not just metadata.
@@ -349,6 +363,7 @@ MANIFEST_CONFIG=(
   --config "rollout_tp=${ROLLOUT_TP}"
   --config "rollout_gpu_mem_util=${ROLLOUT_GPU_MEM_UTIL}"
   --config "validation_data_dir=${VALIDATION_DATA_DIR}"
+  --config "train_rollout_data_dir=${TRAIN_ROLLOUT_DATA_DIR}"
   --config "checkpoint_dir=${CKPT_DIR}"
   --config "hydra_run_dir=${HYDRA_RUN_DIR}"
 )

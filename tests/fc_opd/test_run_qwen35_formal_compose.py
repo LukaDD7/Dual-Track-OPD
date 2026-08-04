@@ -155,6 +155,37 @@ def test_wrapper_rejects_cli_override_of_prompt_version(tmp_path: Path) -> None:
     assert "由 wrapper 管理" in res.stdout + res.stderr
 
 
+def test_train_rollout_data_dir_wired_into_args(tmp_path: Path) -> None:
+    env = dict(EXP2_ENV)
+    env["VALIDATION_DATA_DIR"] = str(tmp_path / "val_dump")
+    env["TRAIN_ROLLOUT_DATA_DIR"] = str(tmp_path / "train_rollouts")
+    res = run_script(env)
+    assert res.returncode == 0, res.stdout + res.stderr
+    out = res.stdout
+    assert f"trainer.rollout_data_dir={env['TRAIN_ROLLOUT_DATA_DIR']}" in out
+    assert f"== train rollout dump → {env['TRAIN_ROLLOUT_DATA_DIR']} ==" in out
+
+
+def test_wrapper_rejects_nonempty_rollout_dir_on_cold_start(tmp_path: Path) -> None:
+    rollout = tmp_path / "train_rollouts"
+    rollout.mkdir()
+    (rollout / "1.jsonl").write_text("{}\n", encoding="utf-8")
+    env = dict(EXP2_ENV)
+    env["VALIDATION_DATA_DIR"] = str(tmp_path / "val_dump")
+    env["TRAIN_ROLLOUT_DATA_DIR"] = str(rollout)
+    res = run_script(env)
+    assert res.returncode != 0
+    assert "train rollout 目录已有内容" in res.stdout + res.stderr
+
+
+def test_wrapper_rejects_cli_override_of_rollout_data_dir(tmp_path: Path) -> None:
+    env = dict(EXP2_ENV)
+    env["VALIDATION_DATA_DIR"] = str(tmp_path / "val_dump")
+    res = run_script(env, "trainer.rollout_data_dir=/tmp/whatever")
+    assert res.returncode != 0
+    assert "由 wrapper 管理" in res.stdout + res.stderr
+
+
 def test_wrapper_forwards_cli_overrides_after_generated_args() -> None:
     res = run_script(
         {
