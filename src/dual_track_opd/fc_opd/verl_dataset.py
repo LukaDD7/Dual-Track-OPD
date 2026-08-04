@@ -17,7 +17,7 @@ from transformers import PreTrainedTokenizer, ProcessorMixin
 
 from verl.utils.dataset.rl_dataset import RLHFDataset
 
-from dual_track_opd.fc_opd.prompt_contracts import geometry3k_training_prompt
+from dual_track_opd.fc_opd.prompt_contracts import get_geometry3k_prompt_builder
 
 
 class FCOPDDataset(RLHFDataset):
@@ -46,6 +46,8 @@ class FCOPDDataset(RLHFDataset):
         max_samples: int = -1,
     ):
         super().__init__(data_files, tokenizer, config, processor, max_samples)
+        prompt_version = str(config.get("prompt_version", "v1"))
+        self.prompt_builder = get_geometry3k_prompt_builder(prompt_version)
         self.dataframe = self._clean_prompts(self.dataframe)
 
     @staticmethod
@@ -59,7 +61,7 @@ class FCOPDDataset(RLHFDataset):
         def _clean(row: dict) -> dict:
             question = str(row.get("question", "")).strip()
             if question:
-                row["prompt"] = geometry3k_training_prompt(question)
+                row["prompt"] = self.prompt_builder(question)
             return row
         return dataframe.map(_clean)
 

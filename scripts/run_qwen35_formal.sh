@@ -10,6 +10,8 @@
 #   USE_TASK_REWARDS=True              开启任务奖励项（默认 False，先跑稳）
 #   USE_FCOP_DATASET=1                 用 FCOPDDataset 注入 "\boxed{} 输出指令" prompt
 #                                      （默认 0 用 RLHFDataset = 实验1 原始 prompt；奖励可达性见 handoff）
+#   PROMPT_VERSION=v1|boxed_only       精简收尾指令消融（默认 v1；boxed_only 要求最后一行只给
+#                                      \boxed{答案} 并显式停止，2048 下独立版本，见 Step C 文档）
 #   VALIDATION_DATA_DIR=<dir>          每个 test_freq 步把 val 生成/得分 dump 到该目录（默认不 dump）
 #   RESUME_MODE=disable|auto           disable=冷启动（默认；防止实验名复用续跑旧 checkpoint）
 #   VAL_BEFORE_TRAIN=True              训练前先做一次验证并 dump（默认 False）
@@ -90,6 +92,7 @@ USE_TASK_REWARDS=${USE_TASK_REWARDS:-False}
 DISTILLATION_TOPK=${DISTILLATION_TOPK:-64}
 PROJECT_NAME=${PROJECT_NAME:-verl_distill_qwen35}
 USE_FCOP_DATASET=${USE_FCOP_DATASET:-0}
+PROMPT_VERSION=${PROMPT_VERSION:-v1}
 VALIDATION_DATA_DIR=${VALIDATION_DATA_DIR:-}
 RESUME_MODE=${RESUME_MODE:-disable}
 VAL_BEFORE_TRAIN=${VAL_BEFORE_TRAIN:-False}
@@ -118,13 +121,17 @@ case "${USE_FCOP_DATASET}" in
   0|1) ;;
   *) echo "FATAL: USE_FCOP_DATASET 必须为 0 或 1（当前值: '${USE_FCOP_DATASET}'）"; exit 1 ;;
 esac
+case "${PROMPT_VERSION}" in
+  v1|boxed_only) ;;
+  *) echo "FATAL: PROMPT_VERSION 必须为 v1 或 boxed_only（当前值: '${PROMPT_VERSION}'）"; exit 1 ;;
+esac
 
 # 这些字段参与实验命名、隔离和 manifest，禁止用尾部 Hydra 参数静默覆盖。
 for override in "$@"; do
   case "${override}" in
     trainer.use_v1=*|trainer.resume_mode=*|trainer.val_before_train=*|trainer.total_training_steps=*|\
     trainer.validation_data_dir=*|actor_rollout_ref.rollout.n=*|hydra.run.dir=*|\
-    distillation.distillation_loss.use_task_rewards=*)
+    distillation.distillation_loss.use_task_rewards=*|data.prompt_version=*)
       echo "FATAL: '${override}' 由 wrapper 管理；请使用对应环境变量，确保实验名与 manifest 一致。"
       exit 1 ;;
   esac
@@ -133,9 +140,10 @@ done
 TEACHER_BASE=$(basename "${TEACHER_MODEL}" | tr 'A-Z.' 'a-z_' | tr '-' '_')
 STUDENT_BASE=$(basename "${STUDENT_MODEL}" | tr 'A-Z.' 'a-z_' | tr '-' '_')
 DATASET_TAG=$([ "${USE_FCOP_DATASET}" = "1" ] && echo fcop || echo raw)
+PROMPT_TAG=$([ "${USE_FCOP_DATASET}" = "1" ] && [ "${PROMPT_VERSION}" != "v1" ] && echo "_pv${PROMPT_VERSION}" || echo "")
 TRAINER_TAG=$([ "${TRAINER_USE_V1}" = "True" ] && echo v1 || echo v0)
 TASK_TAG=$(echo "${USE_TASK_REWARDS}" | tr 'A-Z' 'a-z')
-EXPERIMENT_NAME="${EXPERIMENT_NAME:-${TEACHER_BASE}_to_${STUDENT_BASE}_${DISTILLATION_LOSS_MODE}_task${TASK_TAG}_${DATASET_TAG}_n${ROLLOUT_N}_${TRAINER_TAG}}"
+EXPERIMENT_NAME="${EXPERIMENT_NAME:-${TEACHER_BASE}_to_${STUDENT_BASE}_${DISTILLATION_LOSS_MODE}_task${TASK_TAG}_${DATASET_TAG}${PROMPT_TAG}_n${ROLLOUT_N}_${TRAINER_TAG}}"
 RUN_METADATA_DIR="${RUN_METADATA_DIR:-${DTOPD_ROOT}/fc-opd-storage/logs/qwen35_runs/${PROJECT_NAME}/${EXPERIMENT_NAME}}"
 HYDRA_RUN_DIR="${HYDRA_RUN_DIR:-${RUN_METADATA_DIR}/hydra}"
 
@@ -189,6 +197,7 @@ echo "== loss=${DISTILLATION_LOSS_MODE} use_task_rewards=${USE_TASK_REWARDS} =="
 echo "== max_len=${MAX_NUM_TOKENS} (prompt ${MAX_PROMPT_LENGTH} + response ${MAX_RESPONSE_LENGTH}) =="
 echo "== experiment=${PROJECT_NAME}/${EXPERIMENT_NAME} =="
 echo "== dataset_class=$( [ "${USE_FCOP_DATASET}" = "1" ] && echo FCOPDDataset || echo RLHFDataset ) =="
+echo "== prompt_version=${PROMPT_VERSION} =="
 echo "== trainer=${TRAINER_TAG} resume_mode=${RESUME_MODE} val_before_train=${VAL_BEFORE_TRAIN} rollout_n=${ROLLOUT_N} =="
 if [ -n "${TOTAL_TRAINING_STEPS}" ]; then echo "== total_training_steps=${TOTAL_TRAINING_STEPS} =="; fi
 if [ -n "${VALIDATION_DATA_DIR}" ]; then echo "== val dump → ${VALIDATION_DATA_DIR} =="; fi
@@ -202,6 +211,7 @@ if [ "${USE_FCOP_DATASET}" = "1" ]; then
   export PYTHONPATH="${DTOPD_ROOT}/projects/Dual-Track-OPD/src:${PYTHONPATH:-}"
   EXTRA_ARGS+=(data.custom_cls.path=pkg://dual_track_opd.fc_opd.verl_dataset)
   EXTRA_ARGS+=(data.custom_cls.name=FCOPDDataset)
+  EXTRA_ARGS+=(data.prompt_version="${PROMPT_VERSION}")
 fi
 if [ -n "${VALIDATION_DATA_DIR}" ]; then
   EXTRA_ARGS+=(trainer.validation_data_dir="${VALIDATION_DATA_DIR}")
@@ -278,6 +288,7 @@ MANIFEST_CONFIG=(
   --config "trainer_use_v1=${TRAINER_USE_V1}"
   --config "resume_mode=${RESUME_MODE}"
   --config "dataset_tag=${DATASET_TAG}"
+  --config "prompt_version=${PROMPT_VERSION}"
   --config "use_task_rewards=${USE_TASK_REWARDS}"
   --config "use_policy_gradient=${USE_POLICY_GRADIENT}"
   --config "loss_mode=${DISTILLATION_LOSS_MODE}"

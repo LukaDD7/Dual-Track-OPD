@@ -79,12 +79,44 @@ def test_exp2_composed_command_contains_required_overrides(tmp_path: Path) -> No
         "trainer.use_v1=True",
         "trainer.total_training_steps=20",
         "actor_rollout_ref.rollout.n=1",
+        "data.prompt_version=v1",
         "hydra.run.dir=",
         f"trainer.validation_data_dir={env['VALIDATION_DATA_DIR']}",
         "qwen3_6_27b_to_qwen3_5_4b_k1_taskfalse_fcop_n1_promptfix_smoke",
     ):
         assert expected in out, expected
     assert "Using dataset class" not in out  # 由 verl 训练时打印，DRY_RUN 不应伪造
+
+
+def test_prompt_version_boxed_only_wired_into_args_and_default_name(tmp_path: Path) -> None:
+    env = dict(EXP2_ENV)
+    env.pop("EXPERIMENT_NAME", None)
+    env["PROMPT_VERSION"] = "boxed_only"
+    env["VALIDATION_DATA_DIR"] = str(tmp_path / "val_dump")
+    env["PROJECT_NAME"] = "__unit_test__"
+    res = run_script(env)
+    assert res.returncode == 0, res.stdout + res.stderr
+    out = res.stdout
+    assert "data.prompt_version=boxed_only" in out
+    assert "_fcop_pvboxed_only_n1_v1" in out  # 默认实验名带独立版本 tag
+    assert "== prompt_version=boxed_only ==" in out
+
+
+def test_wrapper_rejects_unknown_prompt_version(tmp_path: Path) -> None:
+    env = dict(EXP2_ENV)
+    env["PROMPT_VERSION"] = "nope"
+    env["VALIDATION_DATA_DIR"] = str(tmp_path / "val_dump")
+    res = run_script(env)
+    assert res.returncode != 0
+    assert "PROMPT_VERSION 必须为 v1 或 boxed_only" in res.stdout + res.stderr
+
+
+def test_wrapper_rejects_cli_override_of_prompt_version(tmp_path: Path) -> None:
+    env = dict(EXP2_ENV)
+    env["VALIDATION_DATA_DIR"] = str(tmp_path / "val_dump")
+    res = run_script(env, "data.prompt_version=boxed_only")
+    assert res.returncode != 0
+    assert "由 wrapper 管理" in res.stdout + res.stderr
 
 
 def test_wrapper_forwards_cli_overrides_after_generated_args() -> None:
