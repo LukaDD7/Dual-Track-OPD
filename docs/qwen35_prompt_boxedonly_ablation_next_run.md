@@ -48,13 +48,17 @@ bash scripts/hpc/run_qwen35_v1_promptboxed_valonly.sh
 `trainer.val_only=True` + `TOTAL_TRAINING_STEPS=1`（只做 200 个 val 样本生成与打分，
 不更新优化器）。产物：
 
-- metadata：`fc-opd-storage/logs/qwen35_runs/k1_promptfix_boxedonly/`
+- metadata：`fc-opd-storage/logs/qwen35_runs/k1_promptfix_boxedonly_r2/`
   （`run_manifest.json`、`resolved_launch_config.json`、`hydra/.hydra/config.yaml`、
   `train.log`）
-- val dump：`fc-opd-storage/logs/val_dump_k1_promptfix_boxedonly/0.jsonl`
+- val dump：`fc-opd-storage/logs/val_dump_k1_promptfix_boxedonly_r2/0.jsonl`
 - 外层日志：`artifacts/fc_opd/nohup_v1_pvboxed_only_valonly_*.log`
 
 预计耗时：约 5-10 分钟（2048 生成，比 Step B 的 4096 短一半）。
+
+> 注：首次启动（r1）因 Hydra 结构化配置拒绝新增键 `data.prompt_version` 而失败；
+> 已改为 `+data.prompt_version=...` 追加并补测试（74c684b 后续修复提交）。
+> r1 的 failed manifest 保留在 `k1_promptfix_boxedonly/`，r2 用全新目录。
 
 ## 4. 判读口径（与实验 #2 step 0 @2048 对比）
 

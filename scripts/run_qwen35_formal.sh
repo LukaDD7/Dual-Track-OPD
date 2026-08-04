@@ -131,7 +131,7 @@ for override in "$@"; do
   case "${override}" in
     trainer.use_v1=*|trainer.resume_mode=*|trainer.val_before_train=*|trainer.total_training_steps=*|\
     trainer.validation_data_dir=*|actor_rollout_ref.rollout.n=*|hydra.run.dir=*|\
-    distillation.distillation_loss.use_task_rewards=*|data.prompt_version=*)
+    distillation.distillation_loss.use_task_rewards=*|data.prompt_version=*|+data.prompt_version=*)
       echo "FATAL: '${override}' 由 wrapper 管理；请使用对应环境变量，确保实验名与 manifest 一致。"
       exit 1 ;;
   esac
@@ -211,7 +211,9 @@ if [ "${USE_FCOP_DATASET}" = "1" ]; then
   export PYTHONPATH="${DTOPD_ROOT}/projects/Dual-Track-OPD/src:${PYTHONPATH:-}"
   EXTRA_ARGS+=(data.custom_cls.path=pkg://dual_track_opd.fc_opd.verl_dataset)
   EXTRA_ARGS+=(data.custom_cls.name=FCOPDDataset)
-  EXTRA_ARGS+=(data.prompt_version="${PROMPT_VERSION}")
+  # 新增键必须用 '+' 追加（Hydra struct）：data.custom_cls 已存在于 schema，
+  # prompt_version 是新键，直接赋值会被结构化配置拒绝。
+  EXTRA_ARGS+=("+data.prompt_version=${PROMPT_VERSION}")
 fi
 if [ -n "${VALIDATION_DATA_DIR}" ]; then
   EXTRA_ARGS+=(trainer.validation_data_dir="${VALIDATION_DATA_DIR}")
