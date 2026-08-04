@@ -314,3 +314,53 @@ bash scripts/hpc/run_qwen35_v1_boxedonly_sampled_r8192_valonly.sh
 4. **按 codex go/no-go：D1-L clip 83% >30%、增益不足以 justify 成本 →
    reject "just make it longer" → 下一步跑 D2**（`enable_thinking=False`，
    采样 @2048，prompt 仍为 boxed_only 保留简短可见推理；不是 answer_only）。
+
+## 10. Step D2：硬非思考采样 validation（boxed_only @2048，enable_thinking=False）
+
+### 10.1 命令与产物
+
+```bash
+bash scripts/hpc/run_qwen35_v1_boxedonly_nonthinking_sampled_valonly.sh
+```
+
+同 D1（boxed_only、`temp=1.0 top_p=0.95 top_k=-1`、cap 2048），唯一新增变量
+`+data.apply_chat_template_kwargs.enable_thinking=False`；prompt 仍请求简短可见
+推理，不是 answer_only。
+
+- metadata：`fc-opd-storage/logs/qwen35_runs/k1_boxedonly_nonthinking_sampled_d2/`
+  （`completed rc=0`；hydra config 含 `enable_thinking: false`）
+- val dump：`fc-opd-storage/logs/val_dump_k1_boxedonly_nonthinking_sampled_d2/0.jsonl`
+- 日志：`artifacts/fc_opd/nohup_v1_boxedonly_nonthinking_sampled_d2_20260804_075445.log`
+- 墙钟：**7m24s**（444s）；无 OOM/报错；GPU 0-3，4-7 未受影响
+- 运行时代码：repo `7cfe870`（tracked_dirty=True）；后端 `334d9f8b`
+
+### 10.2 结果（200 样本，口径同前）
+
+| 指标 | Step C greedy @2048 | D1 sampled @2048 | D1-L sampled @8192 | **D2 sampled @2048 non-thinking** |
+|---|---:|---:|---:|---:|
+| token 长度 mean / p50 / p90 / max | 1920 / 2048 / 2048 / 2048 | 2020 / 2048 / 2048 / 2048 | 7709 / 8192 / 8192 / 8197 | **922 / 381 / 2048 / 2048** |
+| **clip rate** | 0.855 | 0.945 | 0.830 | **0.285（57/200）** |
+| EOS 率 | 0.145 | 0.055 | 0.170 | **0.715（143/200）** |
+| boxed_rate | 0.250 | 0.125 | 0.245 | **0.715（143/200）** |
+| format_rate | 0.000 | 0.000 | 0.000 | 0.000 |
+| accuracy_rate | 0.035 | 0.015 | 0.025 | **0.090（18/200）** |
+| reward mean / std | 0.0315 / 0.166 | 0.0135 / 0.110 | 0.0225 / 0.141 | **0.081 / 0.258** |
+| rep4 ratio mean / median | 0.584 / 0.565 | 0.340 / 0.346 | 0.483 / 0.491 | **0.187 / 0.180** |
+| 最长重复跨度 mean / max（tokens） | 388 / 1618 | 22 / 67 | 35 / 70 | **15.7 / 76** |
+
+自然完成（EOS）样本分布：n=143，长度 min/p50/p90/max = 35 / 247 / 1218 / 2047；
+其中 boxed=98.6%、acc=12.6%（18/143）。clip 组（57）boxed=3.5%、acc=0。
+
+### 10.3 解读与判定
+
+1. **D2 通过 codex gate**：clip 94.5%→28.5%（≤30%），acc 1.5%→9.0%（不降反升），
+   boxed 12.5%→71.5%，EOS 组 boxed 98.6%。`boxed_only + enable_thinking=False`
+   @2048 成为首个训练 smoke 的候选口径。
+2. 非思考下自然完成长度中位数仅 247 tokens（思考模式为 5838），重复度也是
+   四条线里最低（rep4 0.187、最长重复跨度 15.7）。
+3. 仍未注入 `<think>`，format_rate 保持 0（Q4 已定：接受为已知限制，任务奖励
+   开关前另立模型原生格式奖励）。
+4. **promote 到训练前的必做项（codex 边界要求）**：外部 teacher 服务用自己的
+   processor 渲染原始消息，不接收学生侧的 `apply_chat_template_kwargs`。训练前
+   需 dump 学生/teacher 渲染前缀并显式选择：要么把相同模板模式传给支持它的
+   teacher，要么记录"teacher-native conditioning 是有意为之"。
