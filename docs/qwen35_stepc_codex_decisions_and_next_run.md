@@ -31,8 +31,10 @@ Keep `boxed_only` as the candidate training prompt and preserve natural thinking
 until sampled evidence says otherwise.  Run these gates in order:
 
 1. **Step D1 — sampled validation, default thinking, 2048 tokens.**  Use
-   `temperature=1.0`, `top_p=0.95`, `top_k=-1`, matching the current training
-   sampler rather than verl's greedy validation default.
+   `temperature=1.0`, `top_p=0.95`, `top_k=-1`, defining the candidate sampler
+   rather than verl's greedy validation default.  A later source audit found the
+   pinned training default is `top_p=1.0`; the selected training smoke therefore
+   overrides both training and validation explicitly to `.95`.
 2. **Step D1-L — naturally extended sampled validation, default thinking, 8192
    tokens.**  If D1 clips above 10%, keep the same prompt and sampler and change
    only the cap.  Run on the identical ordered 200 prompts.  This measures the

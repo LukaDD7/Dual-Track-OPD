@@ -11,12 +11,12 @@
 - sampled natural thinking 在 8192 仍有 83% 截断，质量收益不足，第一轮训练不采用；
 - `boxed_only + enable_thinking=False + sampled` 在 2048 将 clip 降到 28.5%，
   accuracy 提到 9%，是当前训练候选；
-- 2048 尚未冻结，因为 `n=4` 下 28.5% 的 sequence clip 会大量污染 prompt group；
-  下一步 D3 只把 cap 提到 4096，之后立即进入不超过 20 步的 `n=4` smoke。
+- D3 @4096 已完成：clip 19%、EOS 81%、accuracy 10%，重复度未恶化；4096 冻结为
+  首个 `n=4` 短 smoke 的 cap，但还不是长期训练定稿。
 
-当前准确表述：**train-capable，但尚未 long-run-ready。** 剩余 blocker 是先让新增的
-tokenizer-ID alignment preflight 在远端模型上通过，再选择最终 cap 并跑通 `n=4` 的
-短训练证据；不是 CUDA、Ray、FSDP、reward wiring 或 teacher template propagation。
+当前准确表述：**train-capable，但尚未 long-run-ready。** tokenizer-ID alignment
+已在真实模型上通过（248,070 IDs、0 mismatch）；当前唯一主 gate 是跑通 `n=4` 的
+20-step 训练证据并观察实际 group-level clip、任务信号与显存稳定性。
 
 ## 2. Track A：可训练 Qwen3.6 → Qwen3.5 OPD/GKD
 
@@ -38,6 +38,7 @@ tokenizer-ID alignment preflight 在远端模型上通过，再选择最终 cap 
 | D1 | default, sampled | 2048 | 94.5% | 5.5% | 12.5% | 1.5% |
 | D1-L | default, sampled | 8192 | 83.0% | 17.0% | 24.5% | 2.5% |
 | D2 | disabled, sampled | 2048 | **28.5%** | **71.5%** | **71.5%** | **9.0%** |
+| D3 | disabled, sampled | 4096 | **19.0%** | **81.0%** | **82.5%** | **10.0%** |
 
 ### teacher prefix 的最终判断
 
@@ -57,13 +58,16 @@ tokenizer 的模型组合，不能继续 D3/训练。
 
 ### 下一步顺序
 
-1. 在远端确认 tokenizer alignment preflight PASS；这是 D3/训练的共同前置条件。
-2. 跑 D3：
-   `scripts/hpc/run_qwen35_v1_boxedonly_nonthinking_sampled_r4096_valonly.sh`。
-3. D3 clip <=10% 且质量不降则选 4096；clip >20% 或无质量收益则选 2048，不再试
-   8192。10%–20% 按质量/token 效率决定。
-4. 用冻结 cap 跑 `n=4`、最多 20 步：6 prompt batch、6 prompt PPO mini-batch、
-   8 workers、3 actor GPUs，记录 group-level clip/EOS 与 exact teacher-token identity。
+1. 运行 `scripts/hpc/run_qwen35_v1_n4_nonthinking_sampled_r4096_smoke.sh`：6 prompt
+   batch、6 prompt PPO mini-batch、4 rollouts、8 workers、3 actor GPUs，最多 20 步。
+2. 训练和 validation 都显式固定 `temperature=1.0, top_p=.95, top_k=-1`。pinned
+   backend 的训练默认其实是 `top_p=1.0`；此前“D1 完全复现默认训练 sampler”的表述
+   不准确。现在选择的是 D1-D3 已验证的候选 sampler，不能依赖 backend 默认值。
+3. smoke 使用 `USE_TASK_REWARDS=True`，验证完整目标；legacy format 分量仍结构性为 0，
+   因此必须分开报告 accuracy reward 和 format reward，不能把总 reward 当成格式信号。
+4. 必报 sequence/group clip、EOS、至少一条正确 rollout 的 group 比例、OPD/task loss、
+   entropy/KL、grad、吞吐和峰值显存。若 group-clip 仍高于约 60% 或出现稳定性问题，
+   回退 2048 并另立 overlong 稳定化实验，不试 8192。
 5. smoke 通过后才冻结较长 seeded run；训练中仍须监测长度膨胀，D2/D3 不能替代
    training-time stability evidence。
 
@@ -81,9 +85,10 @@ K=32 四片已完成，exact-token strict merge 有效，64 prompts / 2112 rows 
 正信号只在短响应层：<=512 tokens 的 AUC 0.792，95% CI 0.625–0.932，但只有 7 个
 eligible prompts。K=8→K=32 stratum agreement 71.9%，RL-ready 从 18 调整到 27。
 
-决策：**不启动五臂 bridge。** 冻结 K=32 frontier 的 27 个候选，先做独立、预注册的
-短响应确认/扩充短响应层；不得把整体主 gate 描述成通过。Track B 与 Track A 分开推进，
-不阻塞 D3 和 `n=4` trainability smoke。
+决策：**不启动五臂 bridge。** 新增的 verified teacher-proposal feasibility 实验已经
+实现并通过 CPU 测试，但尚无 GPU 结果；它只生成 verified proposal cache，不更新策略。
+调度上优先完成 Track A 的 4-GPU `n=4` smoke；Track B 可在其余一对 GPU 并行做
+2-prompt proposal smoke，8-GPU full proposal run 等 Track A smoke 结束后再启动。
 
 ## 4. 当前不做的事
 
@@ -91,5 +96,5 @@ eligible prompts。K=8→K=32 stratum agreement 71.9%，RL-ready 从 18 调整�
 - 不跑 answer-only 主线；
 - 不对正式 verl teacher 增加一次多余 chat-template 渲染；
 - 不以 stop-on-first-box 截断生成；
-- 不在 D3 和 `n=4` smoke 之前开长跑；
+- 不在 `n=4` smoke 之前开长跑；
 - 不因 K=32 的短响应子组正信号直接启动 bridge training。

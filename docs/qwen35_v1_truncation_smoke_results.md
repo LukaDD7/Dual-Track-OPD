@@ -212,7 +212,9 @@ bash scripts/hpc/run_qwen35_v1_boxedonly_sampled_valonly.sh
 ```
 
 即 Step C r4 配置 + `val_kwargs.do_sample=True, temperature=1.0, top_p=0.95,
-top_k=-1`（与训练 rollout 采样器一致）；prompt 仍为 boxed_only、cap 2048。
+top_k=-1`；prompt 仍为 boxed_only、cap 2048。后续 source audit 发现 pinned backend
+训练默认 `top_p=1.0`，所以这不是对默认训练 sampler 的逐项复现，而是 D1-D3 采用并
+最终显式冻结给首个训练 smoke 的候选 sampler。
 
 - metadata：`fc-opd-storage/logs/qwen35_runs/k1_boxedonly_sampled_d1/`
   （`completed rc=0`；`resolved_launch_config.json` 含 val_kwargs 覆盖）
