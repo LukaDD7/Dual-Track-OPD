@@ -58,9 +58,9 @@ class FCOPDDataset(RLHFDataset):
     def _clean_prompts(dataframe, prompt_version: str):
         """Normalize prompts to the shared Qwen3-VL-Instruct contract.
 
-        Do not inject literal ``<think>`` or boxed-answer instructions here:
-        reasoning mode belongs to the model/chat template, and the same prompt
-        must reach student rollout and teacher forced-forward scoring.
+        Prompt wording is selected only through the explicit version registry;
+        the same versioned prompt must reach student rollout and teacher
+        forced-forward scoring.  No version injects literal ``<think>`` tags.
         """
         def _clean(row: dict) -> dict:
             return clean_geometry3k_question_rows([row], prompt_version)[0]

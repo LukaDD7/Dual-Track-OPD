@@ -1,5 +1,14 @@
 # Qwen3.5 v1 对齐 + 截断消融结果报告（Step A + Step B）
 
+> **2026-08-04 归因更正（必须先读）**：本文记录的 token 数、clip rate、boxed
+> rate 和 accuracy 数值仍然有效，但“模型在训练采样下也不会自然收尾”“继续加长无效”
+> 这两个因果结论已经撤销。Step A/B/C 的这些验证生成走的是 pinned verl
+> `334d9f8b` 的 validation sampler，实际为 greedy decoding（`temperature=0`,
+> `top_p=1`, `top_k=-1`）；训练 rollout 走的是非 greedy sampling。Qwen3.5 官方明确
+> 警告 greedy decoding 可能导致 endless repetition。因此 2048/4096 均 96% 顶满首先
+> 证明的是 **greedy validation contract 有问题**，不能外推为训练 rollout 的截断率。
+> 权威纠正与下一步见 `docs/qwen35_training_environment_status_20260804.md`。
+
 > 日期：2026-08-03 ｜ 分支：`codex/va-opd` ｜ 运行时代码：`8c353db`
 > 依据：`docs/qwen35_v1_truncation_next_steps_for_claude.md`（`9fac2eb`）
 > 约束遵守：未用 `CLEAN_START=1`；未跑 `ROLLOUT_N=4`；未跑超过 20 步的实验；

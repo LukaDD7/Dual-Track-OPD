@@ -45,11 +45,35 @@ def geometry3k_training_prompt_boxed_only(question: str) -> list[dict[str, str]]
     }]
 
 
+def geometry3k_training_prompt_answer_only(question: str) -> list[dict[str, str]]:
+    """No-reasoning variant (v3, ``answer_only``) for the closing-behavior gate.
+
+    This is a validation-only prompt ablation, not an approved training
+    contract.  It tests whether explicitly suppressing visible reasoning makes
+    Qwen3.5 terminate reliably inside the 2048-token response budget.  Accuracy
+    must be compared with ``boxed_only`` before this prompt can be considered
+    for training.
+    """
+    question = str(question).strip()
+    if not question:
+        raise ValueError("Geometry3K question must be non-empty")
+    return [{
+        "role": "user",
+        "content": (
+            f"<image>\n{question}\n\n"
+            "Return exactly one line and nothing else: "
+            "\\boxed{<final answer>}. Do not show reasoning."
+        ),
+    }]
+
+
 # Version → prompt builder for FCOPDDataset.  ``v1`` is the canonical default;
-# ``boxed_only`` is the separately versioned truncation ablation (2048 tokens).
+# ``boxed_only`` and ``answer_only`` are separately versioned 2048-token
+# closing-behavior ablations.
 GEOMETRY3K_PROMPT_BUILDERS = {
     "v1": geometry3k_training_prompt,
     "boxed_only": geometry3k_training_prompt_boxed_only,
+    "answer_only": geometry3k_training_prompt_answer_only,
 }
 
 

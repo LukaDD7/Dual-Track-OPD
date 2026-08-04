@@ -10,8 +10,9 @@
 #   USE_TASK_REWARDS=True              开启任务奖励项（默认 False，先跑稳）
 #   USE_FCOP_DATASET=1                 用 FCOPDDataset 注入 "\boxed{} 输出指令" prompt
 #                                      （默认 0 用 RLHFDataset = 实验1 原始 prompt；奖励可达性见 handoff）
-#   PROMPT_VERSION=v1|boxed_only       精简收尾指令消融（默认 v1；boxed_only 要求最后一行只给
-#                                      \boxed{答案} 并显式停止，2048 下独立版本，见 Step C 文档）
+#   PROMPT_VERSION=v1|boxed_only|answer_only
+#                                      版本化收尾指令消融；answer_only 只用于
+#                                      validation-only gate，未经结果批准不作训练口径
 #   VALIDATION_DATA_DIR=<dir>          每个 test_freq 步把 val 生成/得分 dump 到该目录（默认不 dump）
 #   RESUME_MODE=disable|auto           disable=冷启动（默认；防止实验名复用续跑旧 checkpoint）
 #   VAL_BEFORE_TRAIN=True              训练前先做一次验证并 dump（默认 False）
@@ -23,7 +24,8 @@
 #   ALLOW_EXISTING_RUN_DIR=1           resume=disable 时目标 checkpoint 目录已有内容也放行
 #   ALLOW_EXISTING_OUTPUT_DIR=1        validation/metadata 目录非空时显式放行（默认拒绝）
 #   TOTAL_EPOCHS=2                     多跑几个 epoch（默认 1）
-#   TRAIN_BATCH_SIZE=112               放大 batch（默认 56；必须同时被 7 和 8 整除）
+#   TRAIN_BATCH_SIZE=112               prompt batch（默认 56）；有效序列 batch =
+#                                      TRAIN_BATCH_SIZE * ROLLOUT_N
 #   CLEAN_START=1                      启动前 ray stop --force（默认 0；重复跑失败时建议开启）
 #   FORMAL_GPUS=0,1,2,3                显存白名单（默认全部 8 卡；节点上另有实验占用 4-7 时务必设为空闲卡）
 #   4 卡跑正式实验示例（3 actor + 1 teacher，batch 需被 3 和 8 整除）：
@@ -122,13 +124,19 @@ case "${USE_FCOP_DATASET}" in
   *) echo "FATAL: USE_FCOP_DATASET 必须为 0 或 1（当前值: '${USE_FCOP_DATASET}'）"; exit 1 ;;
 esac
 case "${PROMPT_VERSION}" in
-  v1|boxed_only) ;;
-  *) echo "FATAL: PROMPT_VERSION 必须为 v1 或 boxed_only（当前值: '${PROMPT_VERSION}'）"; exit 1 ;;
+  v1|boxed_only|answer_only) ;;
+  *) echo "FATAL: PROMPT_VERSION 必须为 v1、boxed_only 或 answer_only（当前值: '${PROMPT_VERSION}'）"; exit 1 ;;
 esac
+if [ "${USE_FCOP_DATASET}" != "1" ] && [ "${PROMPT_VERSION}" != "v1" ]; then
+  echo "FATAL: PROMPT_VERSION=${PROMPT_VERSION} 只有在 USE_FCOP_DATASET=1 时才会生效。"
+  exit 1
+fi
 
 # 这些字段参与实验命名、隔离和 manifest，禁止用尾部 Hydra 参数静默覆盖。
+VAL_ONLY_REQUESTED=False
 for override in "$@"; do
   case "${override}" in
+    trainer.val_only=True|trainer.val_only=true) VAL_ONLY_REQUESTED=True ;;
     trainer.use_v1=*|trainer.resume_mode=*|trainer.val_before_train=*|trainer.total_training_steps=*|\
     trainer.validation_data_dir=*|actor_rollout_ref.rollout.n=*|hydra.run.dir=*|\
     distillation.distillation_loss.use_task_rewards=*|data.prompt_version=*|+data.prompt_version=*)
@@ -136,6 +144,10 @@ for override in "$@"; do
       exit 1 ;;
   esac
 done
+if [ "${PROMPT_VERSION}" = "answer_only" ] && [ "${VAL_ONLY_REQUESTED}" != "True" ]; then
+  echo "FATAL: answer_only 当前只批准 validation-only gate；请传 trainer.val_only=True。"
+  exit 1
+fi
 
 TEACHER_BASE=$(basename "${TEACHER_MODEL}" | tr 'A-Z.' 'a-z_' | tr '-' '_')
 STUDENT_BASE=$(basename "${STUDENT_MODEL}" | tr 'A-Z.' 'a-z_' | tr '-' '_')
@@ -175,11 +187,19 @@ if [ -n "${TOTAL_TRAINING_STEPS}" ]; then
 fi
 
 MAX_NUM_TOKENS=$(( MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH + 1 ))
+EFFECTIVE_SEQUENCE_BATCH=$(( TRAIN_BATCH_SIZE * ROLLOUT_N ))
+EFFECTIVE_PPO_MINI_BATCH=$(( PPO_MINI_BATCH_SIZE * ROLLOUT_N ))
 
-[ $(( TRAIN_BATCH_SIZE % NGPUS_PER_NODE )) -eq 0 ] || {
-  echo "FATAL: TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE} 必须被 NGPUS_PER_NODE=${NGPUS_PER_NODE} 整除"; exit 1; }
-[ $(( TRAIN_BATCH_SIZE % ROLLOUT_NUM_WORKERS )) -eq 0 ] || {
-  echo "FATAL: TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE} 必须被 ROLLOUT_NUM_WORKERS=${ROLLOUT_NUM_WORKERS} 整除"; exit 1; }
+[ "${PPO_MINI_BATCH_SIZE}" -le "${TRAIN_BATCH_SIZE}" ] || {
+  echo "FATAL: PPO_MINI_BATCH_SIZE=${PPO_MINI_BATCH_SIZE} 是 prompt 口径，不能大于 TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE}"; exit 1; }
+[ $(( TRAIN_BATCH_SIZE % PPO_MINI_BATCH_SIZE )) -eq 0 ] || {
+  echo "FATAL: TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE} 必须被 PPO_MINI_BATCH_SIZE=${PPO_MINI_BATCH_SIZE} 整除"; exit 1; }
+[ $(( EFFECTIVE_SEQUENCE_BATCH % NGPUS_PER_NODE )) -eq 0 ] || {
+  echo "FATAL: 有效序列 batch=${EFFECTIVE_SEQUENCE_BATCH} (= TRAIN_BATCH_SIZE ${TRAIN_BATCH_SIZE} * ROLLOUT_N ${ROLLOUT_N}) 必须被 NGPUS_PER_NODE=${NGPUS_PER_NODE} 整除"; exit 1; }
+[ $(( EFFECTIVE_SEQUENCE_BATCH % ROLLOUT_NUM_WORKERS )) -eq 0 ] || {
+  echo "FATAL: 有效序列 batch=${EFFECTIVE_SEQUENCE_BATCH} (= TRAIN_BATCH_SIZE ${TRAIN_BATCH_SIZE} * ROLLOUT_N ${ROLLOUT_N}) 必须被 ROLLOUT_NUM_WORKERS=${ROLLOUT_NUM_WORKERS} 整除"; exit 1; }
+[ $(( EFFECTIVE_PPO_MINI_BATCH % NGPUS_PER_NODE )) -eq 0 ] || {
+  echo "FATAL: 有效 PPO mini-batch=${EFFECTIVE_PPO_MINI_BATCH} (= PPO_MINI_BATCH_SIZE ${PPO_MINI_BATCH_SIZE} * ROLLOUT_N ${ROLLOUT_N}) 必须被 NGPUS_PER_NODE=${NGPUS_PER_NODE} 整除"; exit 1; }
 case "${TEACHER_MODEL}" in
   *35B-A3B*)
     if [ "${TEACHER_TP}" = "1" ] && [ "${FORCE_TEACHER_TP1:-0}" != "1" ]; then
@@ -192,7 +212,9 @@ echo "== student=${STUDENT_MODEL} =="
 echo "== teacher=${TEACHER_MODEL} (TP=${TEACHER_TP} mem=${TEACHER_GPU_MEM_UTIL}) =="
 echo "== train=${TRAIN_FILE} =="
 echo "== val=${VAL_FILE} =="
-echo "== batch=${TRAIN_BATCH_SIZE} workers=${ROLLOUT_NUM_WORKERS} n_gpus=${NGPUS_PER_NODE}+${TEACHER_WORLD_SIZE} =="
+echo "== prompt_batch=${TRAIN_BATCH_SIZE} rollout_n=${ROLLOUT_N} effective_sequences=${EFFECTIVE_SEQUENCE_BATCH} =="
+echo "== ppo_mini_prompt_batch=${PPO_MINI_BATCH_SIZE} effective_ppo_mini=${EFFECTIVE_PPO_MINI_BATCH} workers=${ROLLOUT_NUM_WORKERS} =="
+echo "== n_gpus=${NGPUS_PER_NODE}+${TEACHER_WORLD_SIZE} =="
 echo "== loss=${DISTILLATION_LOSS_MODE} use_task_rewards=${USE_TASK_REWARDS} =="
 echo "== max_len=${MAX_NUM_TOKENS} (prompt ${MAX_PROMPT_LENGTH} + response ${MAX_RESPONSE_LENGTH}) =="
 echo "== experiment=${PROJECT_NAME}/${EXPERIMENT_NAME} =="
@@ -299,6 +321,8 @@ MANIFEST_CONFIG=(
   --config "rollout_num_workers=${ROLLOUT_NUM_WORKERS}"
   --config "train_batch_size=${TRAIN_BATCH_SIZE}"
   --config "ppo_mini_batch_size=${PPO_MINI_BATCH_SIZE}"
+  --config "effective_sequence_batch=${EFFECTIVE_SEQUENCE_BATCH}"
+  --config "effective_ppo_mini_batch=${EFFECTIVE_PPO_MINI_BATCH}"
   --config "max_prompt_length=${MAX_PROMPT_LENGTH}"
   --config "max_response_length=${MAX_RESPONSE_LENGTH}"
   --config "ppo_max_token_len_per_gpu=${PPO_MAX_TOKEN_LEN_PER_GPU}"

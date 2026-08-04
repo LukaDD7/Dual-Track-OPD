@@ -1,5 +1,11 @@
 # Qwen3.5 Step C 之后：请 codex 调研并决策的事项
 
+> **状态：已被新的采样归因纠正。** 本文 Q1 将 Step A/B/C 的 greedy validation
+> clip rate 误当成训练采样的长度行为，因而把选择限制在 answer-only / 评估加长 /
+> 训练加长之间。不要按本文建议直接跑 answer-only。权威回复与两条任务线状态见
+> `docs/qwen35_training_environment_status_20260804.md` 和
+> `docs/qwen35_stepc_codex_decisions_and_next_run.md`。
+
 > 日期：2026-08-04 ｜ 分支：`codex/va-opd` ｜ 本文档提交：`0351071`
 > 背景 handoff：`docs/qwen35_v1_truncation_next_steps_for_claude.md`（`9fac2eb`）
 > Step A/B/C 完整证据：`docs/qwen35_v1_truncation_smoke_results.md`（§3/§4/§7）
