@@ -50,10 +50,12 @@ class FCOPDDataset(RLHFDataset):
     ):
         super().__init__(data_files, tokenizer, config, processor, max_samples)
         prompt_version = str(config.get("prompt_version", "v1"))
-        self.prompt_builder = get_geometry3k_prompt_builder(prompt_version)
-        self.dataframe = self._clean_prompts(self.dataframe)
+        get_geometry3k_prompt_builder(prompt_version)  # fail fast on unknown version
+        self.prompt_version = prompt_version
+        self.dataframe = self._clean_prompts(self.dataframe, prompt_version)
 
-    def _clean_prompts(self, dataframe):
+    @staticmethod
+    def _clean_prompts(dataframe, prompt_version: str):
         """Normalize prompts to the shared Qwen3-VL-Instruct contract.
 
         Do not inject literal ``<think>`` or boxed-answer instructions here:
@@ -61,7 +63,7 @@ class FCOPDDataset(RLHFDataset):
         must reach student rollout and teacher forced-forward scoring.
         """
         def _clean(row: dict) -> dict:
-            return clean_geometry3k_question_rows([row], self.prompt_version)[0]
+            return clean_geometry3k_question_rows([row], prompt_version)[0]
         return dataframe.map(_clean)
 
     def __getitem__(self, item):

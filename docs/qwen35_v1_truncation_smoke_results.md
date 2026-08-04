@@ -12,6 +12,10 @@
 **Step B（4096 val-only 截断消融）完成**：clip rate 在 4096 下仍为 **96%**（与 2048 相同），
 模型按预算长度续写，单纯加长不能解决截断——按文档决策规则，下一步应做
 **2048 下的精简收尾指令消融**（独立版本），而不是继续加长。
+**Step C（boxed_only 精简收尾指令，2048 val-only）完成**：clip rate **96%→85.5%**，
+boxed 率 0.10→0.25、acc 0.02→0.035；未截断的 29 个样本 boxed=100%、acc=17.2%，
+但 85.5% 仍顶满预算——指令被遵守时有效，模型仍不主动收尾。clip 仍 >70%，
+下一步（更严格变体或长度策略）按决策规则交 codex 定夺。
 
 ## 2. 可复现信息
 
@@ -115,3 +119,72 @@ token 长度用学生 tokenizer（Qwen3.5-4B）对生成部分计数：
   `scripts/hpc/run_qwen35_v1_stepa.sh` / `run_qwen35_v1_stepb.sh` launcher（`8c353db`）
   避免贴长命令。
 - 两次运行均未 `CLEAN_START`；GPU 4-7 的并行诊断实验全程未受影响。
+
+## 7. Step C：boxed_only 精简收尾指令消融（2048 val-only）
+
+### 7.1 动机与命令
+
+Step B 结论是"加长只把截断点后移"，因此按 §4 决策规则做 **2048 下独立版本的精简
+收尾指令消融**：prompt 从 `Put the final answer in \boxed{}.` 改为
+`Briefly reason. Then output your final answer as exactly one line: \boxed{<answer>}.
+Stop immediately after that line; write nothing else.`。一次只改 prompt 一个变量，
+共享 scorer 未动，长度保持 2048。
+
+```bash
+bash scripts/hpc/run_qwen35_v1_promptboxed_valonly.sh
+```
+
+- metadata：`fc-opd-storage/logs/qwen35_runs/k1_promptfix_boxedonly_r4/`
+  （`run_manifest.json`：`completed rc=0`；`hydra/.hydra/config.yaml` 含
+  `data.prompt_version: boxed_only`）
+- val dump：`fc-opd-storage/logs/val_dump_k1_promptfix_boxedonly_r4/0.jsonl`
+- 日志：`artifacts/fc_opd/nohup_v1_pvboxed_only_valonly_20260804_022233.log`
+- 墙钟：**8m36s**（02:22:34→02:31:10 UTC）；无 OOM/vLLM/teacher 错误；GPU 0-3
+  （4-7 诊断实验未受影响）
+- 运行时代码：repo `316d559`（工作树 dirty，diff_sha256 `4856283d…`；r4 修复
+  随本报告提交）；后端 verl-cu130-vllm @ `334d9f8b`（tracked dirty，同前）
+
+### 7.2 200 样本对比（口径与 §4.2 一致：学生 tokenizer 数生成部分，verl geo3k scorer）
+
+| 指标 | exp#2 @2048（v1） | Step B @4096（v1） | **Step C @2048（boxed_only）** |
+|---|---:|---:|---:|
+| token 长度 mean / median / p90 / max | 2025 / 2048 / 2048 / 2048 | 3991 / 4096 / 4096 / 4096 | **1920 / 2048 / 2048 / 2048** |
+| **clip rate（顶满预算比例）** | **0.960** | **0.960** | **0.855（171/200）** |
+| boxed_rate | 0.100 | 0.125 | **0.250（50/200）** |
+| format_rate | 0.000 | 0.000 | 0.000 |
+| accuracy_rate | 0.020（4/200） | 0.025（5/200） | **0.035（7/200）** |
+| reward mean / std | 0.018 / 0.126 | 0.0225 / 0.140 | 0.0315 / 0.166 |
+| 分数计数 | 196×0.0 + 4×0.9 | 195×0.0 + 5×0.9 | 193×0.0 + 7×0.9 |
+
+按截断/未截断分组：
+
+| 组 | n | boxed_rate | acc |
+|---|---:|---:|---:|
+| 截断（≥2048 tokens） | 171 | 0.123 | 0.012（2/171） |
+| 未截断（<2048 tokens） | 29 | **1.000** | **0.172（5/29）** |
+
+### 7.3 解读
+
+1. **指令有效但收尾仍不可靠**：29 个未截断样本 100% 带 `\boxed{}`、acc 17.2%；
+   而 171 个截断样本 boxed 只有 12.3%、acc 1.2%——截断是 acc 的主要杀手。
+   与 Step B 对比，boxed_only 让"写完了"的样本几乎全部遵守格式（Step B 未截断
+   样本中 boxed 非 100%）。
+2. **clip rate 仍 85.5%**（>70%）：模型多数时候写完 `\boxed{}` 后继续推理（截断组
+   内 boxed 样本即属此类），"stop immediately" 指令压不住续写。按 §4 决策规则
+   **不继续加长**；下一步选项交 codex：
+   - 更严格的"只答不推理"变体（prompt 明令不输出推理，直接 `\boxed{}`），仍是
+     一次只改 prompt 一个变量；
+   - 或接受"生成预算内不保证收尾"的事实，调整训练/评估口径（如对截断样本用
+     更长预算重生成，或把收尾行为作为训练目标）。
+3. format_rate 仍为 0（无字面 `<think>`），共享 scorer 未动。
+
+### 7.4 过程备注（r1-r4）
+
+- r1：Hydra struct 拒绝新增键 `data.prompt_version` → 改 `+data.prompt_version=...`
+  追加并补测试（`e04a702`）。
+- r2：`_clean_prompts` 静态方法内引用 `self` → 改实例方法（`316d559`）。
+- r3：实例属性 `prompt_version` 未赋值 → 改为显式传参的静态方法
+  `_clean_prompts(dataframe, prompt_version)`，不依赖实例状态；未知版本在
+  `__init__` fail fast。
+- 各轮 failed manifest 分别保留在 `k1_promptfix_boxedonly{, _r2, _r3}/`；
+  r4 为 completed。
