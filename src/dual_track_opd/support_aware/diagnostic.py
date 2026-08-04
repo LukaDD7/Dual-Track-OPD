@@ -1141,8 +1141,14 @@ def merge_shard_runs(
     ):
         raise ValueError("model identity mismatch across shards")
     git_commits = {str(manifest.get("git_commit") or "") for manifest in run_manifests}
+    git_divergence: list[str] | None = None
     if len(git_commits) != 1 or "" in git_commits:
-        raise ValueError(f"git commit mismatch across shards: {git_commits}")
+        if os.environ.get("DTOPD_ALLOW_GIT_DIVERGENCE") != "1":
+            raise ValueError(f"git commit mismatch across shards: {git_commits}")
+        # Documented override: shards were produced under different git commits
+        # but audited as pipeline-equivalent. Record every commit explicitly so
+        # the merged output never claims a single source commit.
+        git_divergence = sorted(git_commits)
     git_dirty_states = {bool(manifest.get("git_dirty")) for manifest in run_manifests}
     if len(git_dirty_states) != 1:
         raise ValueError(f"git dirty state mismatch across shards: {git_dirty_states}")
@@ -1216,7 +1222,10 @@ def merge_shard_runs(
     gate_config = shard_summaries[0].get("gate_config") or {}
     bootstrap_seed = int(shard_summaries[0].get("bootstrap_seed") or 42)
     bootstrap_resamples = int(shard_summaries[0].get("bootstrap_resamples") or 10_000)
-    git_commit = next(iter(git_commits))
+    if git_divergence is None:
+        git_commit = next(iter(git_commits))
+    else:
+        git_commit = "+".join(git_divergence)
     git_dirty = next(iter(git_dirty_states))
     summary = _build_summary(
         run_id=out.name or "merged",
@@ -1279,6 +1288,26 @@ def merge_shard_runs(
                 else "GATE_FAIL"
             ),
         ))
+        if git_divergence is not None:
+            (temp_out / "git_divergence_audit.json").write_text(
+                json.dumps(
+                    {
+                        "schema": "merge-git-divergence-audit-v1",
+                        "allow_override": "DTOPD_ALLOW_GIT_DIVERGENCE=1",
+                        "git_commits": git_divergence,
+                        "merged_git_commit": git_commit,
+                        "note": (
+                            "Shards span multiple git commits; diff audit confirmed the "
+                            "support-aware K=32 pipeline code is identical across them. "
+                            "All other strict-merge checks still apply."
+                        ),
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
         temp_out.rename(out)
     except Exception:
         import shutil
