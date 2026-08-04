@@ -197,3 +197,68 @@ bash scripts/hpc/run_qwen35_v1_promptboxed_valonly.sh
   `__init__` fail fast。
 - 各轮 failed manifest 分别保留在 `k1_promptfix_boxedonly{, _r2, _r3}/`；
   r4 为 completed。
+
+## 8. Step D1：采样 validation（boxed_only @2048）
+
+> 依据：`docs/qwen35_stepc_codex_decisions_and_next_run.md`（`3960527`）。
+> 归因纠正：Step A/B/C 走 verl validation 路径，pinned 后端 `val_kwargs` 默认
+> greedy（`temperature=0, top_p=1.0, top_k=-1, do_sample=false`），训练 rollout
+> 是采样；因此 A/B/C 的 clip rate 不构成训练采样口径。D1 用训练采样参数复测。
+
+### 8.1 命令与产物
+
+```bash
+bash scripts/hpc/run_qwen35_v1_boxedonly_sampled_valonly.sh
+```
+
+即 Step C r4 配置 + `val_kwargs.do_sample=True, temperature=1.0, top_p=0.95,
+top_k=-1`（与训练 rollout 采样器一致）；prompt 仍为 boxed_only、cap 2048。
+
+- metadata：`fc-opd-storage/logs/qwen35_runs/k1_boxedonly_sampled_d1/`
+  （`completed rc=0`；`resolved_launch_config.json` 含 val_kwargs 覆盖）
+- val dump：`fc-opd-storage/logs/val_dump_k1_boxedonly_sampled_d1/0.jsonl`
+- 日志：`artifacts/fc_opd/nohup_v1_boxedonly_sampled_d1_20260804_062414.log`
+- 墙钟：**11m06s**（06:24:29→06:35:35 UTC）；无 OOM/报错；GPU 0-3，4-7 未受影响
+- 运行时代码：repo `3960527`（tracked_dirty=True，diff 为并行诊断线既有改动）；
+  后端 verl-cu130-vllm @ `334d9f8b`
+
+### 8.2 结果（200 样本，口径同前）
+
+| 指标 | Step C r4（greedy @2048） | **D1（sampled @2048）** |
+|---|---:|---:|
+| token 长度 mean / p50 / p90 / p95 / p99 / max | 1920 / 2048 / 2048 / — / — / 2048 | 2020 / 2048 / 2048 / 2048 / 2048 / 2048 |
+| **clip rate（==2048）** | **0.855** | **0.945（189/200）** |
+| EOS 率（<2048 自然结束） | 0.145 | **0.055（11/200）** |
+| boxed_rate | 0.250 | 0.125（25/200） |
+| format_rate | 0.000 | 0.000 |
+| accuracy_rate | 0.035 | 0.015（3/200） |
+| reward mean / std | 0.0315 / 0.166 | 0.0135 / 0.110 |
+
+重复度诊断（token 级 4-gram 重复比 / 最长重复跨度）：
+
+| 指标 | Step C r4（greedy） | D1（sampled） |
+|---|---:|---:|
+| rep4 ratio mean / median / p90 | 0.584 / 0.565 / 0.846 | **0.340 / 0.346 / 0.400** |
+| 最长重复跨度 mean / p90 / max（tokens） | 388 / 1289 / 1618 | **22 / 33 / 67** |
+| rep4 ratio >0.05 的样本占比 | 1.000 | 1.000 |
+
+分组：
+
+| 组 | n | boxed_rate | acc |
+|---|---:|---:|---:|
+| EOS（<2048） | 11 | 0.727 | 0.182（2/11） |
+| clip（==2048） | 189 | 0.090 | 0.005（1/189） |
+
+### 8.3 解读与判定
+
+1. **codex 的 greedy 归因方向被证实**：greedy 下最长重复跨度均值 388 tokens、
+   最大 1618（响应在自我重复）；采样把重复跨度压到均值 22、最大 67，
+   rep4 重复比也从 0.584 降到 0.340。A/B/C"顶满预算"里确实有大量 greedy 重复伪影。
+2. **但采样不解决截断**：clip rate 94.5%（比 greedy 的 85.5% 还高），EOS 只有
+   5.5%——模型在采样下写的是**长而低重复的推理**，仍然不主动收尾；boxed/acc
+   反而低于 greedy（0.125/0.015 vs 0.250/0.035）。
+3. **"写完即高质量"规律依旧成立**：EOS 组 boxed 72.7%、acc 18.2%，clip 组
+   boxed 9.0%、acc 0.5%。
+4. 按 codex go/no-go：D1 clip 94.5% >10% → **下一步跑 D1-L**（同采样器，
+   cap 8192，同一 200 有序 prompts），测自然完成长度分布与长推理质量，
+   不做 8192 训练口径。
