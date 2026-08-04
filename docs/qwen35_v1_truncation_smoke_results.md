@@ -391,3 +391,67 @@ bash scripts/hpc/run_qwen35_v1_boxedonly_nonthinking_sampled_valonly.sh
 4. 直接传学生 token IDs 的真实前置条件是两边 canonical token-ID mapping 完全一致；
    文本前缀相同不能证明 token 对齐。wrapper 已新增 fail-fast tokenizer alignment
    preflight，D3/训练必须先通过。
+
+## 12. Step D3：非思考采样 validation @4096（cap 冻结 gate）
+
+> 依据：`docs/qwen35_d1_d2_codex_decision_20260804.md`（`48805d2`）。
+> 前置：`qwen35_tokenizer_alignment.py` preflight 在真实运行中 **PASS**
+> （248,070 IDs、0 mismatch，student/teacher `tokenizer.json` 字节级一致）。
+
+### 12.1 命令与产物
+
+```bash
+bash scripts/hpc/run_qwen35_v1_boxedonly_nonthinking_sampled_r4096_valonly.sh
+```
+
+同 D2（boxed_only、`enable_thinking=False`、采样器），唯一变量 cap 2048→4096。
+
+- metadata：`fc-opd-storage/logs/qwen35_runs/k1_boxedonly_nonthinking_sampled_r4096_d3/`
+  （`completed rc=0`；含 `tokenizer_alignment.json`）
+- val dump：`fc-opd-storage/logs/val_dump_k1_boxedonly_nonthinking_sampled_r4096_d3/0.jsonl`
+- 日志：`artifacts/fc_opd/nohup_v1_boxedonly_nonthinking_sampled_r4096_d3_20260804_093541.log`
+- 墙钟：**7m25s**（445s）；无 OOM/报错；GPU 0-3，4-7 未受影响
+- 运行时代码：repo `48805d2`（tracked_dirty=True）；后端 `334d9f8b`
+
+### 12.2 结果（200 样本，D2 @2048 vs D3 @4096）
+
+| 指标 | D2 @2048 | **D3 @4096** |
+|---|---:|---:|
+| token 长度 mean / p50 / p90 / p95 / p99 / max | 922 / 381 / 2048 / 2048 / 2048 / 2048 | 1216 / 288 / 4096 / 4096 / 4096 / 4096 |
+| **clip rate（顶满 cap）** | 0.285 | **0.190（38/200）** |
+| EOS 率 | 0.715 | **0.810（162/200）** |
+| boxed_rate | 0.715 | **0.825（165/200）** |
+| format_rate | 0.000 | 0.000 |
+| accuracy_rate | 0.090（18/200） | **0.100（20/200）** |
+| reward mean / std | 0.081 / 0.258 | 0.090 / 0.271 |
+| 总生成 tokens | 184,501 | 243,209（+32%） |
+| **正确数 / 千生成 token** | **0.0976** | 0.0822 |
+| rep4 ratio mean / median | 0.187 / 0.180 | 0.192 / 0.168 |
+| 最长重复跨度 mean / max | 15.7 / 76 | 15.7 / 82 |
+
+分组：
+
+| 组 | n | boxed_rate | acc |
+|---|---:|---:|---:|
+| EOS（<4096） | 162 | **0.994** | 0.123（20/162） |
+| clip（==4096） | 38 | 0.105 | 0.000（0/38） |
+
+EOS 长度：min 37 / p50 225 / p90 1588 / max 4095。答对样本长度：
+[54, 96, 157, 160, 177, 201, 207, 210, 219, 222, 256, 260, 285, 288, 373,
+425, 595, 1588, 1770, 3708]——**新增 2 个正确答案（1770、3708）都需要
+2048-4096 的预算**，即 D2 的 2048 cap 会把它们截断掉。
+
+### 12.3 判定与推荐
+
+1. clip 19.0% 落在 codex 规则的 **10-20% 区间**，且质量有实增：boxed +11pp、
+   acc 18→20（新增 2 个正确全部来自 2048-4096 长尾）、EOS +10pp；
+   token 效率下降（0.098→0.082 正确/千 token，多花 32% token）。
+2. **推荐（供 codex 定夺）：D3 选 4096 做首个 ≤20 步 n=4 smoke**，符合
+   codex 规则"10-20% 且质量明显增加 → 可选 4096"；训练时把 overlong 与
+   prompt-group-level clip 设为必报指标（独立估算 n=4 至少一个截断：2048 约
+   73.8%、4096 约 56.9%，实际以 group-level 实测为准）。
+3. 若 n=4 smoke 中 group-clip 仍高或 token 成本不可接受，回退 2048 并把
+   overlong 作为已知训练样本类型，另立 sampler/termination 稳定化实验；
+   不试 8192（规则内 cap 冻结只到 4096）。
+4. 重复度与 D2 持平（rep4 0.19、最长跨度 15.7），非思考模式下加长不引入
+   重复膨胀。
