@@ -1,6 +1,7 @@
 import pytest
 
 from dual_track_opd.fc_opd.prompt_contracts import (
+    clean_geometry3k_question_rows,
     geometry3k_training_prompt,
     geometry3k_training_prompt_boxed_only,
     get_geometry3k_prompt_builder,
@@ -37,3 +38,15 @@ def test_prompt_builder_registry_versions_and_fail_fast():
     assert get_geometry3k_prompt_builder("boxed_only") is geometry3k_training_prompt_boxed_only
     with pytest.raises(ValueError, match="unknown geometry3k prompt_version"):
         get_geometry3k_prompt_builder("nope")
+
+
+def test_clean_geometry3k_question_rows_uses_versioned_builder():
+    rows = [{"question": "Find x.", "answer": "3"}, {"question": "  "}]
+    out = clean_geometry3k_question_rows(rows, "boxed_only")
+    assert out[0]["prompt"][0]["role"] == "user"
+    assert out[0]["prompt"][0]["content"].startswith("<image>\nFind x.")
+    assert "\\boxed{<answer>}" in out[0]["prompt"][0]["content"]
+    assert out[1] == {"question": "  "}  # 空 question 不加 prompt，原行不变
+    # 默认 v1 与旧行为一致
+    out_v1 = clean_geometry3k_question_rows([{"question": "Find x."}], "v1")
+    assert out_v1[0]["prompt"] == geometry3k_training_prompt("Find x.")

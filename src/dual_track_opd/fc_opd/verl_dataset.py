@@ -17,7 +17,10 @@ from transformers import PreTrainedTokenizer, ProcessorMixin
 
 from verl.utils.dataset.rl_dataset import RLHFDataset
 
-from dual_track_opd.fc_opd.prompt_contracts import get_geometry3k_prompt_builder
+from dual_track_opd.fc_opd.prompt_contracts import (
+    clean_geometry3k_question_rows,
+    get_geometry3k_prompt_builder,
+)
 
 
 class FCOPDDataset(RLHFDataset):
@@ -50,8 +53,7 @@ class FCOPDDataset(RLHFDataset):
         self.prompt_builder = get_geometry3k_prompt_builder(prompt_version)
         self.dataframe = self._clean_prompts(self.dataframe)
 
-    @staticmethod
-    def _clean_prompts(dataframe):
+    def _clean_prompts(self, dataframe):
         """Normalize prompts to the shared Qwen3-VL-Instruct contract.
 
         Do not inject literal ``<think>`` or boxed-answer instructions here:
@@ -59,10 +61,7 @@ class FCOPDDataset(RLHFDataset):
         must reach student rollout and teacher forced-forward scoring.
         """
         def _clean(row: dict) -> dict:
-            question = str(row.get("question", "")).strip()
-            if question:
-                row["prompt"] = self.prompt_builder(question)
-            return row
+            return clean_geometry3k_question_rows([row], self.prompt_version)[0]
         return dataframe.map(_clean)
 
     def __getitem__(self, item):

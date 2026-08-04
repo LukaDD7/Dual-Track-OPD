@@ -62,3 +62,22 @@ def get_geometry3k_prompt_builder(prompt_version: str):
             f"unknown geometry3k prompt_version: {prompt_version!r}; "
             f"expected one of {sorted(GEOMETRY3K_PROMPT_BUILDERS)}"
         ) from None
+
+
+def clean_geometry3k_question_rows(rows, prompt_version: str = "v1"):
+    """Normalize question rows to the versioned prompt contract.
+
+    Dataset-agnostic helper used by ``FCOPDDataset._clean_prompts`` so the
+    mapping logic is unit-testable without importing verl/transformers.
+    Rows are copied; non-empty questions get a ``prompt`` field built by the
+    selected versioned builder.
+    """
+    builder = get_geometry3k_prompt_builder(prompt_version)
+    out = []
+    for row in rows:
+        row = dict(row)
+        question = str(row.get("question", "")).strip()
+        if question:
+            row["prompt"] = builder(question)
+        out.append(row)
+    return out
