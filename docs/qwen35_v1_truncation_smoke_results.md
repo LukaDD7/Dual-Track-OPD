@@ -262,3 +262,55 @@ top_k=-1`（与训练 rollout 采样器一致）；prompt 仍为 boxed_only、ca
 4. 按 codex go/no-go：D1 clip 94.5% >10% → **下一步跑 D1-L**（同采样器，
    cap 8192，同一 200 有序 prompts），测自然完成长度分布与长推理质量，
    不做 8192 训练口径。
+
+## 9. Step D1-L：采样 validation @8192（自然完成长度分布）
+
+### 9.1 命令与产物
+
+```bash
+bash scripts/hpc/run_qwen35_v1_boxedonly_sampled_r8192_valonly.sh
+```
+
+同 D1（boxed_only、`temp=1.0 top_p=0.95 top_k=-1`、同一 200 有序 prompts），
+只改 cap：2048→8192。不构成 8192 训练口径。
+
+- metadata：`fc-opd-storage/logs/qwen35_runs/k1_boxedonly_sampled_r8192_d1l/`
+  （`completed rc=0`）
+- val dump：`fc-opd-storage/logs/val_dump_k1_boxedonly_sampled_r8192_d1l/0.jsonl`
+- 日志：`artifacts/fc_opd/nohup_v1_boxedonly_sampled_r8192_d1l_20260804_072104.log`
+- 墙钟：**11m16s**（676s）；无 OOM/报错；GPU 0-3，4-7 未受影响
+- 运行时代码：repo `1f4558c`（tracked_dirty=True）；后端 `334d9f8b`
+
+### 9.2 结果（200 样本，口径同前）
+
+| 指标 | Step C greedy @2048 | D1 sampled @2048 | **D1-L sampled @8192** |
+|---|---:|---:|---:|
+| token 长度 mean / p50 / p90 / p95 / p99 / max | 1920 / 2048 / 2048 / — / — / 2048 | 2020 / 2048 / 2048 / 2048 / 2048 / 2048 | 7709 / 8192 / 8192 / 8192 / 8192 / 8197 |
+| **clip rate（顶满 cap）** | 0.855 | 0.945 | **0.830（166/200）** |
+| EOS 率（<cap 自然结束） | 0.145 | 0.055 | **0.170（34/200）** |
+| boxed_rate | 0.250 | 0.125 | 0.245（49/200） |
+| format_rate | 0.000 | 0.000 | 0.000 |
+| accuracy_rate | 0.035 | 0.015 | 0.025（5/200） |
+| reward mean / std | 0.0315 / 0.166 | 0.0135 / 0.110 | 0.0225 / 0.141 |
+| rep4 ratio mean / median | 0.584 / 0.565 | 0.340 / 0.346 | 0.483 / 0.491 |
+| 最长重复跨度 mean / max（tokens） | 388 / 1618 | 22 / 67 | 35 / 70 |
+
+自然完成（EOS）样本分布：
+
+| 组 | n | 长度 min / p50 / p90 / max | 其中 ≤2048 | boxed_rate | acc |
+|---|---:|---:|---:|---:|---:|
+| EOS（<8192） | 34 | 646 / 5838 / 8191 / 8191 | 6/34 | 0.794 | 0.147（5/34） |
+| clip（==8192） | 166 | — | — | 0.133 | 0.000（0/166） |
+
+### 9.3 解读与判定
+
+1. **自然推理本身就极长**：34 个自然结束的样本中位数 5838 tokens、p90 8191，
+   只有 6 个能在 2048 内写完。2048 对自然思考远不够，加长只是把截断点后移。
+2. **加长换来的质量增益极小**：acc 1.5%→2.5%（3→5 个正确，其中 2 个超过 2048），
+   boxed 12.5%→24.5%；token 成本却翻 4 倍。EOS 组质量依旧远高于 clip 组
+   （acc 0.147 vs 0.000）。
+3. 采样下重复受控但随长度上升：rep4 0.34→0.48，最长重复跨度 22→35，
+   仍远低于 greedy（388），codex 的 greedy 归因在重复维度成立。
+4. **按 codex go/no-go：D1-L clip 83% >30%、增益不足以 justify 成本 →
+   reject "just make it longer" → 下一步跑 D2**（`enable_thinking=False`，
+   采样 @2048，prompt 仍为 boxed_only 保留简短可见推理；不是 answer_only）。
