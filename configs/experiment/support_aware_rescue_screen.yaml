@@ -20,6 +20,7 @@ screen:
   proposal_max_new_tokens: 4096
   stage1_k: 4
   stage2_k: 8
+  wrong_source_k: 16
   max_continuation_tokens: 2048
   continuation_temperature: 0.7
   continuation_top_p: 0.95

@@ -99,6 +99,7 @@ class RescueScreenConfig:
     proposal_max_new_tokens: int = 4096
     stage1_k: int = 4
     stage2_k: int = 8
+    wrong_source_k: int = 16
     max_continuation_tokens: int = 2048
     continuation_temperature: float = 0.7
     continuation_top_p: float = 0.95
@@ -139,6 +140,7 @@ def load_config(path: str | Path, args: argparse.Namespace) -> RescueScreenConfi
         proposal_max_new_tokens=int(screen.get("proposal_max_new_tokens", 4096)),
         stage1_k=int(args.stage1_k or screen.get("stage1_k", 4)),
         stage2_k=int(args.stage2_k or screen.get("stage2_k", 8)),
+        wrong_source_k=int(args.wrong_source_k or screen.get("wrong_source_k", 16)),
         max_continuation_tokens=int(
             args.max_continuation_tokens or screen.get("max_continuation_tokens", 2048)
         ),
@@ -453,7 +455,7 @@ def screen_prompt(
         image=image,
         prompt_text=prompt_text,
         gold_answer=gold_answer,
-        seeds=range(config.stage2_k),
+        seeds=range(config.wrong_source_k),
         max_tokens=config.max_continuation_tokens,
         temperature=config.continuation_temperature,
         top_p=config.continuation_top_p,
@@ -676,6 +678,7 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--proposals-per-prompt", type=int, default=None)
     run_parser.add_argument("--stage1-k", type=int, default=None)
     run_parser.add_argument("--stage2-k", type=int, default=None)
+    run_parser.add_argument("--wrong-source-k", type=int, default=None)
     run_parser.add_argument("--max-continuation-tokens", type=int, default=None)
     run_parser.add_argument("--teacher-device", default=None)
     run_parser.add_argument("--student-device", default=None)

@@ -26,6 +26,7 @@ if [[ "${SMOKE:-0}" == "1" ]]; then
     --proposals-per-prompt 1 \
     --stage1-k 2 \
     --stage2-k 2 \
+    --wrong-source-k 4 \
     --max-continuation-tokens 256 \
     --teacher-device cuda:0 \
     --student-device cuda:1
