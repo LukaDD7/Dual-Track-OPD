@@ -1,0 +1,31 @@
+# Offline TOPD-style divergence probing on cached trajectories (CPU only).
+# Replicates the detection half of TOPD (arXiv 2606.00305) without
+# regeneration: K32 wrong student rollouts x verified teacher proposals,
+# short-window OT in the student text-embedding space.
+
+experiment:
+  name: support_aware_offline_topd_probe
+  objective: test_whether_offline_ot_locator_predicts_prefix_rescue_gate_c
+
+model:
+  student: ${DTOPD_MODEL_ROOT}/Qwen3-VL-4B-Instruct
+
+data:
+  proposal_dir: ${DTOPD_OUTPUT_ROOT}/support_aware_opd/proposal_feasibility_20260805_merged
+  k32_run_dir: ${DTOPD_OUTPUT_ROOT}/support_aware_opd/diag_full_k32_20260804_merged
+  intervention_dir: ${DTOPD_OUTPUT_ROOT}/support_aware_opd/prefix_intervention_20260806_merged
+
+probe:
+  window_size: 50
+  stride: 1
+  high_loss_quantile: 0.80
+  ot_quantile: 0.80
+  alignment: warped
+  horizons: [64, 128, 256, 512]
+  bootstrap_seed: 42
+  bootstrap_resamples: 10000
+  dtype: float32
+  device: cpu
+
+output:
+  dir: ${DTOPD_OUTPUT_ROOT}/support_aware_opd/offline_topd_probe_20260806
