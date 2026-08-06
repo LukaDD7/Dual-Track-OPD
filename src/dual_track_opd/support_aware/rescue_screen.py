@@ -322,7 +322,7 @@ def _run_arm(
             "continuation_token_hash": generation["continuation_token_hash"],
             "correct": is_correct,
             "malformed": bool(verdict.get("malformed")),
-            "response_token_count": int(generation["generation"].response_token_count),
+            "response_token_count": len(generation["generation"].response_token_ids_raw),
             "finish_reason": generation["generation"].finish_reason,
         })
     return {"correct_count": correct, "K": len(seeds), "rollouts": rollouts}
@@ -365,7 +365,7 @@ def _screen_wrong_source(
             "seed": int(seed),
             "correct": bool(verdict.get("correct") is True),
             "malformed": bool(verdict.get("malformed")),
-            "response_token_count": int(record.response_token_count),
+            "response_token_count": len(record.response_token_ids_raw),
             "response_token_ids_raw": tuple(int(value) for value in record.response_token_ids_raw),
         })
     summary = {
@@ -434,7 +434,7 @@ def screen_prompt(
         )
         verdict = verify_answer(generation.response_text_display, gold_answer)
         proposals.append((proposal_id, generation_seed, generation, verdict))
-        result["proposal_token_count"] += int(generation.response_token_count)
+        result["proposal_token_count"] += len(generation.response_token_ids_raw)
     result["proposal_count"] = len(proposals)
     correct_proposals = [item for item in proposals if item[3].get("correct") is True]
     result["correct_proposal_count"] = len(correct_proposals)
