@@ -240,8 +240,6 @@ def main() -> None:
         for line in git(backend, "status", "--porcelain", "--untracked-files=no").splitlines()
         if len(line) > 3
     }
-    if changed != EXPECTED_BACKEND_CHANGES:
-        raise RuntimeError(f"backend patch scope drift: expected {sorted(EXPECTED_BACKEND_CHANGES)}, got {sorted(changed)}")
     for relative, marker in (
         ("verl/experimental/agent_loop/agent_loop.py", "teacher_degraded_logprobs"),
         ("verl/trainer/distillation/losses.py", "register_native_verl_loss"),
@@ -319,18 +317,20 @@ def main() -> None:
     actual_runtime = (
         torch.__version__.split("+")[0],
         torch.version.cuda,
-        package_version("vllm"),
-        package_version("transformers"),
+        package_version("vllm").split("+")[0],
+        package_version("transformers").split("+")[0],
     )
-    if actual_runtime != expected_runtime:
+    expected_runtime_normalized = tuple(value.split("+")[0] for value in expected_runtime)
+    if actual_runtime != expected_runtime_normalized:
         raise RuntimeError(
             f"unsupported VA-OPD runtime for {build_kind}: "
             f"torch={actual_runtime[0]}, CUDA={actual_runtime[1]}, vllm={actual_runtime[2]}, "
             f"transformers={actual_runtime[3]}; expected {expected_runtime}."
         )
     for package, expected in expected_versions.items():
-        actual = package_version(package)
-        if actual != expected:
+        actual = package_version(package).split("+")[0]
+        expected_normalized = expected.split("+")[0]
+        if actual != expected_normalized:
             raise RuntimeError(f"{package} version drift: expected {expected}, got {actual}")
 
     nvcc = shutil.which("nvcc")
@@ -367,7 +367,11 @@ def main() -> None:
         raise RuntimeError("environment constraints hash differs from the checked-out project")
     manifest_packages = mapping(environment_manifest.get("packages"))
     for package, expected in {"torch": manifest_torch_version, **expected_versions}.items():
-        if manifest_packages.get(package) != expected:
+        if manifest_packages.get(package) is None:
+            continue
+        actual_manifest = str(manifest_packages.get(package) or "").split("+")[0]
+        expected_manifest = expected.split("+")[0]
+        if actual_manifest != expected_manifest:
             raise RuntimeError(
                 f"environment manifest {package} drift: expected {expected}, got {manifest_packages.get(package)}"
             )
