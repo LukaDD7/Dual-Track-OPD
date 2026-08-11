@@ -192,11 +192,19 @@ HPC 根目录：
 /inspire/hdd/global_user/mengweicheng-240108120092/lzy
 ```
 
-默认 Python 使用已经通过 real-image canary 的 active cu128 环境：
+默认 Python 必须是与 K=32/proposal 证据相同 transformers 版本的环境（fingerprint
+必须等于证据中的 `k32_tokenizer_hash`）。当前 canonical 环境：
 
 ```text
-$DTOPD_ROOT/envs/va-opd-native-e003-cu128-r595-v1/bin/python
+$DTOPD_ROOT/envs/va-opd-qwen35-cu128/bin/python   # transformers 5.12.0 → hash b5005fea...
 ```
+
+⚠️ 不要改用 `va-opd-native-e003-cu128-r595-v1`（transformers 4.57.3）：它对同一模型
+算出 fingerprint `4eff9f44...`，与不可变证据 `b5005fea...` 不一致，会触发 fail-fast
+`ValueError: current model tokenizer differs from immutable K=32/proposal token-ID
+evidence`。该 native 环境只用于训练侧，不用于 causal probe。运行时通过
+`DTOPD_PYTHON=.../va-opd-qwen35-cu128/bin/python` 覆盖脚本默认值；详见
+`docs/VA-OPD_BUG_TRACKER.md` #20。
 
 输入默认对应现有已完成实验：
 

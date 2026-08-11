@@ -282,32 +282,40 @@ def fixed_trajectory_visual_statistics(
     entropy_full: list[float] = []
     entropy_degraded: list[float] = []
     entropy_null: list[float] = []
-    keep_used_everywhere = True
+    # One full forward per image condition, then chunk only the vocabulary
+    # math.  Per-chunk forwards re-computed the entire growing prefix every
+    # time (O(T^2/chunk_size) model work); a single forward is causally
+    # identical for every response position and keeps peak memory unchanged
+    # (the old last chunk already forwarded the full prefix).
+    full_logits, full_keep = response_chunk_logits(
+        model, prompt_inputs["full"], response_ids,
+        start=0, end=len(response_ids), device=device, prefer_logits_to_keep=prefer_logits_to_keep,
+    )
+    degraded_logits, degraded_keep = response_chunk_logits(
+        model, prompt_inputs["degraded"], response_ids,
+        start=0, end=len(response_ids), device=device, prefer_logits_to_keep=prefer_logits_to_keep,
+    )
+    null_logits, null_keep = response_chunk_logits(
+        model, prompt_inputs["null"], response_ids,
+        start=0, end=len(response_ids), device=device, prefer_logits_to_keep=prefer_logits_to_keep,
+    )
+    keep_used_everywhere = full_keep and degraded_keep and null_keep
     for start in range(0, len(response_ids), chunk_size):
         end = min(len(response_ids), start + chunk_size)
-        full_logits, full_keep = response_chunk_logits(
-            model, prompt_inputs["full"], response_ids,
-            start=start, end=end, device=device, prefer_logits_to_keep=prefer_logits_to_keep,
-        )
-        degraded_logits, degraded_keep = response_chunk_logits(
-            model, prompt_inputs["degraded"], response_ids,
-            start=start, end=end, device=device, prefer_logits_to_keep=prefer_logits_to_keep,
-        )
-        degraded_stats = full_vocab_js_statistics(full_logits, degraded_logits)
-        null_logits, null_keep = response_chunk_logits(
-            model, prompt_inputs["null"], response_ids,
-            start=start, end=end, device=device, prefer_logits_to_keep=prefer_logits_to_keep,
-        )
-        null_stats = full_vocab_js_statistics(full_logits, null_logits)
-        keep_used_everywhere &= full_keep and degraded_keep and null_keep
+        full_chunk = full_logits[start:end]
+        degraded_chunk = degraded_logits[start:end]
+        null_chunk = null_logits[start:end]
+        degraded_stats = full_vocab_js_statistics(full_chunk, degraded_chunk)
+        null_stats = full_vocab_js_statistics(full_chunk, null_chunk)
         js_degraded.extend(float(value) for value in degraded_stats.js.cpu().tolist())
         js_null.extend(float(value) for value in null_stats.js.cpu().tolist())
         entropy_full.extend(float(value) for value in degraded_stats.entropy_left.cpu().tolist())
         entropy_degraded.extend(float(value) for value in degraded_stats.entropy_right.cpu().tolist())
         entropy_null.extend(float(value) for value in null_stats.entropy_right.cpu().tolist())
-        del full_logits, degraded_logits, null_logits, degraded_stats, null_stats
-        if torch.cuda.is_available() and str(device).startswith("cuda"):
-            torch.cuda.empty_cache()
+        del full_chunk, degraded_chunk, null_chunk, degraded_stats, null_stats
+    del full_logits, degraded_logits, null_logits
+    if torch.cuda.is_available() and str(device).startswith("cuda"):
+        torch.cuda.empty_cache()
 
     rows = token_signal_rows(
         token_ids=response_ids,
@@ -599,23 +607,36 @@ def teacher_path_support_statistics(
     if not torch.equal(student_inputs["input_ids"], teacher_inputs["input_ids"]):
         raise RuntimeError("teacher/student rendered prompt IDs differ")
     rows: list[dict[str, float | int]] = []
+    if not teacher_token_ids:
+        return rows
+    # Single forward per model over the whole teacher trajectory, then chunk
+    # only the vocabulary math.  The previous per-chunk loop forwarded the
+    # growing prefix for every chunk, i.e. O(T^2/chunk_size) teacher work; a
+    # full forward is causally identical for every response position.
+    student_logits, _ = response_chunk_logits(
+        models.student_model, student_inputs, teacher_token_ids,
+        start=0, end=len(teacher_token_ids), device=student_device,
+    )
+    teacher_logits, _ = response_chunk_logits(
+        models.teacher_model, teacher_inputs, teacher_token_ids,
+        start=0, end=len(teacher_token_ids), device=teacher_device,
+    )
+    # Cross-model JS requires both logits on one device.  Keep student
+    # logits on the student GPU and move only teacher logits (~19 MB per
+    # 64-token chunk, ~1.2 GB for a 4096-token response in bf16) to it;
+    # top-k/NLL rows stay as before.
+    teacher_logits = teacher_logits.to(device=student_logits.device)
     for start in range(0, len(teacher_token_ids), chunk_size):
         end = min(len(teacher_token_ids), start + chunk_size)
-        student_logits, _ = response_chunk_logits(
-            models.student_model, student_inputs, teacher_token_ids,
-            start=start, end=end, device=student_device,
-        )
-        teacher_logits, _ = response_chunk_logits(
-            models.teacher_model, teacher_inputs, teacher_token_ids,
-            start=start, end=end, device=teacher_device,
-        )
-        stats = full_vocab_js_statistics(student_logits, teacher_logits)
-        student_logp = torch.log_softmax(student_logits.float(), dim=-1)
+        student_chunk = student_logits[start:end]
+        teacher_chunk = teacher_logits[start:end]
+        stats = full_vocab_js_statistics(student_chunk, teacher_chunk)
+        student_logp = torch.log_softmax(student_chunk.float(), dim=-1)
         ids = torch.tensor(teacher_token_ids[start:end], dtype=torch.long, device=student_logp.device)
         sampled = student_logp[torch.arange(end - start, device=student_logp.device), ids]
-        k = min(top_k, int(student_logits.shape[-1]))
-        student_top = torch.topk(student_logits, k=k, dim=-1).indices.cpu()
-        teacher_top = torch.topk(teacher_logits, k=k, dim=-1).indices.cpu()
+        k = min(top_k, int(student_chunk.shape[-1]))
+        student_top = torch.topk(student_chunk, k=k, dim=-1).indices.cpu()
+        teacher_top = torch.topk(teacher_chunk, k=k, dim=-1).indices.cpu()
         for offset in range(end - start):
             overlap = len(set(student_top[offset].tolist()).intersection(teacher_top[offset].tolist())) / k
             rows.append({
@@ -625,5 +646,8 @@ def teacher_path_support_statistics(
                 "student_teacher_js": float(stats.js[offset].cpu()),
                 "topk_overlap": float(overlap),
             })
-        del student_logits, teacher_logits, stats, student_logp, sampled
+        del student_chunk, teacher_chunk, stats, student_logp, sampled
+    del student_logits, teacher_logits
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
     return rows
