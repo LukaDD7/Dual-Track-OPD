@@ -47,17 +47,72 @@ def _pct(values, q) -> float | None:
     return float(finite[min(len(finite) - 1, int(round(q * (len(finite) - 1))))])
 
 
-def load_records(input_dirs: list[Path]) -> list[dict]:
+def load_records(input_dirs: list[Path]) -> tuple[list[dict], dict[str, float]]:
     records = []
+    mtimes_by_id: dict[str, float] = {}
     for root in input_dirs:
         for path in sorted((root / "trajectory_results").glob("*.json")):
             record = json.loads(path.read_text(encoding="utf-8"))
-            record["_file_mtime_unix"] = path.stat().st_mtime
+            mtimes_by_id[str(record.get("trajectory_id") or "")] = path.stat().st_mtime
             records.append(record)
-    return records
+    return records, mtimes_by_id
 
 
-def validate(records: list[dict], input_dirs: list[Path], cutoff_unix: float) -> dict:
+def _check_estimate(
+    issues: list[str],
+    owner: str,
+    path: str,
+    estimate: dict | None,
+) -> None:
+    """Validate ContinuationEstimate count identity and finiteness."""
+
+    if estimate is None:
+        return
+    n = estimate.get("n")
+    n_correct = estimate.get("n_correct")
+    n_malformed = estimate.get("n_malformed")
+    pass_rate = estimate.get("pass_rate")
+    numeric = {
+        "n": n,
+        "n_correct": n_correct,
+        "n_malformed": n_malformed,
+        "pass_rate": pass_rate,
+    }
+    for key, value in numeric.items():
+        if isinstance(value, (int, float)) and not _is_finite(value):
+            issues.append(f"{owner}: non-finite {path}.{key}")
+            return
+    if not isinstance(n, int) or n < 1:
+        issues.append(f"{owner}: {path}.n={n!r} (expected int >= 1)")
+        return
+    if not isinstance(n_correct, int) or not 0 <= n_correct <= n:
+        issues.append(f"{owner}: {path}.n_correct={n_correct!r} outside [0, n={n}]")
+    if not isinstance(n_malformed, int) or not 0 <= n_malformed <= n:
+        issues.append(f"{owner}: {path}.n_malformed={n_malformed!r} outside [0, n={n}]")
+    if (
+        isinstance(n_correct, int)
+        and isinstance(n_malformed, int)
+        and n_correct + n_malformed > n
+    ):
+        issues.append(f"{owner}: {path} count identity violated (correct+malformed > n)")
+    if (
+        isinstance(pass_rate, (int, float))
+        and isinstance(n_correct, int)
+        and abs(float(pass_rate) - n_correct / n) > 1e-6
+    ):
+        issues.append(f"{owner}: {path}.pass_rate={pass_rate!r} != n_correct/n")
+    for field in ("seeds", "response_hashes"):
+        value = estimate.get(field)
+        if isinstance(value, (list, tuple)) and len(value) != n:
+            issues.append(f"{owner}: {path}.{field} length {len(value)} != n={n}")
+
+
+def validate(
+    records: list[dict],
+    input_dirs: list[Path],
+    cutoff_unix: float,
+    mtimes_by_id: dict[str, float],
+) -> dict:
     issues: list[str] = []
     ids = [str(r.get("trajectory_id") or "") for r in records]
     if len(ids) != len(set(ids)):
@@ -74,7 +129,7 @@ def validate(records: list[dict], input_dirs: list[Path], cutoff_unix: float) ->
         n_signals = len(r.get("token_signals") or [])
         if n_tokens != n_signals:
             issues.append(f"{r.get('trajectory_id')}: token count {n_tokens} != signal rows {n_signals}")
-        mtime = float(r.get("_file_mtime_unix") or 0.0)
+        mtime = mtimes_by_id.get(str(r.get("trajectory_id") or ""), 0.0)
         if mtime and mtime < cutoff_unix:
             old_impl += 1
         elif mtime:
@@ -96,14 +151,18 @@ def validate(records: list[dict], input_dirs: list[Path], cutoff_unix: float) ->
             end = int(candidate["end"]) if candidate.get("end") is not None else -1
             if not (0 <= start <= anchor <= end <= n_traj):
                 issues.append(f"{candidate.get('candidate_id')}: bounds {start}/{anchor}/{end} vs len {n_traj}")
-            for key in ("relay_continuations", "visual_continuations"):
-                estimates = candidate.get(key) or {}
-                if isinstance(estimates, dict):
-                    for length, estimate in estimates.items():
-                        for field in ("n", "n_correct", "n_malformed", "pass_rate"):
-                            value = estimate.get(field) if isinstance(estimate, dict) else None
-                            if isinstance(value, (int, float)) and not _is_finite(value):
-                                issues.append(f"{candidate.get('candidate_id')}: non-finite {key}.{length}.{field}")
+            owner = str(candidate.get("candidate_id") or "")
+            for length, estimate in (candidate.get("relay_continuations") or {}).items():
+                _check_estimate(issues, owner, f"relay_continuations.{length}", estimate)
+            for index, estimate in enumerate(candidate.get("visual_continuations") or ()):
+                _check_estimate(issues, owner, f"visual_continuations[{index}]", estimate)
+            for key in (
+                "unaided_continuation",
+                "transport_continuation",
+                "wrong_prefix_continuation",
+                "answer_leakage_continuation",
+            ):
+                _check_estimate(issues, owner, key, candidate.get(key))
             for key in ("relay_probability_by_length",):
                 for length, value in (candidate.get(key) or {}).items():
                     if isinstance(value, (int, float)) and not _is_finite(value):
@@ -277,7 +336,14 @@ def deep_stats(records: list[dict]) -> dict:
                 values = [float(relay[length]) for length in relay_by_len]
                 relay_cross_total += 1
                 relay_cross_consistent += int(all(v > 0 for v in values) or all(v <= 0 for v in values))
-                if all(estimates.get(length) is not None and int(estimates[length].get("n_malformed") or 0) == 0 for length in relay_by_len):
+                if (
+                    control_clean
+                    and all(
+                        estimates.get(length) is not None
+                        and int(estimates[length].get("n_malformed") or 0) == 0
+                        for length in relay_by_len
+                    )
+                ):
                     relay_cross_valid_total += 1
                     relay_cross_valid += int(all(v > 0 for v in values) or all(v <= 0 for v in values))
             if candidate.get("transport_gain") is not None:
@@ -401,7 +467,7 @@ def deep_stats(records: list[dict]) -> dict:
             "n_candidates_with_all_lengths": relay_cross_total,
             "sign_consistent_ratio": round(relay_cross_consistent / relay_cross_total, 3) if relay_cross_total else None,
         },
-        "relay_cross_length_consistent_valid_only": {
+        "relay_cross_length_consistent_pair_clean": {
             "n_candidates": relay_cross_valid_total,
             "sign_consistent_ratio": round(relay_cross_valid / relay_cross_valid_total, 3) if relay_cross_valid_total else None,
         },
@@ -457,7 +523,9 @@ def render_markdown(
         f"prompts {validation['n_prompts']})",
         f"- Implementation strata: old {validation['implementation_strata']['old_impl_records']} / "
         f"new {validation['implementation_strata']['new_impl_records']} "
-        f"(cutoff {validation['implementation_strata']['cutoff_unix']})",
+        f"(cutoff {validation['implementation_strata']['cutoff_unix']}; heuristic file-mtime "
+        "estimate, not stable provenance — final split requires a code-version field "
+        "recorded at write time)",
         "",
         "## Validation",
         "",
@@ -502,8 +570,8 @@ def render_markdown(
     ) + (
         "\n- cross-length sign consistency (all): "
         f"{stats['relay_cross_length_consistent']}\n"
-        "- cross-length sign consistency (pair-clean estimates only): "
-        f"{stats['relay_cross_length_consistent_valid_only']}"
+        "- cross-length sign consistency (treatment + control both clean): "
+        f"{stats['relay_cross_length_consistent_pair_clean']}"
     ))
     block("Relay coverage (continuation-level)", "\n".join(
         f"- L{length}: all-clean-estimate rate {coverage[length]['all_clean_estimate_rate']}, "
@@ -593,11 +661,11 @@ def main() -> int:
 
     input_dirs = [Path(value).expanduser().resolve() for value in args.input_dir]
     output_dir = Path(args.output_dir).expanduser().resolve()
-    records = load_records(input_dirs)
+    records, mtimes_by_id = load_records(input_dirs)
     # Old implementation wrote records before the 2026-08-09 05:13 UTC relaunch
     # with the single-forward optimization; later records use the new code.
     cutoff_unix = 1786252400.0
-    validation = validate(records, input_dirs, cutoff_unix)
+    validation = validate(records, input_dirs, cutoff_unix, mtimes_by_id)
     stats = deep_stats(records)
     write_reports(output_dir, records)
     (output_dir / "precheck.md").write_text(
