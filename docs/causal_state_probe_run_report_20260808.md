@@ -1,5 +1,10 @@
 # Causal State Probe — 2026-08-08 Run Quality Report
 
+> **2026-08-11 review:** The pre-check coverage and malformed semantics require
+> correction before state-class or strongest-candidate claims are treated as
+> final.  See `docs/causal_state_probe_precheck_review_20260811.md` for the
+> prioritized findings and acceptance criteria.
+
 ## 1. Provenance
 
 - Repo: `Dual-Track-OPD` @ `ab7d054` + local fixes（未提交）：
