@@ -66,7 +66,11 @@ verdict、报告与 resume 均按设计工作，无 NaN/Inf。
 
 - 改动：`causal_runtime.py` 两个统计函数不再逐 64-token chunk 重放整个前缀，
   改为每模型/每图像条件一次整段前向（`logits_to_keep=T+1`），分块只做词表数学。
-  因果注意力保证逐位置数学等价；峰值内存不变。
+  因果注意力保证逐位置数学等价。注意：**保留的词表 logits 峰值从 ~19 MiB/chunk
+  增至整段 ~1.16 GiB**（visual 三条路径合计 ~3.5 GiB；teacher-path 在 student 卡上
+  保留 student+teacher 合计 ~2.3 GiB），backbone 隐层前向本身仍是全前缀；需在下一次
+  GPU 续跑时记录 `torch.cuda.max_memory_*` 实测（评审 P1-6），余量不足时改为
+  backbone 单次前向 + LM head 按词表分块。
 - 备份：`artifacts/fc_opd/backup_20260809_causal_probe_opt/`（含 `causal_runtime.py.orig`
   等三份原始文件 + git 状态）。
 - 验证：
@@ -81,3 +85,8 @@ verdict、报告与 resume 均按设计工作，无 NaN/Inf。
   （s0：407/483 token，schema 正确、无 NaN，分别耗时 ~44/30 min）；实例于 06:33 被
   回收，s1/s2/s3 首条长 unit（4096/3566 token）在途丢失，未及实测长 unit 提速。
   回收后累计 30/101 完成（28 旧 + 2 新），续跑命令不变。
+- 评审（2026-08-11，见 `docs/causal_state_probe_precheck_review_20260811.md`）：
+  relay/transport 增益与 state-class 结论暂定 provisional。离线报告已按评审修正
+  口径（continuation 级覆盖率、ITT 下界 vs 条件估计、pair-clean、深层校验、
+  实现分代 old/new）；待 GPU 侧补：malformed 原因分层回放、old/new 端到端对比、
+  显存实测。合并前须决定旧 28 条是否用新实现重算或按分代分层汇报。

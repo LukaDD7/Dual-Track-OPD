@@ -51,34 +51,121 @@ def load_records(input_dirs: list[Path]) -> list[dict]:
     records = []
     for root in input_dirs:
         for path in sorted((root / "trajectory_results").glob("*.json")):
-            records.append(json.loads(path.read_text(encoding="utf-8")))
+            record = json.loads(path.read_text(encoding="utf-8"))
+            record["_file_mtime_unix"] = path.stat().st_mtime
+            records.append(record)
     return records
 
 
-def validate(records: list[dict]) -> dict:
+def validate(records: list[dict], input_dirs: list[Path], cutoff_unix: float) -> dict:
     issues: list[str] = []
     ids = [str(r.get("trajectory_id") or "") for r in records]
     if len(ids) != len(set(ids)):
         issues.append(f"duplicate trajectory_id: {len(ids) - len(set(ids))}")
+    candidate_ids = [str(c.get("candidate_id") or "") for r in records for c in (r.get("candidate_windows") or ())]
+    if len(candidate_ids) != len(set(candidate_ids)):
+        issues.append(f"duplicate candidate_id: {len(candidate_ids) - len(set(candidate_ids))}")
+    old_impl = 0
+    new_impl = 0
     for r in records:
         if r.get("schema_version") != "causal-state-probe-v1":
             issues.append(f"{r.get('trajectory_id')}: unexpected schema_version")
+        n_tokens = len(r.get("trajectory_token_ids") or [])
+        n_signals = len(r.get("token_signals") or [])
+        if n_tokens != n_signals:
+            issues.append(f"{r.get('trajectory_id')}: token count {n_tokens} != signal rows {n_signals}")
+        mtime = float(r.get("_file_mtime_unix") or 0.0)
+        if mtime and mtime < cutoff_unix:
+            old_impl += 1
+        elif mtime:
+            new_impl += 1
         signals = r.get("token_signals") or []
         for row in signals:
             for key, value in row.items():
                 if isinstance(value, (int, float)) and not _is_finite(value):
                     issues.append(f"{r.get('trajectory_id')}: non-finite token_signals.{key}")
                     break
+        n_traj = n_tokens
         for candidate in r.get("candidate_windows") or ():
             for key, value in candidate.items():
                 if isinstance(value, (int, float)) and not _is_finite(value):
                     issues.append(f"{r.get('trajectory_id')}: non-finite candidate.{key}")
                     break
+            start = int(candidate["start"]) if candidate.get("start") is not None else -1
+            anchor = int(candidate["anchor"]) if candidate.get("anchor") is not None else -1
+            end = int(candidate["end"]) if candidate.get("end") is not None else -1
+            if not (0 <= start <= anchor <= end <= n_traj):
+                issues.append(f"{candidate.get('candidate_id')}: bounds {start}/{anchor}/{end} vs len {n_traj}")
+            for key in ("relay_continuations", "visual_continuations"):
+                estimates = candidate.get(key) or {}
+                if isinstance(estimates, dict):
+                    for length, estimate in estimates.items():
+                        for field in ("n", "n_correct", "n_malformed", "pass_rate"):
+                            value = estimate.get(field) if isinstance(estimate, dict) else None
+                            if isinstance(value, (int, float)) and not _is_finite(value):
+                                issues.append(f"{candidate.get('candidate_id')}: non-finite {key}.{length}.{field}")
+            for key in ("relay_probability_by_length",):
+                for length, value in (candidate.get(key) or {}).items():
+                    if isinstance(value, (int, float)) and not _is_finite(value):
+                        issues.append(f"{candidate.get('candidate_id')}: non-finite {key}.{length}")
+            prefix = str(r.get("trajectory_id") or "") + ":candidate-"
+            if not str(candidate.get("candidate_id") or "").startswith(prefix):
+                issues.append(f"{candidate.get('candidate_id')}: candidate_id prefix mismatch")
+
+    manifest_checks: dict = {"consistent": True, "details": []}
+    manifests = []
+    for root in input_dirs:
+        manifest_path = root / "run_manifest.json"
+        if not manifest_path.is_file():
+            manifest_checks["details"].append(f"missing manifest: {root}")
+            manifest_checks["consistent"] = False
+            continue
+        manifests.append(json.loads(manifest_path.read_text(encoding="utf-8")))
+    if manifests:
+        expected = {
+            str(work_id)
+            for manifest in manifests
+            for work_id in (manifest.get("provenance") or {}).get("expected_work_ids", ())
+        }
+        present = {str(r.get("trajectory_id") or "") for r in records}
+        missing = sorted(expected - present)
+        stray = sorted(present - expected)
+        if missing:
+            manifest_checks["details"].append(f"expected-but-missing records: {len(missing)} (e.g. {missing[:3]})")
+            manifest_checks["consistent"] = False
+        if stray:
+            manifest_checks["details"].append(f"records-not-in-manifest: {len(stray)}")
+            manifest_checks["consistent"] = False
+        reference = manifests[0]
+        for manifest in manifests[1:]:
+            def norm_config(value):
+                config = dict((value.get("config") or {}))
+                config.pop("output_dir", None)
+                config.pop("shard_index", None)
+                return config
+            if norm_config(manifest) != norm_config(reference):
+                manifest_checks["details"].append("shard configs differ")
+                manifest_checks["consistent"] = False
+            for key in ("k32_validation_sha256", "k32_rollouts_sha256", "k32_support_summary_sha256", "cohort_sha256"):
+                if ((manifest.get("provenance") or {}).get(key) != (reference.get("provenance") or {}).get(key)):
+                    manifest_checks["details"].append(f"provenance {key} differs")
+                    manifest_checks["consistent"] = False
+            for key in ("transformers", "tokenizer_hash", "git_commit"):
+                if ((manifest.get("runtime") or {}).get(key) != (reference.get("runtime") or {}).get(key)):
+                    manifest_checks["details"].append(f"runtime {key} differs")
+                    manifest_checks["consistent"] = False
+        manifest_checks["expected_work_ids"] = len(expected)
     return {
         "issues": issues,
         "n_records": len(records),
         "n_unique_ids": len(set(ids)),
         "n_prompts": len({str(r.get("prompt_id")) for r in records}),
+        "implementation_strata": {
+            "old_impl_records": old_impl,
+            "new_impl_records": new_impl,
+            "cutoff_unix": cutoff_unix,
+        },
+        "manifest_checks": manifest_checks,
     }
 
 
@@ -95,9 +182,18 @@ def deep_stats(records: list[dict]) -> dict:
 
     relay_by_len: dict[str, list[float]] = {length: [] for length in ("32", "64", "128")}
     relay_prob: dict[str, list[float]] = {length: [] for length in ("32", "64", "128")}
-    relay_valid_by_len: dict[str, list[float]] = {length: [] for length in ("32", "64", "128")}
+    relay_conditional_by_len: dict[str, list[float]] = {length: [] for length in ("32", "64", "128")}
     relay_coverage: dict[str, dict] = {length: {
-        "total": 0, "valid": 0, "with_malformed": 0, "fully_malformed": 0,
+        "total": 0,
+        "all_clean_estimates": 0,
+        "with_any_malformed": 0,
+        "fully_malformed": 0,
+        "n_malformed_distribution": Counter(),
+        "continuation_n": 0,
+        "continuation_valid": 0,
+    } for length in ("32", "64", "128")}
+    pair_clean_by_len: dict[str, dict] = {length: {
+        "treatment_clean": 0, "control_clean": 0, "pair_clean": 0, "total": 0,
     } for length in ("32", "64", "128")}
     relay_cross_consistent = 0
     relay_cross_total = 0
@@ -141,6 +237,14 @@ def deep_stats(records: list[dict]) -> dict:
                 str(length): estimate
                 for length, estimate in (candidate.get("relay_continuations") or {}).items()
             }
+            baseline_full = next(
+                (
+                    estimate for estimate in (candidate.get("visual_continuations") or ())
+                    if isinstance(estimate, dict) and estimate.get("condition") == "full"
+                ),
+                None,
+            )
+            control_clean = baseline_full is not None and int(baseline_full.get("n_malformed") or 0) == 0
             for length in relay_by_len:
                 if relay.get(length) is not None:
                     relay_by_len[length].append(float(relay[length]))
@@ -148,17 +252,27 @@ def deep_stats(records: list[dict]) -> dict:
                     relay_prob[length].append(float(probabilities[length]))
                 estimate = estimates.get(length)
                 if estimate is not None:
-                    relay_coverage[length]["total"] += 1
                     malformed = int(estimate.get("n_malformed") or 0)
                     n = int(estimate.get("n") or 0)
+                    relay_coverage[length]["total"] += 1
+                    relay_coverage[length]["n_malformed_distribution"][malformed] += 1
+                    relay_coverage[length]["continuation_n"] += n
+                    relay_coverage[length]["continuation_valid"] += n - malformed
                     if malformed == 0:
-                        relay_coverage[length]["valid"] += 1
+                        relay_coverage[length]["all_clean_estimates"] += 1
                     else:
-                        relay_coverage[length]["with_malformed"] += 1
+                        relay_coverage[length]["with_any_malformed"] += 1
                     if malformed == n and n > 0:
                         relay_coverage[length]["fully_malformed"] += 1
-                    if malformed == 0 and relay.get(length) is not None:
-                        relay_valid_by_len[length].append(float(relay[length]))
+                    pair_clean_by_len[length]["total"] += 1
+                    if malformed == 0:
+                        pair_clean_by_len[length]["treatment_clean"] += 1
+                    if control_clean:
+                        pair_clean_by_len[length]["control_clean"] += 1
+                    if malformed == 0 and control_clean:
+                        pair_clean_by_len[length]["pair_clean"] += 1
+                        if relay.get(length) is not None:
+                            relay_conditional_by_len[length].append(float(relay[length]))
             if all(relay.get(length) is not None for length in relay_by_len):
                 values = [float(relay[length]) for length in relay_by_len]
                 relay_cross_total += 1
@@ -257,8 +371,32 @@ def deep_stats(records: list[dict]) -> dict:
         "trajectory_token_lengths": summarize(lengths),
         "relay_gain_by_length": {k: summarize(v) for k, v in relay_by_len.items()},
         "relay_probability_by_length": {k: summarize(v) for k, v in relay_prob.items()},
-        "relay_valid_only_by_length": {k: summarize(v) for k, v in relay_valid_by_len.items()},
-        "relay_coverage": relay_coverage,
+        "relay_itt_lower_bound_by_length": {k: summarize(v) for k, v in relay_by_len.items()},
+        "relay_conditional_pair_clean_by_length": {
+            k: summarize(v) for k, v in relay_conditional_by_len.items()
+        },
+        "relay_coverage": {
+            k: {
+                "total": v["total"],
+                "all_clean_estimate_rate": round(v["all_clean_estimates"] / v["total"], 4) if v["total"] else None,
+                "with_any_malformed": v["with_any_malformed"],
+                "fully_malformed": v["fully_malformed"],
+                "continuation_valid_rate": round(
+                    v["continuation_valid"] / v["continuation_n"], 4
+                ) if v["continuation_n"] else None,
+                "n_malformed_distribution": dict(sorted(v["n_malformed_distribution"].items())),
+            }
+            for k, v in relay_coverage.items()
+        },
+        "relay_pair_clean": {
+            k: {
+                "treatment_clean_rate": round(v["treatment_clean"] / v["total"], 4) if v["total"] else None,
+                "control_clean_rate": round(v["control_clean"] / v["total"], 4) if v["total"] else None,
+                "pair_clean_rate": round(v["pair_clean"] / v["total"], 4) if v["total"] else None,
+                "n": v["total"],
+            }
+            for k, v in pair_clean_by_len.items()
+        },
         "relay_cross_length_consistent": {
             "n_candidates_with_all_lengths": relay_cross_total,
             "sign_consistent_ratio": round(relay_cross_consistent / relay_cross_total, 3) if relay_cross_total else None,
@@ -309,7 +447,7 @@ def render_markdown(
     output_dir: Path,
 ) -> str:
     lines = [
-        "# Causal State Probe — 64-sample Pre-check (2026-08-11)",
+        f"# Causal State Probe — {validation['n_records']}-sample Pre-check (2026-08-11)",
         "",
         "## Provenance",
         "",
@@ -317,6 +455,9 @@ def render_markdown(
         f"- Output package: `{output_dir}`",
         f"- Records: {validation['n_records']} (unique ids {validation['n_unique_ids']}, "
         f"prompts {validation['n_prompts']})",
+        f"- Implementation strata: old {validation['implementation_strata']['old_impl_records']} / "
+        f"new {validation['implementation_strata']['new_impl_records']} "
+        f"(cutoff {validation['implementation_strata']['cutoff_unix']})",
         "",
         "## Validation",
         "",
@@ -326,7 +467,17 @@ def render_markdown(
         lines += [f"- {issue}" for issue in validation["issues"][:20]]
         lines += [""]
     else:
-        lines += ["No schema/NaN/duplicate issues found.", ""]
+        lines += ["No issues found in the specific checks below.", ""]
+    manifest_checks = validation["manifest_checks"]
+    lines += [
+        "Manifest/work-ID/config consistency:",
+        "",
+        f"- consistent: {manifest_checks['consistent']} "
+        f"(expected work IDs {manifest_checks.get('expected_work_ids')})",
+    ]
+    if manifest_checks["details"]:
+        lines += [f"- {detail}" for detail in manifest_checks["details"]]
+    lines += [""]
 
     def block(title: str, body: str) -> None:
         lines.append(f"## {title}")
@@ -343,20 +494,35 @@ def render_markdown(
         for state, count in stats["state_class_counts"].items()
     ))
     relay = stats["relay_gain_by_length"]
-    relay_valid = stats["relay_valid_only_by_length"]
     coverage = stats["relay_coverage"]
-    block("Relay gains by length", "\n".join(
-        f"- L{length}: {relay[length]}" for length in ("32", "64", "128")
+    block("Relay gains by length — ITT lower bound", "\n".join(
+        f"- L{length}: {relay[length]}  *(all outcomes counted with original K; "
+        "malformed/leakage treated as failures)*"
+        for length in ("32", "64", "128")
     ) + (
         "\n- cross-length sign consistency (all): "
         f"{stats['relay_cross_length_consistent']}\n"
-        "- cross-length sign consistency (fully valid estimates only): "
+        "- cross-length sign consistency (pair-clean estimates only): "
         f"{stats['relay_cross_length_consistent_valid_only']}"
     ))
-    block("Relay coverage (malformed/leakage exclusion)", "\n".join(
-        f"- L{length}: {coverage[length]}" for length in ("32", "64", "128")
-    ) + "\n\nGains restricted to fully valid estimates (no malformed continuations):\n"
-        + "\n".join(f"- L{length}: {relay_valid[length]}" for length in ("32", "64", "128")))
+    block("Relay coverage (continuation-level)", "\n".join(
+        f"- L{length}: all-clean-estimate rate {coverage[length]['all_clean_estimate_rate']}, "
+        f"continuation-valid rate {coverage[length]['continuation_valid_rate']}, "
+        f"fully-malformed {coverage[length]['fully_malformed']}, "
+        f"n_malformed dist {coverage[length]['n_malformed_distribution']}"
+        for length in ("32", "64", "128")
+    ) + "\n\nPair-clean (treatment + matched control both clean):\n"
+        + "\n".join(
+            f"- L{length}: {stats['relay_pair_clean'][length]}"
+            for length in ("32", "64", "128")
+        ))
+    conditional = stats["relay_conditional_pair_clean_by_length"]
+    block("Relay gains — conditional (answer-free, pair-clean, sensitivity)", "\n".join(
+        f"- L{length}: {conditional[length]}" for length in ("32", "64", "128")
+    ) + "\n\n*Post-treatment filtering; not an unbiased causal estimand. "
+        "Caveat: `n_malformed` conflates relay answer leakage (continuation never "
+        "generated), missing answer marker, truncation, and verifier-unparseable "
+        "outputs; reason-level counts require a stratified replay (review P0-2).*")
     skipped = stats["transport_skipped_notes"]
     if skipped:
         block("Transport skip reasons", "\n".join(
@@ -411,7 +577,10 @@ def render_markdown(
         lines.append("")
     lines.append("## Pre-check verdict")
     lines.append("")
-    lines.append("Filled in by the reviewing agent after inspecting the tables above.")
+    lines.append(
+        "Reviewed 2026-08-11 by Codex; provisional pending GPU-side follow-ups "
+        "(see docs/causal_state_probe_precheck_review_20260811.md)."
+    )
     lines.append("")
     return "\n".join(lines)
 
@@ -425,7 +594,10 @@ def main() -> int:
     input_dirs = [Path(value).expanduser().resolve() for value in args.input_dir]
     output_dir = Path(args.output_dir).expanduser().resolve()
     records = load_records(input_dirs)
-    validation = validate(records)
+    # Old implementation wrote records before the 2026-08-09 05:13 UTC relaunch
+    # with the single-forward optimization; later records use the new code.
+    cutoff_unix = 1786252400.0
+    validation = validate(records, input_dirs, cutoff_unix)
     stats = deep_stats(records)
     write_reports(output_dir, records)
     (output_dir / "precheck.md").write_text(
