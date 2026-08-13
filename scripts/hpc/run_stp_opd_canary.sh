@@ -119,7 +119,7 @@ ${CONDA_ENV}/bin/python -m verl.trainer.main_ppo \
     "actor_rollout_ref.rollout.max_model_len=2048" \
     "actor_rollout_ref.rollout.n=${ROLLOUT_N}" \
     "actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=8" \
-    "actor_rollout_ref.rollout.agent.num_workers=8" \
+    "actor_rollout_ref.rollout.agent.num_workers=4" \
     "actor_rollout_ref.ref.fsdp_config.param_offload=true" \
     "reward_model.enable=false" \
     "reward_model.reward_manager=null" \
