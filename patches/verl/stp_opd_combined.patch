@@ -27,7 +27,7 @@ index b4e6a930..58e30b0c 100644
                      # NOTE: This usually changes the order of data in the `batch`,
                      # which won't affect the advantage calculation (since it's based on uid),
 diff --git a/verl/workers/actor/dp_actor.py b/verl/workers/actor/dp_actor.py
-index 2b1b54b6..64d6a979 100644
+index 2b1b54b6..3a8eb0d8 100644
 --- a/verl/workers/actor/dp_actor.py
 +++ b/verl/workers/actor/dp_actor.py
 @@ -45,6 +45,10 @@ from dual_track_opd.fc_opd.verl_actor_loss import (
@@ -96,17 +96,19 @@ index 2b1b54b6..64d6a979 100644
          if self.use_prefix_grouper and "prompts" in data.batch.keys():
              select_keys.append("prompts")
          if self.config.use_kl_loss:
-@@ -769,6 +800,15 @@ class DataParallelPPOActor(BasePPOActor):
+@@ -769,6 +800,17 @@ class DataParallelPPOActor(BasePPOActor):
                              for key, value in fc_opd_metrics.items():
                                  micro_batch_metrics[f"actor/fc_opd_{key}"] = _fc_opd_metric_float(value)
  
 +                    stp_opd_loss_sum = outputs.get("stp_opd_loss_sum")
 +                    stp_opd_active_weight_sum = outputs.get("stp_opd_active_weight_sum")
 +                    if stp_opd_loss_sum is not None:
-+                        stp_opd_coef = float(self.config.algorithm.get("stp_opd", {}).get("loss_coef", 1.0))
++                        # Pilot fixes all STP weights at 1.0 (handoff §4.4);
++                        # FSDPActorConfig has no algorithm attribute, so no
++                        # config lookup here.
 +                        stp_opd_denominator = stp_opd_active_weight_sum.detach().clamp_min(1e-6)
 +                        stp_opd_loss = stp_opd_loss_sum / stp_opd_denominator
-+                        policy_loss = policy_loss + (stp_opd_loss * stp_opd_coef / loss_scale_factor)
++                        policy_loss = policy_loss + (stp_opd_loss / loss_scale_factor)
 +                        micro_batch_metrics["actor/stp_opd_loss"] = stp_opd_loss.detach().item()
 +
                      if self.config.use_dynamic_bsz:
