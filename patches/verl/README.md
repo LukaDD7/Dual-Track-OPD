@@ -39,6 +39,24 @@ FC-OPD patches (they share the response_mask / dp_actor regions), so FC-OPD
 must be applied first.  The full chain (pristine verl 0.7.1 -> FC-OPD x2 ->
 STP) was verified with `git apply --check` and `py_compile`.
 
+## Environment validation (2026-08-13)
+
+On the GPU instance (`fc-opd-verl071-cu128`, 2 GPUs):
+
+- FC-OPD x2 + STP patches applied cleanly to verl 0.7.1;
+- `run_verl_fc_opd_smoke.sh --gpus 2 --steps 1` completed with **exit code 0**
+  (2/2 training steps; `actor/fc_opd_loss` ~0.156, `teacher_valid_ratio` 1.0);
+- the trailing `DataLoader worker killed by signal` message is vLLM shutdown
+  noise after training finished and does not affect the result.
+
+Also fixed along the way: `teacher_transformers.get_rope_index` now filters
+kwargs by the callable signature (Qwen3-VL + transformers version drift), and
+the STP actor loss passes `stp_opd_loss_sum`/`stp_opd_active_weight_sum` via
+`_forward_micro_batch` outputs like the FC-OPD path.
+
+Environment is ready for STP-OPD canary wiring (scaffold render point,
+`stp_advantages` attach, STP dataset).
+
 ## Key design points
 
 - RKL-K1 uses the **sampled-token K1 estimator**:
