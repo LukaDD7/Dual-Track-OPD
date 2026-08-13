@@ -2,6 +2,13 @@
 
 Read `AGENTS.md` first. Keep changes small, importable, tested, and reproducible.
 
+## Current Required Handoff
+
+For the causal-state-probe → STP-OPD transition, follow
+`docs/cc_causal_state_to_stp_handoff_20260813.md`.  It is the current
+authoritative implementation and launch gate.  Do not start an STP-OPD full
+training run before completing its evidence, implementation, and canary gates.
+
 Default verification:
 
 ```bash
