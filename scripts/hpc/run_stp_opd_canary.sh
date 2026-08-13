@@ -98,8 +98,8 @@ ${CONDA_ENV}/bin/python -m verl.trainer.main_ppo \
     "data.dataloader_num_workers=8" \
     "data.custom_cls.path=file://${REPO_ROOT}/src/dual_track_opd/support_aware/verl_stp_dataset.py" \
     "data.custom_cls.name=STPTransitionDataset" \
-    "data.prefix_manifest=${PREFIX_MANIFEST}" \
-    "data.scaffold_all=true" \
+    "+data.prefix_manifest=${PREFIX_MANIFEST}" \
+    "+data.scaffold_all=true" \
     "actor_rollout_ref.model.path=${MODEL_PATH}" \
     "actor_rollout_ref.model.use_remove_padding=false" \
     "actor_rollout_ref.model.use_fused_kernels=false" \
