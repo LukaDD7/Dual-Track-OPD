@@ -228,11 +228,6 @@ class TransformersTeacherScorer(TeacherScorer):
             "image_grid_thw": model_inputs.get("image_grid_thw"),
             "video_grid_thw": model_inputs.get("video_grid_thw"),
         }
-        # Qwen3-VL with transformers ≥ 5.x requires mm_token_type_ids for
-        # get_rope_index().  The processor populates it; forward it if present.
-        for extra in ("mm_token_type_ids", "pixel_values", "pixel_values_videos"):
-            if extra in model_inputs:
-                kwargs[extra] = model_inputs[extra]
         candidates = (
             getattr(self.processor, "get_rope_index", None),
             getattr(self.model, "get_rope_index", None),
@@ -241,7 +236,14 @@ class TransformersTeacherScorer(TeacherScorer):
         for candidate in candidates:
             if candidate is None:
                 continue
-            result = candidate(**kwargs)
+            # get_rope_index() signatures differ across transformers versions
+            # (some accept mm_token_type_ids/pixel_values, others do not), so
+            # pass only the parameters the actual callable accepts.
+            import inspect
+
+            accepted = inspect.signature(candidate).parameters
+            filtered = {key: value for key, value in kwargs.items() if key in accepted}
+            result = candidate(**filtered)
             return result[0] if isinstance(result, tuple) else result
         if kwargs["image_grid_thw"] is not None or kwargs["video_grid_thw"] is not None:
             raise RuntimeError("Qwen3-VL backend could not construct multimodal position IDs")
