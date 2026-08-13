@@ -775,6 +775,12 @@ def run(config: ProbeConfig) -> dict[str, Any]:
     output = Path(config.output_dir).expanduser().resolve()
     result_dir = output / "trajectory_results"
     result_dir.mkdir(parents=True, exist_ok=True)
+    manifest_path = output / "run_manifest.json"
+    if any(result_dir.glob("*.json")) and not manifest_path.exists():
+        # Handoff B.3.3: never adopt orphan trajectory JSON as completed work.
+        raise ValueError(
+            f"refusing to resume trajectory JSON without a run manifest: {output}"
+        )
     inputs, provenance = select_probe_inputs(
         k32_run_dir=config.k32_run_dir,
         cohort_dir=config.cohort_dir,
@@ -792,7 +798,6 @@ def run(config: ProbeConfig) -> dict[str, Any]:
         for key, value in json.loads(json.dumps(asdict(config))).items()
         if key not in ("work_slice_index", "work_slice_total")
     }
-    manifest_path = output / "run_manifest.json"
     manifest: dict[str, Any] = {
         "schema_version": RUN_SCHEMA_VERSION,
         "status": "running",

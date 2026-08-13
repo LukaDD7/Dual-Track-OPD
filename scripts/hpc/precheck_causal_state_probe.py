@@ -27,6 +27,9 @@ from datetime import date
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
+from dual_track_opd.support_aware.causal_state_probe import (  # noqa: E402
+    RUN_SCHEMA_VERSION,
+)
 from dual_track_opd.support_aware.causal_report import (  # noqa: E402
     write_reports,
 )
@@ -102,6 +105,35 @@ def _check_estimate(
         and abs(float(pass_rate) - n_correct / n) > 1e-6
     ):
         issues.append(f"{owner}: {path}.pass_rate={pass_rate!r} != n_correct/n")
+    reason_fields = (
+        "n_relay_answer_leakage",
+        "n_no_answer_marker",
+        "n_truncated",
+        "n_generation_error",
+    )
+    if isinstance(n_malformed, int) and all(
+        isinstance(estimate.get(field), int) for field in reason_fields
+    ):
+        split_sum = sum(int(estimate.get(field) or 0) for field in reason_fields)
+        if split_sum != n_malformed:
+            issues.append(
+                f"{owner}: {path} reason counts sum {split_sum} != n_malformed {n_malformed}"
+            )
+    if isinstance(estimate.get("n_student_continuations_generated"), int):
+        generated = int(estimate.get("n_student_continuations_generated") or 0)
+        generated_fields = (
+            "n_correct",
+            "n_wrong_format_valid",
+            "n_no_answer_marker",
+            "n_truncated",
+            "n_generation_error",
+        )
+        generated_sum = sum(int(estimate.get(field) or 0) for field in generated_fields)
+        if generated_sum != generated:
+            issues.append(
+                f"{owner}: {path} generated-continuation counts sum {generated_sum} "
+                f"!= n_student_continuations_generated {generated}"
+            )
     for field in ("seeds", "response_hashes"):
         value = estimate.get(field)
         if isinstance(value, (list, tuple)) and len(value) != n:
@@ -123,6 +155,7 @@ def validate(
         issues.append(f"duplicate candidate_id: {len(candidate_ids) - len(set(candidate_ids))}")
     old_impl = 0
     new_impl = 0
+    mtime_fallback_records = 0
     for r in records:
         if r.get("schema_version") != "causal-state-probe-v1":
             issues.append(f"{r.get('trajectory_id')}: unexpected schema_version")
@@ -130,11 +163,22 @@ def validate(
         n_signals = len(r.get("token_signals") or [])
         if n_tokens != n_signals:
             issues.append(f"{r.get('trajectory_id')}: token count {n_tokens} != signal rows {n_signals}")
+        implementation = (r.get("metadata") or {}).get("implementation_version")
         mtime = mtimes_by_id.get(str(r.get("trajectory_id") or ""), 0.0)
-        if mtime and mtime < cutoff_unix:
-            old_impl += 1
-        elif mtime:
+        if implementation == "single_forward_v2":
             new_impl += 1
+        elif implementation == "chunked_logits_to_keep":
+            old_impl += 1
+        elif implementation:
+            issues.append(
+                f"{r.get('trajectory_id')}: unknown implementation_version {implementation!r}"
+            )
+        elif mtime:
+            mtime_fallback_records += 1
+            if mtime < cutoff_unix:
+                old_impl += 1
+            else:
+                new_impl += 1
         signals = r.get("token_signals") or []
         for row in signals:
             for key, value in row.items():
@@ -182,6 +226,26 @@ def validate(
             continue
         manifests.append(json.loads(manifest_path.read_text(encoding="utf-8")))
     if manifests:
+        for manifest in manifests:
+            status = manifest.get("status")
+            schema = manifest.get("schema_version")
+            dirty = manifest.get("git_dirty")
+            if schema != RUN_SCHEMA_VERSION:
+                manifest_checks["details"].append(
+                    f"unexpected shard schema: {schema}"
+                )
+                manifest_checks["consistent"] = False
+            if status not in ("completed", "partial"):
+                manifest_checks["details"].append(
+                    f"unexpected shard status: {status}"
+                )
+                manifest_checks["consistent"] = False
+        dirty_shards = sorted(
+            str(root)
+            for root, manifest in zip(input_dirs, manifests)
+            if manifest.get("git_dirty") is not False
+        )
+        manifest_checks["dirty_shards"] = dirty_shards
         expected = {
             str(work_id)
             for manifest in manifests
@@ -202,18 +266,26 @@ def validate(
                 config = dict((value.get("config") or {}))
                 config.pop("output_dir", None)
                 config.pop("shard_index", None)
+                config.pop("work_slice_index", None)
+                config.pop("work_slice_total", None)
                 return config
             if norm_config(manifest) != norm_config(reference):
                 manifest_checks["details"].append("shard configs differ")
                 manifest_checks["consistent"] = False
-            for key in ("k32_validation_sha256", "k32_rollouts_sha256", "k32_support_summary_sha256", "cohort_sha256"):
+            for key in ("k32_validation_sha256", "k32_rollouts_sha256", "k32_support_summary_sha256", "cohort_sha256", "retained_proposals_sha256"):
                 if ((manifest.get("provenance") or {}).get(key) != (reference.get("provenance") or {}).get(key)):
                     manifest_checks["details"].append(f"provenance {key} differs")
                     manifest_checks["consistent"] = False
-            for key in ("transformers", "tokenizer_hash", "git_commit"):
+            for key in ("transformers", "tokenizer_hash"):
                 if ((manifest.get("runtime") or {}).get(key) != (reference.get("runtime") or {}).get(key)):
                     manifest_checks["details"].append(f"runtime {key} differs")
                     manifest_checks["consistent"] = False
+            if (manifest.get("git_commit") or None) != (reference.get("git_commit") or None):
+                manifest_checks["details"].append("top-level git_commit differs")
+                manifest_checks["consistent"] = False
+            if (manifest.get("models") or None) != (reference.get("models") or None):
+                manifest_checks["details"].append("model identity differs across shards")
+                manifest_checks["consistent"] = False
         manifest_checks["expected_work_ids"] = len(expected)
     return {
         "issues": issues,
@@ -223,6 +295,7 @@ def validate(
         "implementation_strata": {
             "old_impl_records": old_impl,
             "new_impl_records": new_impl,
+            "mtime_fallback_records": mtime_fallback_records,
             "cutoff_unix": cutoff_unix,
         },
         "manifest_checks": manifest_checks,
@@ -635,8 +708,9 @@ def render_markdown(
         f"- Implementation strata: old {validation['implementation_strata']['old_impl_records']} / "
         f"new {validation['implementation_strata']['new_impl_records']} "
         f"(cutoff {validation['implementation_strata']['cutoff_unix']}; heuristic file-mtime "
-        "estimate, not stable provenance — final split requires a code-version field "
-        "recorded at write time)",
+        "estimate for "
+        f"{validation['implementation_strata']['mtime_fallback_records']} records without "
+        "`metadata.implementation_version`; not stable provenance)",
         "",
         "## Validation",
         "",
@@ -654,6 +728,11 @@ def render_markdown(
         f"- consistent: {manifest_checks['consistent']} "
         f"(expected work IDs {manifest_checks.get('expected_work_ids')})",
     ]
+    dirty_shards = manifest_checks.get("dirty_shards") or []
+    lines.append(
+        f"- dirty shards ({len(dirty_shards)}): "
+        + (", ".join(dirty_shards) if dirty_shards else "none")
+    )
     if manifest_checks["details"]:
         lines += [f"- {detail}" for detail in manifest_checks["details"]]
     lines += [""]
@@ -760,7 +839,7 @@ def render_markdown(
     lines.append("## Strongest actionable candidates")
     lines.append("")
     if stats["strong_relay_examples"]:
-        lines.append("### on_policy_repairable (relay gain > 0.2, p > 0.85)")
+        lines.append("### on_policy_repairable (relay gain > 0.2, p >= 0.9)")
         lines.append("")
         lines.append("| candidate | prompt | correct | anchor | rel | gain | p | l32/l64/l128 |")
         lines.append("|---|---|---|---|---|---|---|---|---|")
@@ -824,6 +903,9 @@ def main() -> int:
         "strong_relay": len(stats["strong_relay_examples"]),
         "strong_transport": len(stats["strong_transport_examples"]),
     }, indent=2, ensure_ascii=False))
+    # Handoff B.3.2: validation failures must surface as a non-zero exit.
+    if validation["issues"] or not validation["manifest_checks"]["consistent"]:
+        return 1
     return 0
 
 
