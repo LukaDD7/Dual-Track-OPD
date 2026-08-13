@@ -37,6 +37,28 @@ config-gated so verl behaves identically without the STP-OPD section:
 - `advantages` for the GRPO term come from verl and must be attached to the
   batch as `stp_advantages` by the trainer (not in the patch; trainer-side).
 
+## Data-side scaffold (dataloader)
+
+verl 0.7.1 has no fixed-response-prefix mechanism, so the scaffold branch is
+implemented with **path A** (minimal, reuses the FC-OPD actor aux-loss pattern):
+
+- a scaffolded sample renders the verified answer-free teacher prefix as the
+  assistant message content (`support_transition_dataset.build_samples`); the
+  model continues generating the suffix after it;
+- the rollout carries `stp_prefix_token_ids` + `stp_scaffolded` in
+  `extra_info` (dataset side, mirroring `FCOPDDataset`);
+- the FKL prefix region is scored by the actor on the prefix tokens: the actor
+  forward covers prompt + prefix + suffix, the prefix positions take the
+  teacher-forced CE (`prefix_fkl_ce`), suffix positions take RKL-K1/GRPO;
+- the masks in `0002-stp-opd-actor-loss.patch` are derived from
+  `stp_prefix_lengths` (prefix token count) instead of a rollout-side
+  pre-filled response prefix.
+
+Validation points that must be exercised in the pinned verl env: prefix token
+ids survive the verl pipeline unchanged (`extra_info`), the actor forward
+includes the prefix region with correct masks, and the scaffolded/unscaffolded
+paired comparison uses identical prompts.
+
 ## Validation gate (handoff §6 P0)
 
 The wiring is code-complete but **not yet validated end-to-end**.  Before any
