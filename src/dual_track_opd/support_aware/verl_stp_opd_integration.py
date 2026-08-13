@@ -69,8 +69,8 @@ def stp_opd_post_rollout_hook(
     processor: Any | None,
     config: Any,
     global_steps: int,
-    teacher_client: Any,
-    prefixes: Mapping[str, tuple[int, ...]],
+    teacher_client: Any = None,
+    prefixes: Mapping[str, tuple[int, ...]] | None = None,
 ) -> tuple[Any, dict[str, float]]:
     """Attach STP-OPD tensors to a verl rollout batch (thin hook body).
 
@@ -80,6 +80,7 @@ def stp_opd_post_rollout_hook(
     K1 log-prob per token.
     """
 
+    from dual_track_opd.fc_opd.teacher_client import TeacherClient
     from dual_track_opd.fc_opd.teacher_protocol import (
         Condition,
         TeacherScoreRequest,
@@ -88,8 +89,28 @@ def stp_opd_post_rollout_hook(
         _condition_inputs_from_row,
         _row_value,
     )
+    from dual_track_opd.support_aware.support_transition_dataset import load_prefixes
 
     del processor, global_steps
+    stp = _stp_config(config)
+    if teacher_client is None:
+        teacher_url = str(stp.get("teacher_url") or "http://127.0.0.1:18080")
+        teacher_client = TeacherClient(teacher_url, timeout_seconds=300.0)
+    if prefixes is None:
+        data_config = getattr(config, "data", None) or (
+            config.get("data") if isinstance(config, Mapping) else None
+        )
+        manifest = (
+            getattr(data_config, "get", lambda *_: None)("prefix_manifest")
+            if data_config is not None
+            else None
+        )
+        if not manifest:
+            raise ValueError(
+                "STP hook requires data.prefix_manifest "
+                "(verified answer-free teacher prefixes)"
+            )
+        prefixes = load_prefixes(str(manifest))
     responses = batch.batch["responses"]
     response_mask = batch.batch["response_mask"].bool()
     B, T = int(responses.shape[0]), int(responses.shape[1])
