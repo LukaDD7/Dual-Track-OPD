@@ -294,6 +294,28 @@ def _work_slice_items(items: Sequence[ProbeInput], index: int, total: int) -> li
     return [item for i, item in enumerate(items) if i % total == index]
 
 
+def _slice_pending_items(
+    items: Sequence[ProbeInput],
+    completed_ids: set[str],
+    slice_index: int,
+    slice_total: int,
+) -> list[ProbeInput]:
+    """Stable sliced-resume ownership (handoff B.3.1).
+
+    Ownership is derived from the immutable full selected input set FIRST and
+    only then are already-completed work IDs dropped.  This keeps the same
+    work ID mapped to the same slice across staggered runner starts, partial
+    completion, and repeated resumes -- a partition of the shrinking pending
+    list would let earlier-finishing slices silently steal work from slices
+    that started later.
+    """
+
+    if slice_total <= 1:
+        return [item for item in items if _work_id(item) not in completed_ids]
+    assigned = _work_slice_items(items, slice_index, slice_total)
+    return [item for item in assigned if _work_id(item) not in completed_ids]
+
+
 def _seed(config: ProbeConfig, work_id: str, candidate_anchor: int, salt: str) -> int:
     digest = hashlib.sha256(f"{work_id}:{candidate_anchor}:{salt}".encode()).hexdigest()
     return config.seed + int(digest[:8], 16) % 1_000_000_000
@@ -807,9 +829,12 @@ def run(config: ProbeConfig) -> dict[str, Any]:
         str(json.loads(path.read_text(encoding="utf-8"))["trajectory_id"])
         for path in result_dir.glob("*.json")
     }
-    pending = [item for item in inputs if _work_id(item) not in completed]
-    if config.work_slice_total > 1:
-        pending = _work_slice_items(pending, config.work_slice_index, config.work_slice_total)
+    pending = _slice_pending_items(
+        inputs,
+        completed,
+        config.work_slice_index,
+        config.work_slice_total,
+    )
     models = None
     if pending:
         models = load_runtime_models(

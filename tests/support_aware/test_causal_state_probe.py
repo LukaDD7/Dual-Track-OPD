@@ -33,6 +33,8 @@ from dual_track_opd.support_aware.causal_schema import (
 )
 from dual_track_opd.support_aware.causal_state_probe import (
     RUN_SCHEMA_VERSION,
+    _slice_pending_items,
+    _work_id,
     _work_slice_items,
     load_config,
     summarize,
@@ -412,6 +414,57 @@ def test_work_slice_items_partitions_pending_without_overlap():
     assert slices[3] == ["unit-3", "unit-7"]
     # total == 1 keeps legacy resume behavior
     assert _work_slice_items(items, index=0, total=1) == items
+
+
+def _slice_test_items(count=12):
+    return [
+        SimpleNamespace(
+            sample_uid=f"geo3k:{index // 3}",
+            student_rollout={
+                "rollout_id": index % 3,
+                "response_token_hash": f"hash-{index}",
+            },
+        )
+        for index in range(count)
+    ]
+
+
+def test_slice_pending_stable_ownership_across_staggered_resume():
+    """Handoff B.3.1: ownership comes from the immutable full input set, so
+    staggered starts, partial completion, and repeated resumes never move a
+    work ID between slices."""
+
+    items = _slice_test_items()
+    all_ids = {_work_id(item) for item in items}
+    initial = {
+        index: {_work_id(item) for item in _slice_pending_items(items, set(), index, 4)}
+        for index in range(4)
+    }
+    # union of slices equals the full set; pairwise intersections empty
+    assert set().union(*initial.values()) == all_ids
+    for left in range(4):
+        for right in range(left + 1, 4):
+            assert not (initial[left] & initial[right])
+    # staggered launch: slice 0 finishing its work must not change slice 1
+    done_by_slice0 = {next(iter(initial[0]))}
+    slice1_after = {
+        _work_id(item)
+        for item in _slice_pending_items(items, done_by_slice0, 1, 4)
+    }
+    assert slice1_after == initial[1]
+    # partial completion of slice 1's own work drops only its own completed IDs
+    own = sorted(initial[1])
+    completed = {own[0], own[1]}
+    slice1_partial = {
+        _work_id(item)
+        for item in _slice_pending_items(items, completed, 1, 4)
+    }
+    assert slice1_partial == initial[1] - completed
+    # repeated resume is idempotent
+    assert {
+        _work_id(item)
+        for item in _slice_pending_items(items, completed, 1, 4)
+    } == slice1_partial
 
 
 def test_atomic_json_write_survives_concurrent_writers(tmp_path):
