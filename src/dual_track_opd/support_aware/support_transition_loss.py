@@ -95,6 +95,8 @@ def stp_opd_loss(
     advantages: torch.Tensor,
     prefix_mask: torch.Tensor,
     suffix_mask: torch.Tensor,
+    distill_mask: torch.Tensor | None = None,
+    task_mask: torch.Tensor | None = None,
     valid_mask: torch.Tensor | None = None,
     lambda_prefix: float = 1.0,
     lambda_distill: float = 1.0,
@@ -105,15 +107,21 @@ def stp_opd_loss(
     teacher tokens from every region."""
 
     effective_prefix = prefix_mask
-    effective_suffix = suffix_mask
+    effective_distill = distill_mask if distill_mask is not None else suffix_mask
+    effective_task = task_mask if task_mask is not None else suffix_mask
     if valid_mask is not None:
-        if valid_mask.shape != prefix_mask.shape:
+        if (
+            valid_mask.shape != prefix_mask.shape
+            or valid_mask.shape != effective_distill.shape
+            or valid_mask.shape != effective_task.shape
+        ):
             raise ValueError("valid_mask must match mask shape")
         effective_prefix = prefix_mask & valid_mask
-        effective_suffix = suffix_mask & valid_mask
+        effective_distill = effective_distill & valid_mask
+        effective_task = effective_task & valid_mask
     prefix_term = prefix_fkl_ce(student_logits, prefix_ids, effective_prefix)
-    distill_term = suffix_rkl_k1(student_logits, teacher_logits, effective_suffix)
-    task_term = suffix_task_grpo(student_logits, sampled_ids, advantages, effective_suffix)
+    distill_term = suffix_rkl_k1(student_logits, teacher_logits, effective_distill)
+    task_term = suffix_task_grpo(student_logits, sampled_ids, advantages, effective_task)
     total = (
         lambda_prefix * prefix_term
         + lambda_distill * distill_term
