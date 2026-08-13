@@ -30,7 +30,9 @@ class STPTransitionDataset(FCOPDDataset):
         scaffold_flags: dict[str, bool] | None = None,
     ):
         super().__init__(data_files, tokenizer, config, processor, max_samples)
-        from .support_transition_dataset import load_prefixes
+        # verl loads custom dataset classes via file:// as a top-level module,
+        # so relative imports fail; use the absolute package path.
+        from dual_track_opd.support_aware.support_transition_dataset import load_prefixes
 
         # verl instantiates the dataset with only
         # data_files/tokenizer/processor/config/max_samples, so the prefix
