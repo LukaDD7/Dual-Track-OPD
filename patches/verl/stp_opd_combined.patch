@@ -1,0 +1,82 @@
+diff --git a/verl/trainer/ppo/ray_trainer.py b/verl/trainer/ppo/ray_trainer.py
+index e178ffc1..32854b9a 100644
+--- a/verl/trainer/ppo/ray_trainer.py
++++ b/verl/trainer/ppo/ray_trainer.py
+@@ -1360,6 +1360,23 @@ class RayPPOTrainer:
+ 
+                     if "response_mask" not in batch.batch.keys():
+                         batch.batch["response_mask"] = compute_response_mask(batch)
++
++                    stp_opd_hook_fqn = self.config.algorithm.get("stp_opd", {}).get("post_rollout_hook", None)
++                    if stp_opd_hook_fqn:
++                        with marked_timer("stp_opd", timing_raw, color="yellow"):
++                            stp_opd_hook = load_class_from_fqn(stp_opd_hook_fqn, "STP-OPD post-rollout hook")
++                            stp_opd_result = stp_opd_hook(
++                                batch=batch,
++                                tokenizer=self.tokenizer,
++                                processor=getattr(self, "processor", None),
++                                config=self.config,
++                                global_steps=self.global_steps,
++                            )
++                            if isinstance(stp_opd_result, tuple):
++                                batch, stp_opd_metrics = stp_opd_result
++                                metrics.update(stp_opd_metrics)
++                            else:
++                                batch = stp_opd_result
+                     # Balance the number of valid tokens across DP ranks.
+                     # NOTE: This usually changes the order of data in the `batch`,
+                     # which won't affect the advantage calculation (since it's based on uid),
+diff --git a/verl/workers/actor/dp_actor.py b/verl/workers/actor/dp_actor.py
+index c13ffa09..51452174 100644
+--- a/verl/workers/actor/dp_actor.py
++++ b/verl/workers/actor/dp_actor.py
+@@ -39,6 +39,10 @@ from verl.utils.torch_functional import logprobs_from_logits
+ from verl.utils.ulysses import gather_outputs_and_unpad, ulysses_pad, ulysses_pad_and_slice_inputs
+ from verl.workers.actor import BasePPOActor
+ from verl.workers.config import ActorConfig
++from dual_track_opd.support_aware.verl_stp_opd_integration import (
++    compute_stp_opd_actor_loss,
++    has_stp_opd_tensors,
++)
+ 
+ __all__ = ["DataParallelPPOActor"]
+ 
+@@ -124,6 +128,8 @@ class DataParallelPPOActor(BasePPOActor):
+         """
+         calculate_sum_pi_squared = self.config.get("calculate_sum_pi_squared", False)
+         sum_pi_squared_checkpointing = self.config.get("sum_pi_squared_checkpointing", False)
++        stp_opd_loss_sum = None
++        stp_opd_active_weight_sum = None
+         # PrefixGrouper path for shared-prefix optimization
+         if self.use_prefix_grouper:
+             can_use_pg = (
+@@ -367,6 +373,15 @@ class DataParallelPPOActor(BasePPOActor):
+ 
+                     logits.div_(temperature)
+                     logits = logits[:, -response_length - 1 : -1, :]  # (bsz, response_length, vocab_size)
++                    if has_stp_opd_tensors(micro_batch):
++                        stp_opd_loss_per_token, stp_opd_metrics = compute_stp_opd_actor_loss(
++                            student_logits=logits,
++                            batch=micro_batch,
++                            response_mask=micro_batch["response_mask"],
++                            config=self.config,
++                        )
++                        stp_opd_loss_sum = stp_opd_loss_per_token.sum()
++                        stp_opd_active_weight_sum = stp_opd_loss_per_token.detach().abs().clamp_min(1e-6).sum()
+                     log_probs = logprobs_from_logits(logits, micro_batch["responses"])
+                     if calculate_entropy:
+                         if not self.config.entropy_checkpointing:
+@@ -656,6 +671,13 @@ class DataParallelPPOActor(BasePPOActor):
+                         metrics["actor/kl_loss"] += kl_loss.detach().item() * loss_scale_factor
+                         micro_batch_metrics["actor/kl_coef"] = self.config.kl_loss_coef
+ 
++                    if stp_opd_loss_sum is not None:
++                        stp_opd_coef = float(self.config.algorithm.get("stp_opd", {}).get("loss_coef", 1.0))
++                        stp_opd_denominator = stp_opd_active_weight_sum.detach().clamp_min(1e-6)
++                        stp_opd_loss = stp_opd_loss_sum / stp_opd_denominator
++                        policy_loss = policy_loss + stp_opd_coef * stp_opd_loss
++                        micro_batch_metrics["actor/stp_opd_loss"] = stp_opd_loss.detach().item()
++
+                     if self.config.use_dynamic_bsz:
+                         # relative to the dynamic bsz
+                         loss = policy_loss * loss_scale_factor

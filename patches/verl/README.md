@@ -5,7 +5,10 @@
 Two thin patches against verl 0.7.1 (`third_party/verl` @ `bec9ef74`), both
 config-gated so verl behaves identically without the STP-OPD section:
 
-1. **`0001-stp-opd-ray-trainer-hook.patch`** — adds an optional
+`stp_opd_combined.patch` — adds both sides (generated from the real verl diff,
+verified with `git apply --check`):
+
+1. **ray_trainer.py hook** — adds an optional
    `algorithm.stp_opd.post_rollout_hook` call in `ray_trainer.py` next to the
    existing FC-OPD hook.  The hook
    (`verl_stp_opd_integration.stp_opd_post_rollout_hook`) attaches:
@@ -14,13 +17,20 @@ config-gated so verl behaves identically without the STP-OPD section:
    rollout batch.  The teacher service scores the full hybrid trajectory
    (fixed answer-free prefix + student suffix); the masks select the suffix
    region for RKL-K1 and GRPO.
-2. **`0002-stp-opd-actor-loss.patch`** — in `dp_actor.py`, when
+2. **dp_actor.py actor loss** — in `dp_actor.py`, when
    `has_stp_opd_tensors(micro_batch)` is true, computes the regional loss via
    `compute_stp_opd_actor_loss` (delegates to
    `support_transition_train.train_step_loss` with arm/lambdas from
    `algorithm.stp_opd`) and adds `loss_coef * stp_opd_loss` to `policy_loss`
    with a global-normalizer denominator, exactly like the FC-OPD auxiliary
    loss path.
+
+Apply with:
+
+```bash
+cd /inspire/hdd/global_user/mengweicheng-240108120092/lzy/projects/Dual-Track-OPD/third_party/verl && \
+git apply ../../patches/verl/stp_opd_combined.patch
+```
 
 ## Key design points
 
@@ -50,7 +60,7 @@ implemented with **path A** (minimal, reuses the FC-OPD actor aux-loss pattern):
 - the FKL prefix region is scored by the actor on the prefix tokens: the actor
   forward covers prompt + prefix + suffix, the prefix positions take the
   teacher-forced CE (`prefix_fkl_ce`), suffix positions take RKL-K1/GRPO;
-- the masks in `0002-stp-opd-actor-loss.patch` are derived from
+- the masks in `stp_opd_combined.patch` (dp_actor side) are derived from
   `stp_prefix_lengths` (prefix token count) instead of a rollout-side
   pre-filled response prefix.
 
