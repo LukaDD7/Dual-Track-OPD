@@ -10,7 +10,11 @@ prefix OPD plan (docs/two_track_next_experiment_handoff_20260806.md, §4.4):
 Each region is masked and normalized independently so prefix length cannot
 implicitly change the loss weight.  The scaffold branch fixes the verified
 answer-free teacher prefix as context; the unscaffolded branch has no prefix.
-This module contains no training loop and no model loading.
+All loss math returns tensors and preserves autograd (handoff
+docs/cc_causal_state_to_stp_handoff_20260813.md §4.1): empty regions produce a
+zero tensor with a live grad_fn so gradients stay zero instead of NaN, and no
+trainable loss value is ever converted to Python float here.  This module
+contains no training loop and no model loading.
 """
 
 from __future__ import annotations
@@ -31,11 +35,11 @@ DEFAULT_SCHEDULE: tuple[tuple[int, int, float], ...] = (
 
 @dataclass(frozen=True)
 class RegionTerms:
-    """Region-normalized loss terms; None means the region had no masked tokens."""
+    """Region-normalized loss terms; zero tensors mean no masked tokens."""
 
-    prefix_fkl: float | None
-    suffix_rkl: float | None
-    suffix_pg: float | None
+    prefix_fkl: torch.Tensor
+    suffix_rkl: torch.Tensor
+    suffix_pg: torch.Tensor
 
 
 def region_masks(
@@ -67,15 +71,20 @@ def region_masks(
 def masked_mean(
     values: torch.Tensor,
     mask: torch.Tensor,
-) -> float | None:
-    """Mean over masked positions; None when the mask selects nothing."""
+) -> torch.Tensor:
+    """Mean over masked positions, preserving autograd.
+
+    An empty mask returns ``values.sum() * 0.0``: a zero tensor whose grad_fn
+    keeps the autograd graph intact (gradients are zero, never NaN).  Never
+    converts the result to a Python float.
+    """
 
     if values.shape != mask.shape:
         raise ValueError(f"values {tuple(values.shape)} != mask {tuple(mask.shape)}")
     count = int(mask.sum())
     if count == 0:
-        return None
-    return float(values[mask].mean())
+        return values.sum() * 0.0
+    return values[mask].mean()
 
 
 def composed_loss(
@@ -88,18 +97,23 @@ def composed_loss(
     lambda_prefix: float = 1.0,
     lambda_distill: float = 1.0,
     lambda_task: float = 1.0,
-) -> tuple[float, RegionTerms]:
-    """Regionalized STP-OPD objective with independent per-region means."""
+) -> tuple[torch.Tensor, RegionTerms]:
+    """Regionalized STP-OPD objective with independent per-region means.
+
+    Returns a differentiable scalar tensor.  Regions are disjoint by contract
+    (see ``region_masks``/``validate_masks``) and each is normalized by its own
+    masked token count, so prefix length cannot rescale the suffix terms.
+    """
 
     prefix_term = masked_mean(prefix_fkl, prefix_mask)
     distill_term = masked_mean(suffix_rkl, suffix_mask)
     task_term = masked_mean(suffix_pg, suffix_mask)
     total = (
-        lambda_prefix * (prefix_term or 0.0)
-        + lambda_distill * (distill_term or 0.0)
-        + lambda_task * (task_term or 0.0)
+        lambda_prefix * prefix_term
+        + lambda_distill * distill_term
+        + lambda_task * task_term
     )
-    return float(total), RegionTerms(
+    return total, RegionTerms(
         prefix_fkl=prefix_term,
         suffix_rkl=distill_term,
         suffix_pg=task_term,
@@ -157,17 +171,45 @@ def paired_batch(
     seed: int,
     schedule: Sequence[tuple[int, int, float]] = DEFAULT_SCHEDULE,
 ) -> list[dict[str, object]]:
-    """Build one batch where every prompt appears in both scaffolded and
-    unscaffolded branches (paired by prompt), with a deterministic shuffle."""
+    """Build one paired batch.
+
+    Contract (handoff §4.2):
+    - every prompt appears exactly twice, once per branch, so every comparison
+      retains prompt pairing;
+    - each record carries ``assigned_scaffolded`` from ``assign_scaffold`` so
+      the training loop knows which branch realizes this step's scaffold share
+      (the flags are used, not computed and dropped);
+    - order is deterministic for a fixed (step, seed) pair.
+    """
 
     flags = assign_scaffold(prompt_ids, step=step, seed=seed, schedule=schedule)
     records: list[dict[str, object]] = []
     for prompt_id in prompt_ids:
-        records.append({"prompt_id": str(prompt_id), "scaffolded": True})
-        records.append({"prompt_id": str(prompt_id), "scaffolded": False})
+        records.append({
+            "prompt_id": str(prompt_id),
+            "scaffolded": True,
+            "assigned_scaffolded": bool(flags[str(prompt_id)]),
+        })
+        records.append({
+            "prompt_id": str(prompt_id),
+            "scaffolded": False,
+            "assigned_scaffolded": bool(flags[str(prompt_id)]),
+        })
     rng = random.Random(f"stp-paired-batch-step{step}-seed{seed}")
     rng.shuffle(records)
     return records
+
+
+def realized_scaffold_share(records: Sequence[Mapping[str, object]]) -> float:
+    """Fraction of paired prompts whose assigned branch is scaffolded."""
+
+    assigned: dict[str, bool] = {}
+    for record in records:
+        prompt_id = str(record["prompt_id"])
+        assigned[prompt_id] = bool(record["assigned_scaffolded"])
+    if not assigned:
+        return 0.0
+    return sum(assigned.values()) / len(assigned)
 
 
 def hybrid_prefix_ids(
