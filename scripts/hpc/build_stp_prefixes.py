@@ -39,6 +39,7 @@ def main() -> int:
     parser.add_argument("--response-format", default="legacy_answer")
     parser.add_argument("--max-proposal-tokens", type=int, default=4096)
     parser.add_argument("--max-proposal-seeds", type=int, default=10)
+    parser.add_argument("--only", help="comma-separated prompt uids to process (subset)")
     parser.add_argument("--seed", type=int, default=20260813)
     args = parser.parse_args()
 
@@ -82,6 +83,8 @@ def main() -> int:
     failures: dict[str, str] = {}
     proposal_seeds = [args.seed + offset for offset in range(args.max_proposal_seeds)]
     for prompt_uid, horizon in sorted(rescue_rows.items()):
+        if args.only and prompt_uid not in {value.strip() for value in args.only.split(",")}:
+            continue
         row = by_uid[prompt_uid]
         question = str(row["question"]).strip()
         gold = row["answer"]
