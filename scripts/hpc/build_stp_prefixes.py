@@ -79,6 +79,7 @@ def main() -> int:
 
     prefixes: dict[str, list[int]] = {}
     failures: dict[str, str] = {}
+    proposal_seeds = [args.seed + offset for offset in range(4)]
     for prompt_uid, horizon in sorted(rescue_rows.items()):
         row = by_uid[prompt_uid]
         question = str(row["question"]).strip()
@@ -96,40 +97,43 @@ def main() -> int:
         from io import BytesIO
 
         image = Image.open(BytesIO(image_bytes)).convert("RGB")
-        generated = generate_continuation(
-            model,
-            processor,
-            image=image,
-            prompt_text=prompt_text,
-            prefix_ids=(),
-            max_continuation_tokens=args.max_proposal_tokens,
-            temperature=0.0,
-            top_p=1.0,
-            seed=args.seed,
-            device="cuda:0",
-        )["generation"]
-        verdict = verify_answer(generated.response_text_display, gold)
-        if verdict.get("correct") is not True:
-            failures[prompt_uid] = f"teacher proposal not correct: {verdict.get('correct')}"
-            print(f"  {prompt_uid}: SKIP (proposal not correct)", flush=True)
-            continue
-        response_ids = list(generated.response_token_ids_raw)
-        prefix_ids = response_ids[:horizon]
-        prefix_text = processor.tokenizer.decode(
-            prefix_ids,
-            skip_special_tokens=True,
-            clean_up_tokenization_spaces=False,
-        )
-        if prefix_leakage_reason(prefix_text, gold) is not None:
-            failures[prompt_uid] = "prefix not answer-free after regeneration"
-            print(f"  {prompt_uid}: SKIP (prefix leaks answer)", flush=True)
-            continue
-        prefixes[prompt_uid] = prefix_ids
-        print(
-            f"  {prompt_uid}: horizon={horizon} prefix_tokens={len(prefix_ids)} "
-            f"answer-free=OK",
-            flush=True,
-        )
+        built = False
+        for proposal_seed in proposal_seeds:
+            generated = generate_continuation(
+                model,
+                processor,
+                image=image,
+                prompt_text=prompt_text,
+                prefix_ids=(),
+                max_continuation_tokens=args.max_proposal_tokens,
+                temperature=0.7,
+                top_p=0.95,
+                seed=proposal_seed,
+                device="cuda:0",
+            )["generation"]
+            verdict = verify_answer(generated.response_text_display, gold)
+            if verdict.get("correct") is not True:
+                continue
+            response_ids = list(generated.response_token_ids_raw)
+            prefix_ids = response_ids[:horizon]
+            prefix_text = processor.tokenizer.decode(
+                prefix_ids,
+                skip_special_tokens=True,
+                clean_up_tokenization_spaces=False,
+            )
+            if prefix_leakage_reason(prefix_text, gold) is not None:
+                continue
+            prefixes[prompt_uid] = prefix_ids
+            print(
+                f"  {prompt_uid}: horizon={horizon} prefix_tokens={len(prefix_ids)} "
+                f"answer-free=OK (seed {proposal_seed})",
+                flush=True,
+            )
+            built = True
+            break
+        if not built:
+            failures[prompt_uid] = "no correct answer-free proposal across 4 seeds"
+            print(f"  {prompt_uid}: SKIP (no correct answer-free proposal)", flush=True)
 
     output_dir = Path(args.output_dir).expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
