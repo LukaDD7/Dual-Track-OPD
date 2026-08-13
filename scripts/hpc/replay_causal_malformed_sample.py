@@ -49,6 +49,16 @@ REASON_FIELDS = (
 )
 
 
+def asdict_paths(config) -> dict:
+    """Config path fields for the unexpanded-variable guard."""
+
+    return {
+        "k32_run_dir": config.k32_run_dir,
+        "cohort_dir": config.cohort_dir,
+        "proposal_dir": config.proposal_dir or "",
+    }
+
+
 def collect_samples(records_path: Path, min_malformed: int) -> list[dict]:
     """Candidate x relay-length samples with n_malformed >= min_malformed."""
 
@@ -82,6 +92,13 @@ def main() -> int:
     args = parser.parse_args()
 
     config = load_config(args.config)
+    if "${" in json.dumps(asdict_paths(config)):
+        print(
+            "FATAL: config paths contain unexpanded ${DTOPD_*} variables; "
+            "export DTOPD_MODEL_ROOT and DTOPD_OUTPUT_ROOT before running",
+            file=sys.stderr,
+        )
+        return 2
     records_path = Path(args.records).expanduser().resolve()
     output_dir = Path(args.output_dir).expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
