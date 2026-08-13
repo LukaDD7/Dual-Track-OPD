@@ -87,13 +87,35 @@ late (rel>=2/3) L128 continuation-valid 0.3896, mean gain −0.2353 vs early
 ## 5. Relay reason counts
 
 All 101 records predate the reason-split schema (commit `ef3f2f3` added the
-fields, but no record written before it carries them).  Every relay estimate is
-therefore classified **`legacy_unknown`**: `n_malformed` cannot be separated
-into answer-leakage / missing-marker / truncation / generation-error without a
-stratified replay using the stored `seeds`/`response_hashes`.
+fields, but no record written before it carries them), so per-unit reason
+counts are not recoverable.  A stratified replay of the worst candidates
+(`scripts/hpc/replay_causal_malformed_sample.py`, 18 samples = 6 per relay
+length, each with `n_malformed >= 4`) re-ran the deterministic saved seeds and
+split 138 malformed continuations as:
 
-Legacy leakage-or-malformed note proxy (candidates with the note): L32 230/447,
-L64 255/447, L128 303/447.
+| relay length | malformed | answer leakage | truncated | leakage share |
+|---|---:|---:|---:|---:|
+| L32 | 47 | 16 | 31 | 0.340 |
+| L64 | 47 | 32 | 15 | 0.681 |
+| L128 | 44 | 24 | 20 | 0.545 |
+| total | 138 | 72 | 66 | 0.522 |
+
+No `generation_error` and no `no_answer_marker` outcomes were observed; the
+remaining 6 replayed continuations were format-valid (4 wrong, 2 correct).
+Interpretation: historical `n_malformed` is dominated by **relay answer
+leakage censoring** (52%, strongest at L64) and **truncation** (48%, strongest
+at L32).  Both are intervention-side censoring, not student generation
+failures, so the ITT lower bound is conservative in a systematic direction and
+the conditional answer-free estimate is the more descriptive view.
+
+Caveat: the replay sample was stratified over the high-`n_malformed` tail
+(`n_malformed >= 4`), so the shares are tail-weighted, not an unbiased
+estimate over all 447 candidates.  The legacy leakage-or-malformed note proxy
+for all candidates: L32 230/447, L64 255/447, L128 303/447.
+
+Decision: historical units do **not** need regeneration for the relay/transport
+accounting; the offline report can carry the replay-derived reason split as a
+documented sensitivity stratum instead of a per-unit `legacy_unknown`.
 
 ## 6. Transport
 
@@ -138,6 +160,7 @@ teacher-path on student GPU) remains theoretical; this item is **unsupported**.
 | `causal_state_probe_20260808_merged/candidate_windows.csv` | `91afd42719feba45` | 263950 |
 | `causal_state_probe_20260808_merged/causal_state_records.jsonl` | `d0925a2d649946f6` | 58167437 |
 | `causal_state_probe_20260808_merged/trajectory_overview.svg` | `ac44d39d7c9a7f33` | 398521 |
+| `causal_malformed_replay_20260813/replay_result.json` | (recorded in the run) | — |
 
 Per-shard trajectory JSON: `causal_state_probe_20260808_s{0..3}/trajectory_results/*.json`
 (27/28/23/23 files).
@@ -147,11 +170,11 @@ Per-shard trajectory JSON: `causal_state_probe_20260808_s{0..3}/trajectory_resul
 - **Final**: work-ID coverage (101/101, no missing/stray/duplicate), provenance
   hashes, counts, continuation-valid coverage, ITT lower-bound relay gains,
   transport gains, pair-clean conditional sensitivity, anchor stratification.
-- **Provisional**: relay reason split (all `legacy_unknown`), old/new strata
-  stability (mtime heuristic only), state-class counts for candidates whose
-  estimate is not pair-clean.
-- **Unsupported**: GPU memory measurement (P1-3); any claim that historical
-  malformed counts separate leakage from formatting failure without replay.
+- **Provisional**: replay-derived reason shares (18-sample tail-weighted
+  stratum; supports the leakage-vs-truncation split globally but not per unit),
+  old/new strata stability (mtime heuristic only), state-class counts for
+  candidates whose estimate is not pair-clean.
+- **Unsupported**: GPU memory measurement (P1-3).
 
 STP-OPD training readiness is **NOT** claimed by this audit; the handoff's own
 P0 gates govern any pilot launch.
