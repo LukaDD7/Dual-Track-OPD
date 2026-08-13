@@ -115,9 +115,12 @@ def stp_opd_post_rollout_hook(
     response_mask = batch.batch["response_mask"].bool()
     B, T = int(responses.shape[0]), int(responses.shape[1])
     device = responses.device
-    prompt_ids = batch.non_tensor_batch.get("stp_prompt_ids")
-    if prompt_ids is None:
-        raise ValueError("stp_prompt_ids missing from non-tensor batch")
+    prompt_ids = [
+        str((_row_value(batch, index, ("extra_info",)) or {}).get("sample_uid") or "")
+        for index in range(B)
+    ]
+    if any(not prompt_id for prompt_id in prompt_ids):
+        raise ValueError("STP hook requires extra_info.sample_uid per row")
 
     prefix_lengths = torch.zeros(B, dtype=torch.long)
     sampled_ids = responses.clone()
