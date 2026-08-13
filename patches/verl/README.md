@@ -1,114 +1,30 @@
-# `verl` Patches
+# verl backend status for STP-OPD (2026-08-13)
 
-Keep minimal patch overlays for `verl` here. Each patch should explain:
+## Decision: no source patch yet
 
-- upstream commit
-- reason for the patch
-- how to apply it
-- how to remove it when upstream support exists
+verl 0.7.1 (`third_party/verl` @ `bec9ef74`) exposes two official extension
+points that cover the STP-OPD pilot without modifying verl source:
 
-## FC-OPD Online FSDP Patch Set
+1. **`register_policy_loss`** (`verl/trainer/ppo/core_algos.py`) — verl already
+   resolves the policy loss by name from `actor_rollout_ref.actor.policy_loss`.
+   `src/dual_track_opd/support_aware/verl_stp_opd_integration.py` registers an
+   `stp_opd` entry (lazy import; no-op without verl installed).
+2. **post-rollout hook** — the existing FC-OPD hook pattern
+   (`fc_opd_post_rollout_hook`) attaches teacher-scored tensors to the rollout
+   batch; STP-OPD attaches teacher logits, prefix/suffix masks, and sampled ids
+   the same way.
 
-Upstream target:
+## When a real patch becomes necessary
 
-- `verl v0.7.1`
-- investigated commit: `bec9ef74768dd201881cd4e54cd0385e87caae27`
+Only if the rollout-batch custom-field channel cannot carry the teacher RKL
+inputs (teacher logits are needed at loss time).  In that case the smallest
+patch would add a no-op-by-default hook call in
+`verl/trainer/ppo/ray_trainer.py` next to the existing policy-loss call, gated
+by a config flag, and this file would then document the exact diff.
 
-Patches:
+## Validation gate
 
-- `fc_opd_ray_trainer_post_rollout_hook.patch`
-  - Adds a configurable post-rollout hook in `RayPPOTrainer.fit` immediately
-    after current student rollout responses are unioned into the batch and
-    `response_mask` exists.
-  - The hook FQN is read from `algorithm.fc_opd.post_rollout_hook`.
-  - The hook must be project-owned code that attaches `fc_*` tensor fields to
-    `DataProto.batch`; it must not read offline score JSONL.
-
-- `fc_opd_fsdp_actor_aux_kd.patch`
-  - Preserves FC-OPD tensor fields through `DataParallelPPOActor.update_policy`.
-  - Computes the actor-side auxiliary loss from live actor logits in
-    `_forward_micro_batch`.
-  - Supports a vanilla multimodal GKD baseline (`loss_mode=gkd`): one full-image
-    condition, online teacher forced-scoring of the current rollout, and pure
-    forward KL with no GRPO term.
-  - Supports the faithful VA-OPD paths (`loss_mode=va_opd` or
-    `loss_mode=va_opd_jsd`): full/degraded
-    teacher scores, exact sampled-token VA, rollout softmax weights that sum
-    to 1 per prompt, and grouped reverse KL.
-  - Treats GKD and both VA-OPD modes as pure distillation in the actor update,
-    replacing the PPO loss instead of adding an auxiliary objective.
-  - Adds `actor/fc_opd_loss`, `actor/fc_opd_coef`, denominator metrics, and
-    VA diagnostics such as `actor/fc_opd_va/mean`.
-  - Delegates tensor math to `dual_track_opd.fc_opd.verl_actor_loss` so the
-    third-party patch stays thin.
-
-Expected tensor fields attached by the trainer hook:
-
-```text
-fc_teacher_topk_indices    [B, C, T, K] int64
-fc_teacher_topk_log_probs  [B, C, T, K] float32
-fc_teacher_tail_log_prob   [B, C, T]    float32, optional
-fc_teacher_sampled_log_probs [B, C, T]  float32, required for VA-OPD
-fc_teacher_valid_mask      [B, C, T]    bool, masks teacher padding/misalignment
-fc_condition_weights       [B, C, T]    float32
-fc_rollout_weights         [B]          float32, required for VA-OPD actor path
-fc_condition_ids           [B, C]       int64, non-tensor batch
-fc_opd_loss_mode           [B]          object/string, non-tensor batch
-fc_prompt_ids              [B]          object/string, non-tensor batch
-```
-
-Apply from inside the checked-out `third_party/verl` tree, or from repo root
-with `--directory=third_party/verl`:
-
-```bash
-git apply --directory=third_party/verl patches/verl/fc_opd_ray_trainer_post_rollout_hook.patch
-git apply --directory=third_party/verl patches/verl/fc_opd_fsdp_actor_aux_kd.patch
-```
-
-The actor patch intentionally fail-fasts for fused actor kernels because FC-OPD
-requires live logits. Remove-padding without Ulysses sequence parallel is
-covered; remove-padding plus Ulysses SP should be added only after a dedicated
-alignment smoke.
-
-Removal path: revert the two patches and remove `algorithm.fc_opd.*` from the
-verl config. Project-side modules under `src/dual_track_opd/fc_opd/` remain
-valid for diagnostics and non-verl smokes.
-
-## Native VA-OPD Patch
-
-Upstream target:
-
-- verl commit `e003163181731412595257a72ec173071efb125f`
-- native async VLM teacher path introduced upstream after the pinned v0.7.1
-  submodule
-
-Patch:
-
-- `va_opd_native_e0031631.patch`
-  - transports a second, degraded-image sampled-token teacher score beside the
-    native full-image score;
-  - constructs the degraded multimodal payload through project-owned code;
-  - calls project-owned VA weighting before batch balancing/microbatching;
-  - registers project-owned `va_opd_k1` in the native distillation registry;
-  - changes exactly three backend files and contains no VA equation logic.
-
-The full-image native teacher score remains the reverse-KL target. The second
-pass only routes visual advantage. Both passes force-score the exact student
-sequence; project code rejects any response-token ID drift.
-
-Do not apply this overlay to `third_party/verl` at v0.7.1. Prepare a separate
-checkout at the exact commit:
-
-```bash
-export VERL_VA_OPD_DIR=/path/outside/git/verl-va-opd-e0031631
-bash scripts/setup/prepare_va_opd_native_verl.sh
-```
-
-The preparation script verifies that a clean checkout accepts the patch, or
-that an already-patched checkout accepts its exact reverse. The native
-preflight additionally checks the SHA-256 of all three patched backend files.
-
-Removal path: use a clean checkout of the upstream commit and omit the
-top-level `va_opd.*` Hydra keys. When upstream supports two-condition scoring
-and grouped token weights natively, delete the overlay while retaining the
-framework-neutral objective tests in `tests/va_opd/`.
+The end-to-end wiring must be validated in the pinned HPC verl environment
+(`va-opd-native-e003-cu128-r595-v1` or the train-verified env) before any arm
+launch: exact-token identity, online student scorer exercised in A0/A3,
+gradient isolation, and resume/manifest checks (handoff §6 P0 items).
