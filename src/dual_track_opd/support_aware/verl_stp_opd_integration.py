@@ -24,6 +24,7 @@ gradient isolation, resume/manifest).
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -196,6 +197,12 @@ def has_stp_opd_tensors(batch: Mapping[str, Any]) -> bool:
     if any(present) and not all(present):
         missing = [key for key, is_present in zip(STP_TENSOR_KEYS, present, strict=True) if not is_present]
         raise RuntimeError(f"incomplete STP-OPD tensor set; missing: {missing}")
+    if os.environ.get("STP_DEBUG_TENSORS"):
+        print(
+            f"[stp-debug] present={[k for k, ok in zip(STP_TENSOR_KEYS, present) if ok]} "
+            f"batch_keys={sorted(batch)[:12]}",
+            flush=True,
+        )
     return all(present)
 
 
