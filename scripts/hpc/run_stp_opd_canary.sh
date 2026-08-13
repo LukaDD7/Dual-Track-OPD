@@ -146,11 +146,7 @@ ${CONDA_ENV}/bin/python -m verl.trainer.main_ppo \
     "trainer.save_freq=-1" \
     "trainer.test_freq=-1" \
     "trainer.val_before_train=false" \
-    "trainer.max_training_steps=${NUM_STEPS}" \
-    "trainer.record_per_steps=1" \
-    "trainer.rollout_per_steps=1" \
-    "trainer.train_batch_size=${TRAIN_BATCH_SIZE}" \
-    "trainer.ppo_mini_batch_size=${PPO_MINI_BATCH_SIZE}"
+    "trainer.total_epochs=1"
 VERL_EXIT=$?
 set -e
 
