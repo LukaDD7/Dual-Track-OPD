@@ -1,0 +1,76 @@
+--- a/verl/workers/actor/dp_actor.py
++++ b/verl/workers/actor/dp_actor.py
+@@ -42,6 +42,12 @@
+ from verl.workers.actor import BasePPOActor
+ from verl.workers.config import ActorConfig
+ from dual_track_opd.fc_opd.verl_actor_loss import (
+     compute_verl_fc_opd_actor_loss,
+     fc_opd_batch_denominator,
+     fc_opd_global_normalizer,
+     has_fc_opd_tensors,
+ )
++from dual_track_opd.support_aware.verl_stp_opd_integration import (
++    compute_stp_opd_actor_loss,
++    has_stp_opd_tensors,
++)
+ 
+ __all__ = ["DataParallelPPOActor"]
+ 
+@@ -129,6 +135,10 @@
+         calculate_sum_pi_squared = self.config.get("calculate_sum_pi_squared", False)
+         sum_pi_squared_checkpointing = self.config.get("sum_pi_squared_checkpointing", False)
++        has_stp_opd = has_stp_opd_tensors(micro_batch)
++        stp_opd_loss_sum = None
++        stp_opd_active_weight_sum = None
+         has_fc_opd = has_fc_opd_tensors(micro_batch)
+         fc_opd_loss_sum = None
+         fc_opd_active_weight_sum = None
+@@ -263,6 +273,21 @@
+                     logits_rmpad = output.logits.squeeze(0)  # (total_nnz, vocab_size)
+                     logits_rmpad.div_(temperature)
++                    if has_stp_opd:
++                        response_logits = _response_logits_from_rmpad(
++                            logits_rmpad=logits_rmpad,
++                            indices=indices,
++                            batch_size=batch_size,
++                            seqlen=seqlen,
++                            response_length=response_length,
++                            response_mask=micro_batch["response_mask"],
++                        )
++                        stp_opd_loss_per_token, stp_opd_metrics = compute_stp_opd_actor_loss(
++                            student_logits=response_logits,
++                            batch=micro_batch,
++                            response_mask=micro_batch["response_mask"],
++                            config=self.config,
++                        )
++                        stp_opd_loss_sum = stp_opd_loss_per_token.sum()
++                        stp_opd_active_weight_sum = stp_opd_loss_per_token.detach().abs().clamp_min(1e-6).sum()
+ 
+                     if has_fc_opd:
+                         if self.use_ulysses_sp:
+@@ -406,6 +431,20 @@
+                     logits.div_(temperature)
+                     logits = logits[:, -response_length - 1 : -1, :]  # (bsz, response_length, vocab_size)
++                    if has_stp_opd:
++                        stp_opd_loss_per_token, stp_opd_metrics = compute_stp_opd_actor_loss(
++                            student_logits=logits,
++                            batch=micro_batch,
++                            response_mask=micro_batch["response_mask"],
++                            config=self.config,
++                        )
++                        stp_opd_loss_sum = stp_opd_loss_per_token.sum()
++                        stp_opd_active_weight_sum = stp_opd_loss_per_token.detach().abs().clamp_min(1e-6).sum()
+                     if has_fc_opd:
+                         fc_opd_output = compute_verl_fc_opd_actor_loss(
+                             student_logits=logits,
+@@ -580,6 +619,18 @@
+                     fc_opd_loss = fc_opd_loss_sum * dp_world_size / denominator
+                     policy_loss = policy_loss + fc_opd_coef * fc_opd_loss
+                     micro_batch_metrics["actor/fc_opd_denominator"] = denominator.detach().item()
++
++                if stp_opd_loss_sum is not None:
++                    stp_opd_coef = float(self.config.algorithm.get("stp_opd", {}).get("loss_coef", 1.0))
++                    stp_opd_denominator = stp_opd_active_weight_sum.detach().clamp_min(1e-6)
++                    stp_opd_loss = stp_opd_loss_sum / stp_opd_denominator
++                    policy_loss = policy_loss + stp_opd_coef * stp_opd_loss
++                    micro_batch_metrics["actor/stp_opd_loss"] = stp_opd_loss.detach().item()

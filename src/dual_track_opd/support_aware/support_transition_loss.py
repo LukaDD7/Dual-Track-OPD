@@ -66,6 +66,25 @@ def suffix_rkl_k1(
     return masked_mean(rkl, suffix_mask)
 
 
+def suffix_rkl_k1_sampled(
+    teacher_sampled_log_probs: torch.Tensor,
+    suffix_mask: torch.Tensor,
+) -> torch.Tensor:
+    """Sampled-token K1 reverse-KL estimator (plan §4.4 / FC-OPD channel).
+
+    ``teacher_sampled_log_probs`` is ``log P_T(y_t)`` for the student-sampled
+    suffix token ``y_t`` scored by the teacher on the same hybrid state.  The
+    K1 estimator is ``-mean_t log P_T(y_t)`` over the suffix region.
+    """
+
+    if teacher_sampled_log_probs.shape != suffix_mask.shape:
+        raise ValueError(
+            f"teacher log-probs {tuple(teacher_sampled_log_probs.shape)} != "
+            f"suffix mask {tuple(suffix_mask.shape)}"
+        )
+    return masked_mean(-teacher_sampled_log_probs, suffix_mask)
+
+
 def suffix_task_grpo(
     student_logits: torch.Tensor,
     sampled_ids: torch.Tensor,
@@ -97,6 +116,7 @@ def stp_opd_loss(
     suffix_mask: torch.Tensor,
     distill_mask: torch.Tensor | None = None,
     task_mask: torch.Tensor | None = None,
+    teacher_sampled_k1_log_probs: torch.Tensor | None = None,
     valid_mask: torch.Tensor | None = None,
     lambda_prefix: float = 1.0,
     lambda_distill: float = 1.0,
@@ -120,7 +140,13 @@ def stp_opd_loss(
         effective_distill = effective_distill & valid_mask
         effective_task = effective_task & valid_mask
     prefix_term = prefix_fkl_ce(student_logits, prefix_ids, effective_prefix)
-    distill_term = suffix_rkl_k1(student_logits, teacher_logits, effective_distill)
+    if teacher_sampled_k1_log_probs is not None:
+        distill_term = suffix_rkl_k1_sampled(
+            teacher_sampled_k1_log_probs,
+            effective_distill,
+        )
+    else:
+        distill_term = suffix_rkl_k1(student_logits, teacher_logits, effective_distill)
     task_term = suffix_task_grpo(student_logits, sampled_ids, advantages, effective_task)
     total = (
         lambda_prefix * prefix_term

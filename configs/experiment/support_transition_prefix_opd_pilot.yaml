@@ -11,6 +11,18 @@ experiment:
   seed_grid: [42, 1337, 20260813]
   scaffold_schedule: [[1, 20, 0.75], [21, 40, 0.50], [41, 60, 0.25]]
 
+algorithm:
+  stp_opd:
+    # verl thin patches: post-rollout hook (0001) + actor loss (0002).
+    post_rollout_hook: dual_track_opd.support_aware.verl_stp_opd_integration.stp_opd_post_rollout_hook
+    arm: A3
+    lambda_prefix: 1.0
+    lambda_distill: 1.0
+    lambda_task: 1.0
+    loss_coef: 1.0
+    prefix_manifest: ${DTOPD_OUTPUT_ROOT}/support_aware_opd/stp_prefixes.json
+    teacher_url: http://127.0.0.1:18080
+
 model:
   student: ${DTOPD_MODEL_ROOT}/Qwen3-VL-4B-Instruct
   teacher: ${DTOPD_MODEL_ROOT}/Qwen3-VL-32B-Instruct

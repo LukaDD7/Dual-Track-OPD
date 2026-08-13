@@ -7,6 +7,7 @@ from dual_track_opd.support_aware.support_transition_loss import (
     prefix_fkl_ce,
     stp_opd_loss,
     suffix_rkl_k1,
+    suffix_rkl_k1_sampled,
     suffix_task_grpo,
 )
 
@@ -56,6 +57,18 @@ def test_suffix_rkl_k1_is_differentiable():
     loss.backward()
     assert tensors["student_logits"].grad is not None
     assert bool((tensors["student_logits"].grad != 0).any())
+
+
+def test_suffix_rkl_k1_sampled_is_minus_mean_teacher_log_prob():
+    tensors = _tensors()
+    teacher_k1 = torch.randn_like(tensors["suffix_mask"].float())
+    loss = suffix_rkl_k1_sampled(teacher_k1, tensors["suffix_mask"])
+    expected = -(teacher_k1[tensors["suffix_mask"]].mean())
+    assert torch.allclose(loss, expected)
+    assert not torch.isnan(loss)
+    # empty suffix -> zero tensor, no NaN
+    empty = torch.zeros_like(tensors["suffix_mask"])
+    assert suffix_rkl_k1_sampled(teacher_k1, empty).item() == 0.0
 
 
 def test_suffix_task_grpo_excludes_prefix_positions():

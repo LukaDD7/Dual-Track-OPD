@@ -106,6 +106,9 @@ def train_step_loss(
     response_length: int,
     prefix_length: int,
     scaffolded: bool = True,
+    prefix_mask: torch.Tensor | None = None,
+    suffix_mask: torch.Tensor | None = None,
+    teacher_sampled_k1_log_probs: torch.Tensor | None = None,
     valid_mask: torch.Tensor | None = None,
     config: SupportTransitionTrainConfig | None = None,
 ) -> tuple[torch.Tensor, Mapping[str, torch.Tensor]]:
@@ -117,12 +120,15 @@ def train_step_loss(
 
     regions = arm_regions(arm)
     cfg = config or SupportTransitionTrainConfig(arm=arm)
-    prefix_mask_all, suffix_mask_all = region_masks(
-        response_length, prefix_length, scaffolded=scaffolded
-    )
-    batch = student_logits.shape[0]
-    prefix_mask_all = prefix_mask_all.unsqueeze(0).expand(batch, -1)
-    suffix_mask_all = suffix_mask_all.unsqueeze(0).expand(batch, -1)
+    if prefix_mask is None or suffix_mask is None:
+        prefix_mask_all, suffix_mask_all = region_masks(
+            response_length, prefix_length, scaffolded=scaffolded
+        )
+        batch = student_logits.shape[0]
+        prefix_mask_all = prefix_mask_all.unsqueeze(0).expand(batch, -1)
+        suffix_mask_all = suffix_mask_all.unsqueeze(0).expand(batch, -1)
+    else:
+        prefix_mask_all, suffix_mask_all = prefix_mask, suffix_mask
     zeros = torch.zeros_like(prefix_mask_all)
     prefix_mask = prefix_mask_all if regions["prefix"] else zeros
     distill_mask = suffix_mask_all if regions["distill"] else zeros
@@ -137,6 +143,7 @@ def train_step_loss(
         suffix_mask=suffix_mask_all,
         distill_mask=distill_mask,
         task_mask=task_mask,
+        teacher_sampled_k1_log_probs=teacher_sampled_k1_log_probs,
         valid_mask=valid_mask,
         lambda_prefix=cfg.lambda_prefix,
         lambda_distill=cfg.lambda_distill,
