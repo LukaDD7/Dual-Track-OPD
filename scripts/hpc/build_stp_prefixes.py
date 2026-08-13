@@ -38,6 +38,7 @@ def main() -> int:
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--response-format", default="legacy_answer")
     parser.add_argument("--max-proposal-tokens", type=int, default=4096)
+    parser.add_argument("--max-proposal-seeds", type=int, default=10)
     parser.add_argument("--seed", type=int, default=20260813)
     args = parser.parse_args()
 
@@ -79,7 +80,7 @@ def main() -> int:
 
     prefixes: dict[str, list[int]] = {}
     failures: dict[str, str] = {}
-    proposal_seeds = [args.seed + offset for offset in range(4)]
+    proposal_seeds = [args.seed + offset for offset in range(args.max_proposal_seeds)]
     for prompt_uid, horizon in sorted(rescue_rows.items()):
         row = by_uid[prompt_uid]
         question = str(row["question"]).strip()
@@ -132,7 +133,9 @@ def main() -> int:
             built = True
             break
         if not built:
-            failures[prompt_uid] = "no correct answer-free proposal across 4 seeds"
+            failures[prompt_uid] = (
+                f"no correct answer-free proposal across {len(proposal_seeds)} seeds"
+            )
             print(f"  {prompt_uid}: SKIP (no correct answer-free proposal)", flush=True)
 
     output_dir = Path(args.output_dir).expanduser().resolve()
