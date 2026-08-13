@@ -32,7 +32,24 @@ class STPTransitionDataset(FCOPDDataset):
         super().__init__(data_files, tokenizer, config, processor, max_samples)
         from .support_transition_dataset import load_prefixes
 
-        self.prefixes = load_prefixes(prefix_manifest) if prefix_manifest else {}
+        # verl instantiates the dataset with only
+        # data_files/tokenizer/processor/config/max_samples, so the prefix
+        # manifest and scaffold policy must come from data_config.
+        config_get = getattr(config, "get", None)
+        resolved_manifest = (
+            prefix_manifest
+            or (config_get("prefix_manifest") if config_get else None)
+        )
+        if not resolved_manifest:
+            raise ValueError(
+                "STPTransitionDataset requires data.prefix_manifest "
+                "(verified answer-free teacher prefixes)"
+            )
+        self.prefixes = load_prefixes(resolved_manifest)
+        if scaffold_flags is None and config_get is not None:
+            scaffold_all = config_get("scaffold_all", False)
+            if scaffold_all:
+                scaffold_flags = {prompt_id: True for prompt_id in self.prefixes}
         self.scaffold_flags = scaffold_flags or {}
         self._prefix_text_cache: dict[str, str] = {}
 

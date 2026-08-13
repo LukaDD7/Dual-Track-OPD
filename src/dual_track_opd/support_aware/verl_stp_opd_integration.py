@@ -80,6 +80,15 @@ def stp_opd_post_rollout_hook(
     K1 log-prob per token.
     """
 
+    from dual_track_opd.fc_opd.teacher_protocol import (
+        Condition,
+        TeacherScoreRequest,
+    )
+    from dual_track_opd.fc_opd.verl_post_rollout_hook import (
+        _condition_inputs_from_row,
+        _row_value,
+    )
+
     del processor, global_steps
     responses = batch.batch["responses"]
     response_mask = batch.batch["response_mask"].bool()
@@ -103,21 +112,43 @@ def stp_opd_post_rollout_hook(
         sampled_ids[index, :prefix_length] = -1
     suffix_mask = (~prefix_mask) & response_mask
 
-    # Teacher K1 log-probs over the hybrid trajectory: delegate to the teacher
-    # client exactly as FC-OPD does (score full hybrid response token ids).
+    # Teacher K1 log-probs: the teacher scores the student-sampled suffix after
+    # the same prompt (with the assistant prefix when scaffolded); the response
+    # carries exact sampled_token_log_probs per token.
     teacher_log_probs = torch.full((B, T), float("-inf"), dtype=torch.float32, device=device)
     for index in range(B):
-        prompt_id = str(prompt_ids[index])
-        response_ids = [
+        extra = _row_value(batch, index, ("extra_info",)) or {}
+        question = str(extra.get("question") or "")
+        if not question:
+            raise ValueError(f"STP hook requires extra_info.question at row {index}")
+        condition_inputs = _condition_inputs_from_row(batch, index)
+        prefix_text = str(extra.get("stp_prefix_text") or "")
+        scaffolded = bool(extra.get("stp_scaffolded", False))
+        response_ids = tuple(
             int(value) for value in responses[index, response_mask[index]].tolist()
-        ]
-        scored = teacher_client.score_hybrid_k1(
-            prompt_id=prompt_id,
-            response_token_ids=response_ids,
         )
-        valid = response_mask[index]
-        teacher_log_probs[index, valid] = torch.tensor(
-            scored, dtype=torch.float32, device=device
+        prompt_messages = [{
+            "role": "user",
+            "content": f"<image>\n{question}\n\nPut the final answer in \\boxed{{}}.",
+        }]
+        if scaffolded and prefix_text:
+            prompt_messages.append({"role": "assistant", "content": prefix_text})
+        scored = teacher_client.score([
+            TeacherScoreRequest(
+                request_id=f"stp:{index}",
+                condition=Condition.FULL,
+                question=question,
+                condition_inputs=condition_inputs,
+                response_token_ids=response_ids,
+                tokenizer_hash=teacher_client.metadata.tokenizer_hash,
+                prompt=tuple(prompt_messages),
+            )
+        ])[0]
+        positions = response_mask[index].nonzero(as_tuple=True)[0]
+        teacher_log_probs[index, positions] = torch.tensor(
+            list(scored.sampled_token_log_probs),
+            dtype=torch.float32,
+            device=device,
         )
     valid_mask = torch.isfinite(teacher_log_probs) & response_mask
 
