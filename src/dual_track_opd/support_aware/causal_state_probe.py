@@ -14,6 +14,7 @@ import json
 import os
 import platform
 import subprocess
+import tempfile
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -105,6 +106,8 @@ class ProbeConfig:
     max_prompts: int | None = None
     shard_index: int = 0
     num_shards: int = 1
+    work_slice_index: int = 0
+    work_slice_total: int = 1
 
     def validate(self) -> None:
         if not self.k32_run_dir or not self.cohort_dir or not self.output_dir:
@@ -129,6 +132,8 @@ class ProbeConfig:
             raise ValueError("relay lengths must be positive")
         if not 0 <= self.shard_index < self.num_shards or self.num_shards <= 0:
             raise ValueError("invalid shard assignment")
+        if self.work_slice_total <= 0 or not 0 <= self.work_slice_index < self.work_slice_total:
+            raise ValueError("invalid work-slice assignment")
         if self.max_prompts is not None and self.max_prompts <= 0:
             raise ValueError("max_prompts must be positive")
         self.candidate_config().validate()
@@ -230,6 +235,8 @@ def load_config(path: str | Path, args: argparse.Namespace | None = None) -> Pro
         max_prompts=override("max_prompts"),
         shard_index=int(override("shard_index", 0)),
         num_shards=int(override("num_shards", 1)),
+        work_slice_index=int(override("work_slice_index", 0)),
+        work_slice_total=int(override("work_slice_total", 1)),
     )
     config.validate()
     return config
@@ -245,12 +252,25 @@ def _git_state() -> tuple[str, bool]:
 
 
 def _write_json_atomic(path: Path, value: Mapping[str, Any]) -> None:
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(
-        json.dumps(dict(value), ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
+    # Unique temp name: concurrent runners share the same manifest/result
+    # directory, so a fixed ".tmp" suffix would race (one process replaces the
+    # other's temp file before it is renamed).  mkstemp + os.replace keeps the
+    # write atomic while allowing safe concurrent writers.
+    fd, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent)
     )
-    temporary.replace(path)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(
+                json.dumps(dict(value), ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+            )
+        os.replace(temporary_name, path)
+    except BaseException:
+        try:
+            os.unlink(temporary_name)
+        except OSError:
+            pass
+        raise
 
 
 def _safe_name(value: str) -> str:
@@ -261,6 +281,17 @@ def _safe_name(value: str) -> str:
 def _work_id(item: ProbeInput) -> str:
     rollout = item.student_rollout
     return f"{item.sample_uid}:rollout-{int(rollout.get('rollout_id') or 0)}:{rollout.get('response_token_hash')}"
+
+
+def _work_slice_items(items: Sequence[ProbeInput], index: int, total: int) -> list[ProbeInput]:
+    """Deterministically split pending work units across concurrent runners.
+
+    `index`/`total` must already be validated (0 <= index < total, total >= 1).
+    With `total == 1` the full list is returned, so resume behavior is unchanged.
+    """
+    if total <= 1:
+        return list(items)
+    return [item for i, item in enumerate(items) if i % total == index]
 
 
 def _seed(config: ProbeConfig, work_id: str, candidate_anchor: int, salt: str) -> int:
@@ -705,6 +736,10 @@ def _build_record(item: ProbeInput, config: ProbeConfig, models: Any) -> CausalS
             "tokenizer_hash": models.tokenizer_hash,
             "layout": fixed.layout_metadata,
             "features": asdict(config.features),
+            # Review P1-4: per-trajectory implementation identity so old
+            # (chunked logits_to_keep) and new (single full-prefix forward)
+            # units can be stratified instead of silently mixed.
+            "implementation_version": "single_forward_v2",
         },
     )
     record.validate()
@@ -730,7 +765,11 @@ def run(config: ProbeConfig) -> dict[str, Any]:
     )
     provenance["expected_work_ids"] = [_work_id(item) for item in inputs]
     commit, dirty = _git_state()
-    config_dict = json.loads(json.dumps(asdict(config)))
+    config_dict = {
+        key: value
+        for key, value in json.loads(json.dumps(asdict(config))).items()
+        if key not in ("work_slice_index", "work_slice_total")
+    }
     manifest_path = output / "run_manifest.json"
     manifest: dict[str, Any] = {
         "schema_version": RUN_SCHEMA_VERSION,
@@ -769,6 +808,8 @@ def run(config: ProbeConfig) -> dict[str, Any]:
         for path in result_dir.glob("*.json")
     }
     pending = [item for item in inputs if _work_id(item) not in completed]
+    if config.work_slice_total > 1:
+        pending = _work_slice_items(pending, config.work_slice_index, config.work_slice_total)
     models = None
     if pending:
         models = load_runtime_models(
@@ -801,6 +842,36 @@ def run(config: ProbeConfig) -> dict[str, Any]:
             _write_json_atomic(result_path, record.to_dict())
             print(f"[{index}/{len(pending)}] completed {record.trajectory_id}", flush=True)
 
+    if config.work_slice_total > 1 and config.work_slice_index != config.work_slice_total - 1:
+        # Non-final slices only contribute trajectory results; the final
+        # slice owns the shared summary/manifest finalization.
+        print(f"[slice {config.work_slice_index}/{config.work_slice_total}] done, summary owned by slice {config.work_slice_total - 1}", flush=True)
+        return {"slice_index": config.work_slice_index, "slice_total": config.work_slice_total}
+
+    if config.work_slice_total > 1:
+        # The final slice must wait for every other slice's trajectory JSON
+        # before writing the shared summary; otherwise it can finalize a
+        # partial run while peers are still computing (2026-08-12 s1 incident).
+        wait_seconds = int(os.environ.get("CAUSAL_PROBE_FINAL_WAIT_SECONDS", "21600"))
+        deadline = time.time() + wait_seconds
+        while time.time() < deadline:
+            present = {p.name for p in result_dir.glob("*.json")}
+            if all(
+                f"{_safe_name(_work_id(item))}.json" in present
+                for item in inputs
+            ):
+                break
+            missing = [
+                _work_id(item)
+                for item in inputs
+                if f"{_safe_name(_work_id(item))}.json" not in present
+            ]
+            print(
+                f"[final slice] waiting for {len(missing)} peer result(s): {missing[:3]}",
+                flush=True,
+            )
+            time.sleep(60)
+
     records = [
         json.loads(path.read_text(encoding="utf-8"))
         for path in sorted(result_dir.glob("*.json"))
@@ -829,6 +900,7 @@ def run(config: ProbeConfig) -> dict[str, Any]:
 def summarize(input_dirs: Sequence[str | Path], output_dir: str | Path) -> dict[str, Any]:
     records: dict[str, dict[str, Any]] = {}
     manifests: list[dict[str, Any]] = []
+    dirty_shards: list[str] = []
     for directory in input_dirs:
         root = Path(directory).expanduser().resolve()
         manifest_path = root / "run_manifest.json"
@@ -838,7 +910,11 @@ def summarize(input_dirs: Sequence[str | Path], output_dir: str | Path) -> dict[
         if manifest.get("schema_version") != RUN_SCHEMA_VERSION or manifest.get("status") != "completed":
             raise ValueError(f"incomplete or incompatible causal-probe shard: {root}")
         if manifest.get("git_dirty") is not False:
-            raise ValueError(f"refusing to merge dirty causal-probe shard: {root}")
+            # Review P1-2: surface dirty-worktree provenance instead of refusing
+            # to merge.  The 2026-08-08 probe ran every shard from the same
+            # dirty worktree (ab7d054 + uncommitted local fixes), so all shards
+            # share the same code identity and the merge remains interpretable.
+            dirty_shards.append(str(root))
         manifests.append(manifest)
         for path in (root / "trajectory_results").glob("*.json"):
             record = json.loads(path.read_text(encoding="utf-8"))
@@ -896,7 +972,8 @@ def summarize(input_dirs: Sequence[str | Path], output_dir: str | Path) -> dict[
         "schema_version": RUN_SCHEMA_VERSION,
         "status": "completed",
         "git_commit": next(iter(commits)),
-        "git_dirty": False,
+        "git_dirty": bool(dirty_shards),
+        "dirty_shards": sorted(dirty_shards),
         "config": reference_config,
         "input_hashes": reference_hashes,
         "input_shards": [str(Path(value).expanduser().resolve()) for value in input_dirs],
@@ -929,6 +1006,8 @@ def build_parser() -> argparse.ArgumentParser:
         sub.add_argument("--relay-lengths", nargs="+", type=int)
         sub.add_argument("--shard-index", type=int, default=0)
         sub.add_argument("--num-shards", type=int, default=1)
+        sub.add_argument("--work-slice-index", type=int, default=0)
+        sub.add_argument("--work-slice-total", type=int, default=1)
         if command == "preflight":
             sub.add_argument("--load-tokenizers", action="store_true")
     merge = subparsers.add_parser("summarize")
@@ -943,6 +1022,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "summarize":
         print(json.dumps(summarize(args.input_dir, args.output_dir), indent=2, sort_keys=True))
         return 0
+    if (
+        getattr(args, "work_slice_index", 0) != 0
+        or getattr(args, "work_slice_total", 1) != 1
+    ) and args.command not in ("run", "preflight"):
+        parser.error("--work-slice-index/--work-slice-total only apply to run/preflight")
     config = load_config(args.config, args)
     if args.command == "preflight":
         result = preflight(config, load_tokenizers=args.load_tokenizers)
@@ -950,6 +1034,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0 if result["valid"] else 1
     result = run(config)
     print(json.dumps(result, indent=2, sort_keys=True))
+    if "slice_index" in result:
+        return 0
     return 0 if result["complete"] else 1
 
 

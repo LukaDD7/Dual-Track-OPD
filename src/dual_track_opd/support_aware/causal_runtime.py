@@ -346,6 +346,27 @@ def fixed_trajectory_visual_statistics(
     )
 
 
+def _outcome_reason(verdict: Mapping[str, Any], finish_reason: str | None) -> str:
+    """Classify one continuation outcome into the review P0-2 reason split.
+
+    ``correct is True`` → ``correct``; ``correct is False`` → the response was
+    format-valid but wrong (``wrong_format_valid``).  When the verifier cannot
+    extract an answer (``correct is None``), a ``length`` finish reason is
+    ``truncated`` and everything else is ``no_answer_marker``.  Relay prefixes
+    that already expose the gold answer are censored as
+    ``relay_answer_leakage`` by the caller and never reach this helper.
+    """
+
+    correct = verdict.get("correct")
+    if correct is True:
+        return "correct"
+    if correct is False:
+        return "wrong_format_valid"
+    if finish_reason == "length":
+        return "truncated"
+    return "no_answer_marker"
+
+
 def condition_continuations(
     model: Any,
     processor: Any,
@@ -366,6 +387,7 @@ def condition_continuations(
     estimates = []
     for condition, image in (("full", images.full), ("degraded", images.degraded), ("null", images.null)):
         correctness: list[bool | None] = []
+        reasons: list[str] = []
         seeds: list[int] = []
         hashes: list[str] = []
         for rollout_index in range(k):
@@ -384,6 +406,7 @@ def condition_continuations(
             )["generation"]
             verdict = verify_answer(generated.response_text_display, gold_answer)
             correctness.append(verdict.get("correct"))
+            reasons.append(_outcome_reason(verdict, getattr(generated, "finish_reason", None)))
             seeds.append(rollout_seed)
             hashes.append(generated.response_token_hash)
         estimates.append(continuation_estimate(
@@ -391,6 +414,7 @@ def condition_continuations(
             correctness,
             seeds=seeds,
             response_hashes=hashes,
+            reasons=reasons,
         ))
     return tuple(estimates)
 
@@ -414,6 +438,7 @@ def teacher_relay_estimate(
     if models.teacher_model is None or models.teacher_processor is None:
         raise ValueError("teacher relay requires a loaded teacher")
     correctness: list[bool | None] = []
+    reasons: list[str] = []
     seeds: list[int] = []
     hashes: list[str] = []
     teacher_eos = models.teacher_processor.tokenizer.eos_token_id
@@ -445,6 +470,7 @@ def teacher_relay_estimate(
             # Relay gain must measure a useful intermediate state, not a short
             # teacher segment that already states an extractable final answer.
             correctness.append(None)
+            reasons.append("relay_answer_leakage")
             seeds.append(student_seed)
             hashes.append(hash_token_ids(hybrid_prefix))
             continue
@@ -462,10 +488,15 @@ def teacher_relay_estimate(
         )["generation"]
         verdict = verify_answer(generated.response_text_display, gold_answer)
         correctness.append(verdict.get("correct"))
+        reasons.append(_outcome_reason(verdict, getattr(generated, "finish_reason", None)))
         seeds.append(student_seed)
         hashes.append(generated.response_token_hash)
     return continuation_estimate(
-        f"relay_l{relay_length}", correctness, seeds=seeds, response_hashes=hashes
+        f"relay_l{relay_length}",
+        correctness,
+        seeds=seeds,
+        response_hashes=hashes,
+        reasons=reasons,
     )
 
 
@@ -485,6 +516,7 @@ def transport_estimate(
     condition: str = "teacher_transport",
 ) -> ContinuationEstimate:
     correctness: list[bool | None] = []
+    reasons: list[str] = []
     seeds: list[int] = []
     hashes: list[str] = []
     for rollout_index in range(k):
@@ -503,10 +535,15 @@ def transport_estimate(
         )["generation"]
         verdict = verify_answer(generated.response_text_display, gold_answer)
         correctness.append(verdict.get("correct"))
+        reasons.append(_outcome_reason(verdict, getattr(generated, "finish_reason", None)))
         seeds.append(rollout_seed)
         hashes.append(generated.response_token_hash)
     return continuation_estimate(
-        condition, correctness, seeds=seeds, response_hashes=hashes
+        condition,
+        correctness,
+        seeds=seeds,
+        response_hashes=hashes,
+        reasons=reasons,
     )
 
 
@@ -555,6 +592,7 @@ def direct_answer_estimate(
     inputs = {key: value.to(device) for key, value in inputs.items()}
     input_width = int(inputs["input_ids"].shape[1])
     correctness: list[bool | None] = []
+    reasons: list[str] = []
     seeds: list[int] = []
     hashes: list[str] = []
     for rollout_index in range(k):
@@ -580,10 +618,15 @@ def direct_answer_estimate(
         )
         verdict = verify_answer(generation.response_text_display, gold_answer)
         correctness.append(verdict.get("correct"))
+        reasons.append(_outcome_reason(verdict, getattr(generation, "finish_reason", None)))
         seeds.append(rollout_seed)
         hashes.append(generation.response_token_hash)
     return continuation_estimate(
-        "answer_leakage", correctness, seeds=seeds, response_hashes=hashes
+        "answer_leakage",
+        correctness,
+        seeds=seeds,
+        response_hashes=hashes,
+        reasons=reasons,
     )
 
 

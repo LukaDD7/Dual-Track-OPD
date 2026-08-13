@@ -68,6 +68,15 @@ class ContinuationEstimate:
     pass_rate: float
     seeds: tuple[int, ...] = ()
     response_hashes: tuple[str, ...] = ()
+    # Review P0-2: split the historical opaque `n_malformed` counter into
+    # auditable reason counts.  Legacy shard JSON (written before these fields
+    # existed) simply omits them; new records carry the full split.
+    n_student_continuations_generated: int = 0
+    n_wrong_format_valid: int = 0
+    n_no_answer_marker: int = 0
+    n_truncated: int = 0
+    n_relay_answer_leakage: int = 0
+    n_generation_error: int = 0
 
     def validate(self) -> None:
         if self.n <= 0 or not 0 <= self.n_correct <= self.n:
@@ -80,6 +89,39 @@ class ContinuationEstimate:
             raise ValueError("continuation seed count must equal n")
         if self.response_hashes and len(self.response_hashes) != self.n:
             raise ValueError("continuation response-hash count must equal n")
+        if self.n_student_continuations_generated:
+            if (
+                self.n_correct
+                + self.n_wrong_format_valid
+                + self.n_no_answer_marker
+                + self.n_truncated
+                + self.n_generation_error
+                != self.n_student_continuations_generated
+            ):
+                raise ValueError(
+                    "continuation counts inconsistent with generated continuations"
+                )
+            if self.n_relay_answer_leakage + self.n_student_continuations_generated != self.n:
+                raise ValueError(
+                    "relay-leakage count plus generated count must equal n"
+                )
+        elif (
+            self.n_wrong_format_valid
+            or self.n_no_answer_marker
+            or self.n_truncated
+            or self.n_generation_error
+        ):
+            raise ValueError(
+                "reason counts set without n_student_continuations_generated"
+            )
+        elif self.n_relay_answer_leakage and self.n_relay_answer_leakage != self.n:
+            # With zero generated continuations, every trial must be censored by
+            # relay answer leakage (e.g. a teacher relay that always exposes the
+            # gold answer).
+            raise ValueError(
+                "relay-answer-leakage count must equal n when no continuation "
+                "was generated"
+            )
 
 
 @dataclass(frozen=True)
@@ -222,10 +264,43 @@ def continuation_estimate(
     *,
     seeds: Sequence[int] = (),
     response_hashes: Sequence[str] = (),
+    reasons: Sequence[str] = (),
 ) -> ContinuationEstimate:
     if not correctness:
         raise ValueError("at least one continuation outcome is required")
     correct_count = sum(value is True for value in correctness)
+    if reasons:
+        if len(reasons) != len(correctness):
+            raise ValueError("reasons length must equal correctness length")
+        generated = 0
+        n_wrong_format_valid = 0
+        n_no_answer_marker = 0
+        n_truncated = 0
+        n_relay_answer_leakage = 0
+        n_generation_error = 0
+        for reason in reasons:
+            if reason == "correct":
+                continue
+            if reason == "wrong_format_valid":
+                n_wrong_format_valid += 1
+            elif reason == "no_answer_marker":
+                n_no_answer_marker += 1
+            elif reason == "truncated":
+                n_truncated += 1
+            elif reason == "relay_answer_leakage":
+                n_relay_answer_leakage += 1
+            elif reason == "generation_error":
+                n_generation_error += 1
+            else:
+                raise ValueError(f"unknown continuation reason: {reason!r}")
+        generated = len(correctness) - n_relay_answer_leakage
+    else:
+        generated = 0
+        n_wrong_format_valid = 0
+        n_no_answer_marker = 0
+        n_truncated = 0
+        n_relay_answer_leakage = 0
+        n_generation_error = 0
     estimate = ContinuationEstimate(
         condition=str(condition),
         n=len(correctness),
@@ -234,6 +309,12 @@ def continuation_estimate(
         pass_rate=float(correct_count / len(correctness)),
         seeds=tuple(int(value) for value in seeds),
         response_hashes=tuple(str(value) for value in response_hashes),
+        n_student_continuations_generated=generated,
+        n_wrong_format_valid=n_wrong_format_valid,
+        n_no_answer_marker=n_no_answer_marker,
+        n_truncated=n_truncated,
+        n_relay_answer_leakage=n_relay_answer_leakage,
+        n_generation_error=n_generation_error,
     )
     estimate.validate()
     return estimate

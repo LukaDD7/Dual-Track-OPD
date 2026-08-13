@@ -23,6 +23,7 @@ import sys
 from collections import Counter
 from pathlib import Path
 from statistics import fmean, median
+from datetime import date
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
@@ -251,6 +252,28 @@ def deep_stats(records: list[dict]) -> dict:
         "continuation_n": 0,
         "continuation_valid": 0,
     } for length in ("32", "64", "128")}
+    buckets = ("early", "mid", "late")
+    relay_coverage_by_bucket: dict[str, dict[str, dict]] = {
+        bucket: {length: {
+            "total": 0,
+            "all_clean_estimates": 0,
+            "with_any_malformed": 0,
+            "fully_malformed": 0,
+            "n_malformed_distribution": Counter(),
+            "continuation_n": 0,
+            "continuation_valid": 0,
+        } for length in ("32", "64", "128")}
+        for bucket in buckets
+    }
+    relay_gain_by_bucket: dict[str, dict[str, list[float]]] = {
+        bucket: {length: [] for length in ("32", "64", "128")} for bucket in buckets
+    }
+    conditional_pass_numerator: dict[str, int] = {length: 0 for length in ("32", "64", "128")}
+    conditional_pass_denominator: dict[str, int] = {length: 0 for length in ("32", "64", "128")}
+    conditional_estimates: dict[str, int] = {length: 0 for length in ("32", "64", "128")}
+    reason_split: dict[str, Counter] = {
+        length: Counter() for length in ("32", "64", "128")
+    }
     pair_clean_by_len: dict[str, dict] = {length: {
         "treatment_clean": 0, "control_clean": 0, "pair_clean": 0, "total": 0,
     } for length in ("32", "64", "128")}
@@ -290,6 +313,15 @@ def deep_stats(records: list[dict]) -> dict:
                 if barrier.get("peaks") is not None:
                     barrier_has_peaks += 1
         for candidate in record.get("candidate_windows") or ():
+            relative_position = candidate.get("relative_position")
+            if relative_position is None:
+                bucket = None
+            elif float(relative_position) < 1 / 3:
+                bucket = "early"
+            elif float(relative_position) < 2 / 3:
+                bucket = "mid"
+            else:
+                bucket = "late"
             relay = candidate.get("relay_gain_by_length") or {}
             probabilities = candidate.get("relay_probability_by_length") or {}
             estimates = {
@@ -307,6 +339,8 @@ def deep_stats(records: list[dict]) -> dict:
             for length in relay_by_len:
                 if relay.get(length) is not None:
                     relay_by_len[length].append(float(relay[length]))
+                    if bucket is not None:
+                        relay_gain_by_bucket[bucket][length].append(float(relay[length]))
                 if probabilities.get(length) is not None:
                     relay_prob[length].append(float(probabilities[length]))
                 estimate = estimates.get(length)
@@ -332,6 +366,36 @@ def deep_stats(records: list[dict]) -> dict:
                         pair_clean_by_len[length]["pair_clean"] += 1
                         if relay.get(length) is not None:
                             relay_conditional_by_len[length].append(float(relay[length]))
+                    if bucket is not None:
+                        bucket_stats = relay_coverage_by_bucket[bucket][length]
+                        bucket_stats["total"] += 1
+                        bucket_stats["n_malformed_distribution"][malformed] += 1
+                        bucket_stats["continuation_n"] += n
+                        bucket_stats["continuation_valid"] += n - malformed
+                        if malformed == 0:
+                            bucket_stats["all_clean_estimates"] += 1
+                        else:
+                            bucket_stats["with_any_malformed"] += 1
+                        if malformed == n and n > 0:
+                            bucket_stats["fully_malformed"] += 1
+                    generated = int(estimate.get("n_student_continuations_generated") or 0)
+                    if generated:
+                        for field in (
+                            "n_correct",
+                            "n_wrong_format_valid",
+                            "n_no_answer_marker",
+                            "n_truncated",
+                            "n_relay_answer_leakage",
+                            "n_generation_error",
+                        ):
+                            value = int(estimate.get(field) or 0)
+                            if value:
+                                reason_split[length][field] += value
+                    effective = n - malformed
+                    if effective > 0:
+                        conditional_pass_numerator[length] += int(estimate.get("n_correct") or 0)
+                        conditional_pass_denominator[length] += effective
+                        conditional_estimates[length] += 1
             if all(relay.get(length) is not None for length in relay_by_len):
                 values = [float(relay[length]) for length in relay_by_len]
                 relay_cross_total += 1
@@ -454,6 +518,53 @@ def deep_stats(records: list[dict]) -> dict:
             }
             for k, v in relay_coverage.items()
         },
+        "relay_coverage_by_anchor": {
+            bucket: {
+                length: {
+                    "total": stats["total"],
+                    "all_clean_estimate_rate": round(stats["all_clean_estimates"] / stats["total"], 4) if stats["total"] else None,
+                    "with_any_malformed": stats["with_any_malformed"],
+                    "fully_malformed": stats["fully_malformed"],
+                    "continuation_valid_rate": round(
+                        stats["continuation_valid"] / stats["continuation_n"], 4
+                    ) if stats["continuation_n"] else None,
+                }
+                for length, stats in relay_coverage_by_bucket[bucket].items()
+            }
+            for bucket in buckets
+        },
+        "relay_gain_by_anchor": {
+            bucket: {
+                length: summarize(values)
+                for length, values in relay_gain_by_bucket[bucket].items()
+            }
+            for bucket in buckets
+        },
+        "relay_conditional_pass_rate": {
+            length: {
+                "n_estimates": conditional_estimates[length],
+                "n_continuations": conditional_pass_denominator[length],
+                "pass_rate": round(
+                    conditional_pass_numerator[length] / conditional_pass_denominator[length], 4
+                ) if conditional_pass_denominator[length] else None,
+            }
+            for length in ("32", "64", "128")
+        },
+        "relay_reason_split": {
+            length: dict(sorted(counter.items()))
+            for length, counter in reason_split.items()
+        },
+        "relay_leakage_or_malformed_probability": {
+            length: {
+                "n_candidates": relay_coverage[length]["total"],
+                "n_candidates_with_note": sum(
+                    count
+                    for note, count in notes.items()
+                    if str(note).startswith(f"relay_l{length}_answer_leakage_or_malformed")
+                ),
+            }
+            for length in ("32", "64", "128")
+        },
         "relay_pair_clean": {
             k: {
                 "treatment_clean_rate": round(v["treatment_clean"] / v["total"], 4) if v["total"] else None,
@@ -513,7 +624,7 @@ def render_markdown(
     output_dir: Path,
 ) -> str:
     lines = [
-        f"# Causal State Probe — {validation['n_records']}-sample Pre-check (2026-08-11)",
+        f"# Causal State Probe — {validation['n_records']}-sample Pre-check ({date.today().isoformat()})",
         "",
         "## Provenance",
         "",
@@ -584,13 +695,42 @@ def render_markdown(
             f"- L{length}: {stats['relay_pair_clean'][length]}"
             for length in ("32", "64", "128")
         ))
+    by_anchor = stats["relay_coverage_by_anchor"]
+    gain_by_anchor = stats["relay_gain_by_anchor"]
+    block("Relay by anchor position (sensitivity)", "\n".join(
+        f"- **{bucket}** (rel < 1/3, < 2/3, else):\n"
+        + "\n".join(
+            f"  - L{length}: coverage {by_anchor[bucket][length]['all_clean_estimate_rate']} "
+            f"all-clean / {by_anchor[bucket][length]['continuation_valid_rate']} continuation-valid "
+            f"(n={by_anchor[bucket][length]['total']}); gain {gain_by_anchor[bucket][length]}"
+            for length in ("32", "64", "128")
+        )
+        for bucket in ("early", "mid", "late")
+    ))
+    reason_split = stats["relay_reason_split"]
+    leakage_prob = stats["relay_leakage_or_malformed_probability"]
+    block("Relay outcome reason split (review P0-2)", "\n".join(
+        f"- L{length}: {reason_split[length] if reason_split[length] else 'no reason-level counts in legacy records'}"
+        for length in ("32", "64", "128")
+    ) + "\n\nLeakage-or-malformed note probability (legacy proxy, cannot separate "
+        "the two causes without replay):\n"
+        + "\n".join(
+            f"- L{length}: {leakage_prob[length]['n_candidates_with_note']} / "
+            f"{leakage_prob[length]['n_candidates']} candidates"
+            for length in ("32", "64", "128")
+        ))
     conditional = stats["relay_conditional_pair_clean_by_length"]
     block("Relay gains — conditional (answer-free, pair-clean, sensitivity)", "\n".join(
         f"- L{length}: {conditional[length]}" for length in ("32", "64", "128")
     ) + "\n\n*Post-treatment filtering; not an unbiased causal estimand. "
         "Caveat: `n_malformed` conflates relay answer leakage (continuation never "
         "generated), missing answer marker, truncation, and verifier-unparseable "
-        "outputs; reason-level counts require a stratified replay (review P0-2).*")
+        "outputs; reason-level counts require a stratified replay (review P0-2).*\n\n"
+        "Descriptive answer-free pass rate (effective denominator, `n - n_malformed`):\n"
+        + "\n".join(
+            f"- L{length}: {stats['relay_conditional_pass_rate'][length]}"
+            for length in ("32", "64", "128")
+        ))
     skipped = stats["transport_skipped_notes"]
     if skipped:
         block("Transport skip reasons", "\n".join(

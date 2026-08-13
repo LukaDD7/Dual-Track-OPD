@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import importlib.util
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pandas as pd
@@ -26,10 +28,12 @@ from dual_track_opd.support_aware.causal_runtime import (
 from dual_track_opd.support_aware.causal_schema import (
     CandidateWindow,
     CausalStateRecord,
+    continuation_estimate,
     StudentSupport,
 )
 from dual_track_opd.support_aware.causal_state_probe import (
     RUN_SCHEMA_VERSION,
+    _work_slice_items,
     load_config,
     summarize,
 )
@@ -387,6 +391,7 @@ def test_config_matches_repository_hpc_paths(monkeypatch, tmp_path):
         continuation_k=2, relay_k=2, transport_k=2, answer_k=2,
         max_continuation_tokens=128, max_answer_tokens=16, relay_lengths=[32],
         shard_index=0, num_shards=1,
+        work_slice_index=0, work_slice_total=1,
     )
     config = load_config("configs/diagnostics/causal_state_probe.yaml", args)
     assert config.student_model_path == str(tmp_path / "models" / "Qwen3-VL-4B-Instruct")
@@ -394,6 +399,158 @@ def test_config_matches_repository_hpc_paths(monkeypatch, tmp_path):
     assert config.k32_run_dir.startswith(str(tmp_path / "outputs"))
     assert config.features.visual_js is True
     assert config.continuation_k == config.relay_k == 2
+
+
+def test_work_slice_items_partitions_pending_without_overlap():
+    items = [f"unit-{i}" for i in range(10)]
+    slices = [_work_slice_items(items, index=index, total=4) for index in range(4)]
+    assert all(slices)  # every slice gets at least one unit
+    assert sorted(unit for slice_ in slices for unit in slice_) == items
+    assert sum(len(slice_) for slice_ in slices) == len(items)
+    # Deterministic modulo partition: index 0 -> items 0,4,8 ; index 3 -> 3,7
+    assert slices[0] == ["unit-0", "unit-4", "unit-8"]
+    assert slices[3] == ["unit-3", "unit-7"]
+    # total == 1 keeps legacy resume behavior
+    assert _work_slice_items(items, index=0, total=1) == items
+
+
+def test_atomic_json_write_survives_concurrent_writers(tmp_path):
+    import multiprocessing as mp
+
+    from dual_track_opd.support_aware.causal_state_probe import _write_json_atomic
+
+    target = tmp_path / "run_manifest.json"
+
+    def writer(worker_id):
+        for _ in range(10):
+            _write_json_atomic(target, {"worker": worker_id, "payload": "x" * 200})
+
+    context = mp.get_context("fork")
+    processes = [context.Process(target=writer, args=(i,)) for i in range(8)]
+    for process in processes:
+        process.start()
+    for process in processes:
+        process.join(60)
+    assert all(process.exitcode == 0 for process in processes)
+    assert "worker" in json.loads(target.read_text(encoding="utf-8"))
+    assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_continuation_estimate_reason_split():
+    correctness = [True, False, None, None, None, None, None, None]
+    reasons = [
+        "correct",
+        "wrong_format_valid",
+        "no_answer_marker",
+        "no_answer_marker",
+        "truncated",
+        "truncated",
+        "relay_answer_leakage",
+        "generation_error",
+    ]
+    estimate = continuation_estimate(
+        "relay_l32", correctness, reasons=reasons
+    )
+    assert estimate.n_correct == 1
+    assert estimate.n_malformed == 6
+    assert estimate.n_student_continuations_generated == 7
+    assert estimate.n_wrong_format_valid == 1
+    assert estimate.n_no_answer_marker == 2
+    assert estimate.n_truncated == 2
+    assert estimate.n_relay_answer_leakage == 1
+    assert estimate.n_generation_error == 1
+    # validate() enforces count identities
+    estimate.validate()
+
+
+def _load_precheck_module():
+    path = Path(__file__).resolve().parents[2] / "scripts" / "hpc" / "precheck_causal_state_probe.py"
+    spec = importlib.util.spec_from_file_location("precheck_mod", path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+def _relay_acceptance_records():
+    """8 synthetic candidates whose K=8 relay estimates each have 1 malformed."""
+
+    records = []
+    for index in range(8):
+        estimate = {
+            "condition": "relay_l32",
+            "n": 8,
+            "n_correct": 3,
+            "n_malformed": 1,
+            "pass_rate": 3 / 8,
+            "seeds": list(range(index * 8, index * 8 + 8)),
+            "response_hashes": [f"h{index}-{i}" for i in range(8)],
+        }
+        candidate = {
+            "candidate_id": f"traj-{index}:candidate-0",
+            "start": 0,
+            "anchor": 5,
+            "end": 10,
+            "relative_position": 0.5,
+            "sources": ["high_visual_dependence"],
+            "state_class": "insufficient_evidence",
+            "relay_gain_by_length": {"32": 0.1, "64": 0.1, "128": 0.1},
+            "relay_probability_by_length": {"32": 0.7, "64": 0.7, "128": 0.7},
+            "relay_continuations": {
+                length: dict(estimate, condition=f"relay_l{length}")
+                for length in ("32", "64", "128")
+            },
+            "visual_continuations": [{
+                "condition": "full",
+                "n": 8,
+                "n_correct": 4,
+                "n_malformed": 0,
+                "pass_rate": 0.5,
+            }],
+            "transport_gain": 0.1,
+            "transport_probability": 0.5,
+            "transport_vs_wrong_gain": 0.05,
+            "transport_vs_wrong_probability": 0.4,
+            "visual_fine_gain": 0.0,
+            "visual_all_gain": 0.0,
+            "answer_leakage": 0.0,
+            "student_js_full_degraded": 0.01,
+            "student_js_full_null": 0.1,
+            "notes": ["relay_l32_answer_leakage_or_malformed:1"],
+        }
+        records.append({
+            "prompt_id": f"geo3k:{index}",
+            "dataset": "geometry3k",
+            "question": "q",
+            "image_path": None,
+            "image_sha256": "a",
+            "ground_truth": 1,
+            "student_support": {"n_rollouts": 32, "n_correct": 16, "pass_rate": 0.5, "posterior_mean": 0.5},
+            "trajectory_id": f"traj-{index}",
+            "trajectory_correct": bool(index % 2),
+            "trajectory_token_ids": list(range(20)),
+            "trajectory_token_hash": f"hash-{index}",
+            "trajectory_text": "t",
+            "teacher_trajectories": [],
+            "token_signals": [],
+            "candidate_windows": [candidate],
+            "metadata": {},
+            "schema_version": "causal-state-probe-v1",
+        })
+    return records
+
+
+def test_precheck_relay_coverage_acceptance_criterion():
+    """Review P0-1: one malformed per K=8 estimate must yield 87.5%
+    continuation coverage, 0% all-clean, 0% fully-malformed."""
+
+    precheck = _load_precheck_module()
+    stats = precheck.deep_stats(_relay_acceptance_records())
+    coverage = stats["relay_coverage"]["32"]
+    assert coverage["all_clean_estimate_rate"] == 0.0
+    assert coverage["continuation_valid_rate"] == 0.875
+    assert coverage["fully_malformed"] == 0
+    assert coverage["with_any_malformed"] == 8
 
 
 def test_strict_shard_summary_requires_clean_exact_coverage(tmp_path):
@@ -445,5 +602,10 @@ def test_strict_shard_summary_requires_clean_exact_coverage(tmp_path):
     dirty_manifest = json.loads(dirty_manifest_path.read_text())
     dirty_manifest["git_dirty"] = True
     dirty_manifest_path.write_text(json.dumps(dirty_manifest))
-    with pytest.raises(ValueError, match="dirty causal-probe shard"):
-        summarize([shard0, shard1], tmp_path / "rejected")
+    dirty_summary = summarize([shard0, shard1], tmp_path / "merged_dirty")
+    assert dirty_summary["record_count"] == 2
+    merged_manifest = json.loads(
+        (tmp_path / "merged_dirty" / "run_manifest.json").read_text()
+    )
+    assert merged_manifest["git_dirty"] is True
+    assert str(shard1) in merged_manifest["dirty_shards"]
