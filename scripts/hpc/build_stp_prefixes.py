@@ -99,6 +99,8 @@ def main() -> int:
 
         image = Image.open(BytesIO(image_bytes)).convert("RGB")
         built = False
+        correct_count = 0
+        leak_count = 0
         for proposal_seed in proposal_seeds:
             generated = generate_continuation(
                 model,
@@ -115,6 +117,7 @@ def main() -> int:
             verdict = verify_answer(generated.response_text_display, gold)
             if verdict.get("correct") is not True:
                 continue
+            correct_count += 1
             response_ids = list(generated.response_token_ids_raw)
             prefix_ids = response_ids[:horizon]
             prefix_text = processor.tokenizer.decode(
@@ -123,6 +126,7 @@ def main() -> int:
                 clean_up_tokenization_spaces=False,
             )
             if prefix_leakage_reason(prefix_text, gold) is not None:
+                leak_count += 1
                 continue
             prefixes[prompt_uid] = prefix_ids
             print(
@@ -134,9 +138,14 @@ def main() -> int:
             break
         if not built:
             failures[prompt_uid] = (
-                f"no correct answer-free proposal across {len(proposal_seeds)} seeds"
+                f"no correct answer-free proposal across {len(proposal_seeds)} seeds "
+                f"(correct={correct_count}, prefix_leak={leak_count})"
             )
-            print(f"  {prompt_uid}: SKIP (no correct answer-free proposal)", flush=True)
+            print(
+                f"  {prompt_uid}: SKIP (no correct answer-free proposal; "
+                f"correct={correct_count}, prefix_leak={leak_count})",
+                flush=True,
+            )
 
     output_dir = Path(args.output_dir).expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
