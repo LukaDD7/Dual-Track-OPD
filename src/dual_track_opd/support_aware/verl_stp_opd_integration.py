@@ -37,6 +37,7 @@ from .support_transition_train import SupportTransitionTrainConfig, train_step_l
 STP_TENSOR_KEYS = (
     "stp_prefix_mask",
     "stp_suffix_mask",
+    "stp_prefix_ids",
     "stp_sampled_ids",
     "stp_teacher_k1_log_probs",
     "stp_valid_mask",
@@ -125,6 +126,7 @@ def stp_opd_post_rollout_hook(
 
     prefix_lengths = torch.zeros(B, dtype=torch.long)
     sampled_ids = responses.clone()
+    prefix_ids_tensor = torch.zeros_like(responses)
     positions = torch.arange(T)
     prefix_mask = torch.zeros(B, T, dtype=torch.bool)
     for index in range(B):
@@ -133,8 +135,13 @@ def stp_opd_post_rollout_hook(
         prefix_length = min(len(prefix_ids), T)
         prefix_lengths[index] = prefix_length
         prefix_mask[index, :prefix_length] = True
-        # sampled suffix ids are the student response tokens in the suffix region
-        sampled_ids[index, :prefix_length] = -1
+        if prefix_length:
+            prefix_ids_tensor[index, :prefix_length] = torch.tensor(
+                prefix_ids[:prefix_length], dtype=responses.dtype, device=device
+            )
+        # GRPO uses the student-sampled suffix ids; prefix positions are
+        # excluded by the suffix mask, so 0 is harmless there.
+        sampled_ids[index, :prefix_length] = 0
     suffix_mask = (~prefix_mask) & response_mask
 
     # Teacher K1 log-probs: the teacher scores the student-sampled suffix after
@@ -179,6 +186,7 @@ def stp_opd_post_rollout_hook(
 
     batch.batch["stp_prefix_mask"] = prefix_mask.to(device)
     batch.batch["stp_suffix_mask"] = suffix_mask.to(device)
+    batch.batch["stp_prefix_ids"] = prefix_ids_tensor.to(device)
     batch.batch["stp_sampled_ids"] = sampled_ids.to(device)
     batch.batch["stp_teacher_k1_log_probs"] = teacher_log_probs.to(device)
     batch.batch["stp_valid_mask"] = valid_mask.to(device)
@@ -242,7 +250,7 @@ def compute_stp_opd_actor_loss(
     total, terms = train_step_loss(
         student_logits,
         student_logits,
-        prefix_ids=batch["stp_sampled_ids"].to(device),
+        prefix_ids=batch["stp_prefix_ids"].to(device),
         sampled_ids=batch["stp_sampled_ids"].to(device),
         advantages=advantages.to(device),
         arm=arm,
