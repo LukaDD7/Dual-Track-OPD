@@ -1,0 +1,19 @@
+diff --git a/verl/experimental/agent_loop/single_turn_agent_loop.py b/verl/experimental/agent_loop/single_turn_agent_loop.py
+index d45082f5..008cc402 100644
+--- a/verl/experimental/agent_loop/single_turn_agent_loop.py
++++ b/verl/experimental/agent_loop/single_turn_agent_loop.py
+@@ -35,6 +35,14 @@ class SingleTurnAgentLoop(AgentLoopBase):
+ 
+     async def run(self, sampling_params: dict[str, Any], **kwargs) -> AgentLoopOutput:
+         messages = list(kwargs["raw_prompt"])
++        # STP-OPD scaffold: render the fixed answer-free teacher prefix as an
++        # assistant message so the model continues generating the suffix after
++        # it (dual_track_opd.support_aware.verl_stp_dataset).
++        if kwargs.get("stp_scaffolded") and kwargs.get("stp_prefix_text"):
++            messages.append({
++                "role": "assistant",
++                "content": [{"type": "text", "text": str(kwargs["stp_prefix_text"])}],
++            })
+ 
+         # 1. extract images and videos from messages
+         multi_modal_data = await self.process_vision_info(messages)

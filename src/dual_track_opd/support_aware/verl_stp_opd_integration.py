@@ -154,7 +154,9 @@ def compute_stp_opd_actor_loss(
 
     ``student_logits`` has shape [B, T, V]; the batch carries the hook-attached
     ``stp_*`` tensors: prefix/suffix masks, sampled ids, teacher K1 log-probs,
-    valid mask, and the verl-computed ``stp_advantages``.  Delegates to
+    valid mask, and the verl-computed advantages (``batch["advantages"]``,
+    the standard verl key; ``stp_advantages`` is accepted as an override).
+    Delegates to
     ``train_step_loss`` with the arm from the config (A0..A3).
     """
 
@@ -169,9 +171,12 @@ def compute_stp_opd_actor_loss(
         lambda_task=float(stp.get("lambda_task", 1.0)),
     )
     device = student_logits.device
-    advantages = batch.get("stp_advantages")
+    advantages = batch.get("stp_advantages") or batch.get("advantages")
     if advantages is None:
-        raise RuntimeError("stp_advantages missing; verl must attach advantages to the stp_* batch")
+        raise RuntimeError(
+            "advantages missing; verl must provide batch['advantages'] "
+            "(or an stp_advantages override)"
+        )
     total, terms = train_step_loss(
         student_logits,
         student_logits,

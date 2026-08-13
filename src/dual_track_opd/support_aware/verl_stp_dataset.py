@@ -27,11 +27,13 @@ class STPTransitionDataset(FCOPDDataset):
         processor: Optional[ProcessorMixin] = None,
         max_samples: int = -1,
         prefix_manifest: str | None = None,
+        scaffold_flags: dict[str, bool] | None = None,
     ):
         super().__init__(data_files, tokenizer, config, processor, max_samples)
         from .support_transition_dataset import load_prefixes
 
         self.prefixes = load_prefixes(prefix_manifest) if prefix_manifest else {}
+        self.scaffold_flags = scaffold_flags or {}
         self._prefix_text_cache: dict[str, str] = {}
 
     def _prefix_text(self, prompt_id: str) -> str:
@@ -53,5 +55,10 @@ class STPTransitionDataset(FCOPDDataset):
         prompt_id = str(extra.get("sample_uid") or row_dict.get("sample_uid") or "")
         extra["stp_prefix_token_ids"] = list(self.prefixes.get(prompt_id, ()))
         extra["stp_prefix_text"] = self._prefix_text(prompt_id)
+        extra["stp_scaffolded"] = bool(self.scaffold_flags.get(prompt_id, False))
         row_dict["extra_info"] = extra
+        # The verl agent loop receives dataset row fields as **kwargs, so the
+        # scaffold fields must also live at the top level of the row dict.
+        row_dict["stp_prefix_text"] = extra["stp_prefix_text"]
+        row_dict["stp_scaffolded"] = extra["stp_scaffolded"]
         return row_dict
