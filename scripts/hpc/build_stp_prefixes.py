@@ -84,7 +84,14 @@ def main() -> int:
         question = str(row["question"]).strip()
         gold = row["answer"]
         prompt_text = build_prompt(question, args.response_format)
-        image_bytes = row["images"][0]["bytes"] if isinstance(row["images"], list) else row["images"]["bytes"]
+        images_value = row["images"]
+        if hasattr(images_value, "item"):
+            images_value = images_value.item()
+        image_bytes = (
+            images_value[0]["bytes"]
+            if isinstance(images_value, (list, tuple))
+            else images_value["bytes"]
+        )
         from PIL import Image
         from io import BytesIO
 
