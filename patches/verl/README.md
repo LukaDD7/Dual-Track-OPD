@@ -59,6 +59,25 @@ ids survive the verl pipeline unchanged (`extra_info`), the actor forward
 includes the prefix region with correct masks, and the scaffolded/unscaffolded
 paired comparison uses identical prompts.
 
+### Open item: scaffold render point in verl rollout
+
+Where the fixed prefix becomes an assistant message in the verl pipeline
+depends on the exact verl 0.7.1 data flow (dataset `raw_prompt` -> rollout
+request `messages`).  That injection point must be confirmed **in the pinned
+verl environment** (the version-specific call site is not derivable from this
+repo alone).  The intended contract is:
+
+- `STPTransitionDataset` (verl_stp_dataset.py) puts `stp_prefix_token_ids`,
+  `stp_prefix_text`, and per-row scaffold flags into `extra_info`;
+- at the rollout request construction, if `stp_scaffolded` + `stp_prefix_text`
+  are present, append an assistant message with the prefix text so the model
+  continues generating the suffix;
+- an earlier draft patch (0003) was removed because it referenced a
+  non-existent verl helper; the real patch must target the verified call site.
+
+`stp_advantages` (GRPO advantages attached to the stp_* batch) is also
+trainer-side and must be wired against the actual advantage computation.
+
 ## Validation gate (handoff §6 P0)
 
 The wiring is code-complete but **not yet validated end-to-end**.  Before any
