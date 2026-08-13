@@ -29,8 +29,15 @@ Apply with:
 
 ```bash
 cd /inspire/hdd/global_user/mengweicheng-240108120092/lzy/projects/Dual-Track-OPD/third_party/verl && \
+git apply ../../patches/verl/fc_opd_ray_trainer_post_rollout_hook.patch && \
+git apply ../../patches/verl/fc_opd_fsdp_actor_aux_kd.patch && \
 git apply ../../patches/verl/stp_opd_combined.patch
 ```
+
+Order matters: `stp_opd_combined.patch` was generated on top of the applied
+FC-OPD patches (they share the response_mask / dp_actor regions), so FC-OPD
+must be applied first.  The full chain (pristine verl 0.7.1 -> FC-OPD x2 ->
+STP) was verified with `git apply --check` and `py_compile`.
 
 ## Key design points
 
