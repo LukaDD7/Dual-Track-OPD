@@ -27,7 +27,7 @@ index b4e6a930..58e30b0c 100644
                      # NOTE: This usually changes the order of data in the `batch`,
                      # which won't affect the advantage calculation (since it's based on uid),
 diff --git a/verl/workers/actor/dp_actor.py b/verl/workers/actor/dp_actor.py
-index 2b1b54b6..aa5576c9 100644
+index 2b1b54b6..58c17ceb 100644
 --- a/verl/workers/actor/dp_actor.py
 +++ b/verl/workers/actor/dp_actor.py
 @@ -45,6 +45,10 @@ from dual_track_opd.fc_opd.verl_actor_loss import (
@@ -76,7 +76,26 @@ index 2b1b54b6..aa5576c9 100644
              if calculate_entropy:
                  outputs["entropys"] = entropy
              if calculate_sum_pi_squared:
-@@ -769,6 +787,15 @@ class DataParallelPPOActor(BasePPOActor):
+@@ -588,6 +606,18 @@ class DataParallelPPOActor(BasePPOActor):
+             ]
+             if key in data.batch.keys()
+         ]
++        select_keys += [
++            key
++            for key in [
++                "stp_prefix_mask",
++                "stp_suffix_mask",
++                "stp_sampled_ids",
++                "stp_teacher_k1_log_probs",
++                "stp_valid_mask",
++                "stp_prefix_lengths",
++            ]
++            if key in data.batch.keys()
++        ]
+         if self.use_prefix_grouper and "prompts" in data.batch.keys():
+             select_keys.append("prompts")
+         if self.config.use_kl_loss:
+@@ -769,6 +799,15 @@ class DataParallelPPOActor(BasePPOActor):
                              for key, value in fc_opd_metrics.items():
                                  micro_batch_metrics[f"actor/fc_opd_{key}"] = _fc_opd_metric_float(value)
  
