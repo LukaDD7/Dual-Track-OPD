@@ -971,6 +971,10 @@ def _run_score_impl(config: ProxyConfig, *, prompt_uids: Sequence[str] | None = 
     completed = _complete_scored_prompts(token_rows_path, expected_traces)
     pending = [uid for uid in selected_uids if uid not in completed]
     skipped = [uid for uid in selected_uids if uid in completed]
+    if pending and token_rows_path.is_file():
+        # Re-scoring must be idempotent: drop stale partial rows for prompts
+        # that will be (re)scored so appended rows never duplicate positions.
+        _purge_scored_rows(token_rows_path, set(pending))
     manifest: dict[str, Any] = {
         "schema_version": "reachability-proxy-score-v1",
         "config": asdict(config),
@@ -1013,6 +1017,19 @@ def _run_score_impl(config: ProxyConfig, *, prompt_uids: Sequence[str] | None = 
     manifest_path = output / "run_manifest.json"
     _write_json_atomic(manifest_path, manifest)
     return manifest
+
+
+def _purge_scored_rows(token_rows_path: Path, pending_uids: set[str]) -> None:
+    kept: list[str] = []
+    with token_rows_path.open(encoding="utf-8") as handle:
+        for line in handle:
+            if not line.strip():
+                continue
+            if str(json.loads(line).get("prompt_id")) in pending_uids:
+                continue
+            kept.append(line)
+    with token_rows_path.open("w", encoding="utf-8") as handle:
+        handle.writelines(kept)
 
 
 def _complete_scored_prompts(

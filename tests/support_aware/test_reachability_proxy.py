@@ -19,6 +19,7 @@ from dual_track_opd.support_aware.reachability_proxy import (
     teacher_trace_id,
     write_proxy_study_csv,
     _complete_scored_prompts,
+    _purge_scored_rows,
     _selected_teacher_trace,
 )
 
@@ -217,6 +218,18 @@ def test_complete_scored_prompts_checks_coverage_and_hash(tmp_path: Path) -> Non
         row["teacher_trace_id"] = "p0:proposal-1:deadbeefcafe"
     write(mismatched)
     assert _complete_scored_prompts(path, {"p0": trace}) == set()
+
+
+def test_purge_scored_rows_removes_pending_prompts_only(tmp_path: Path) -> None:
+    path = tmp_path / "proxy_token_rows.jsonl"
+    rows = _token_rows(80, "p0") + _token_rows(80, "keep")
+    path.write_text(
+        "\n".join(json.dumps(row, sort_keys=True) for row in rows) + "\n",
+        encoding="utf-8",
+    )
+    _purge_scored_rows(path, {"p0"})
+    remaining = [json.loads(line)["prompt_id"] for line in path.read_text().splitlines()]
+    assert remaining == ["keep"] * 80
 
 
 def test_analyze_partial_study_marks_missing_minimal_prompts(tmp_path: Path) -> None:
