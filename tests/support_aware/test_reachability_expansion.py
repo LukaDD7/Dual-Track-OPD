@@ -197,6 +197,7 @@ output:
         proposal_dir=None,
         k32_run_dir=None,
         cohort_dir=None,
+        cohort_parquet_path=None,
         output_dir=None,
         horizons=None,
         continuations_per_arm=None,

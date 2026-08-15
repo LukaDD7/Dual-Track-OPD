@@ -193,6 +193,7 @@ def load_config(path: str | Path, args: argparse.Namespace) -> InterventionConfi
     import yaml
 
     raw = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
+    arg_value = lambda name: getattr(args, name, None)
     horizons = tuple(args.horizons or raw["intervention"]["horizons"])
     config = InterventionConfig(
         proposal_dir=str(args.proposal_dir or raw["data"]["proposal_dir"]),
@@ -202,24 +203,26 @@ def load_config(path: str | Path, args: argparse.Namespace) -> InterventionConfi
         student_model_path=str(raw["model"]["student"]),
         cohort_parquet_path=(
             None
-            if (args.cohort_parquet_path or raw["data"].get("cohort_parquet_path")) in (None, "")
-            else str(args.cohort_parquet_path or raw["data"]["cohort_parquet_path"])
+            if (arg_value("cohort_parquet_path") or raw["data"].get("cohort_parquet_path"))
+            in (None, "")
+            else str(arg_value("cohort_parquet_path") or raw["data"]["cohort_parquet_path"])
         ),
         prompt_manifest=(
             None
-            if (args.prompt_manifest or raw["data"].get("prompt_manifest")) in (None, "")
-            else str(args.prompt_manifest or raw["data"]["prompt_manifest"])
+            if (arg_value("prompt_manifest") or raw["data"].get("prompt_manifest")) in (None, "")
+            else str(arg_value("prompt_manifest") or raw["data"]["prompt_manifest"])
         ),
         wrong_source_run_dir=(
             None
-            if (args.wrong_source_run_dir or raw["data"].get("wrong_source_run_dir")) in (None, "")
-            else str(args.wrong_source_run_dir or raw["data"]["wrong_source_run_dir"])
+            if (arg_value("wrong_source_run_dir") or raw["data"].get("wrong_source_run_dir"))
+            in (None, "")
+            else str(arg_value("wrong_source_run_dir") or raw["data"]["wrong_source_run_dir"])
         ),
-        stage1_k=int(args.stage1_k or raw["intervention"].get("stage1_k", 4)),
-        stage2_k=int(args.stage2_k or raw["intervention"].get("stage2_k", 8)),
+        stage1_k=int(arg_value("stage1_k") or raw["intervention"].get("stage1_k", 4)),
+        stage2_k=int(arg_value("stage2_k") or raw["intervention"].get("stage2_k", 8)),
         adaptive_confirm=bool(
-            args.adaptive_confirm
-            if args.adaptive_confirm is not None
+            arg_value("adaptive_confirm")
+            if arg_value("adaptive_confirm") is not None
             else raw["intervention"].get("adaptive_confirm", False)
         ),
         horizons=tuple(int(value) for value in horizons),
