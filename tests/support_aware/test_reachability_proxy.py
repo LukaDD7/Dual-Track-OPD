@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 import os
 from pathlib import Path
@@ -172,6 +173,66 @@ def test_strict_join_rejects_missing_and_duplicate_keys() -> None:
         build_proxy_study_rows(
             token_rows=token_rows, rescue_rows=duplicate, selected_traces=selected, horizons=[64, 128]
         )
+
+
+def test_analyze_partial_study_marks_missing_minimal_prompts() -> None:
+    """Smoke analyze with a subset of prompts must not crash on other min rows."""
+
+    from dual_track_opd.support_aware.reachability_proxy import ProxyConfig, run_analyze
+
+    output = tmp_path / "out"
+    output.mkdir()
+    rescue_dir = tmp_path / "rescue"
+    proposal_dir = tmp_path / "proposals"
+    rescue_dir.mkdir()
+    proposal_dir.mkdir()
+    trace = _trace("p0", proposal_id=1, rank=1, length=80)
+    (rescue_dir / "rescue_comparisons.jsonl").write_text(
+        "\n".join(
+            json.dumps(row)
+            for row in [
+                {"sample_uid": "p0", "horizon": 64, "meets_preregistered_rescue_rule": True},
+                {"sample_uid": "p1", "horizon": 64, "meets_preregistered_rescue_rule": True},
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (rescue_dir / "minimal_rescue_prefixes.jsonl").write_text(
+        json.dumps({"sample_uid": "p0", "horizon": 64, "meets_preregistered_rescue_rule": True})
+        + "\n"
+        + json.dumps({"sample_uid": "p1", "horizon": 64, "meets_preregistered_rescue_rule": True})
+        + "\n",
+        encoding="utf-8",
+    )
+    (proposal_dir / "retained_proposals.jsonl").write_text(
+        json.dumps(trace) + "\n",
+        encoding="utf-8",
+    )
+    (output / "proxy_token_rows.jsonl").write_text(
+        "\n".join(json.dumps(row) for row in _token_rows(80, "p0")) + "\n",
+        encoding="utf-8",
+    )
+    config = ProxyConfig(
+        output_dir=str(output),
+        proposal_dir=str(proposal_dir),
+        k32_run_dir=str(tmp_path),
+        cohort_dir=str(tmp_path),
+        pool256_dir=str(tmp_path),
+        causal_dir=str(tmp_path),
+        rescue_dir=str(rescue_dir),
+        student_model_path="student",
+        teacher_model_path="teacher",
+        horizons=(64,),
+    )
+    analysis = run_analyze(config)
+    coverage = analysis["coverage"]
+    assert coverage["prompts"] == 1
+    assert coverage["rescue_positive_prompts_in_study"] == 1
+    assert coverage["minimal_horizons_reproduced"] is True
+    assert analysis["minimal_horizon_reproduction"]["p0"]["reproduced_minimal_horizon"] == 64
+    assert analysis["minimal_horizon_reproduction"]["p1"]["missing_from_study"] is True
+    assert (output / "proxy_study.csv").is_file()
 
 
 def test_csv_deterministic_ordering_and_hash(tmp_path: Path) -> None:

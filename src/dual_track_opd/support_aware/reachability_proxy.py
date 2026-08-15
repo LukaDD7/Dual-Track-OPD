@@ -994,17 +994,28 @@ def run_analyze(config: ProxyConfig, *, prompt_uids: Sequence[str] | None = None
         gold_rows = [
             row for row in study_rows if row["prompt_id"] == uid and row["rescue_gold"]
         ]
+        if not gold_rows:
+            reproduced[uid] = {
+                "expected_minimal_horizon": expected_h,
+                "reproduced_minimal_horizon": None,
+                "missing_from_study": True,
+            }
+            continue
         reproduced[uid] = {
             "expected_minimal_horizon": expected_h,
             "reproduced_minimal_horizon": min(row["horizon"] for row in gold_rows),
         }
+    present_uids = {str(row["prompt_id"]) for row in study_rows}
     coverage = {
         "prompts": len({row["prompt_id"] for row in study_rows}),
         "rows": len(study_rows),
-        "rescue_positive_prompts": len(expected_minimal),
+        "rescue_positive_prompts_in_study": sum(
+            1 for uid in expected_minimal if uid in present_uids
+        ),
         "minimal_horizons_reproduced": all(
             value["expected_minimal_horizon"] == value["reproduced_minimal_horizon"]
             for value in reproduced.values()
+            if not value.get("missing_from_study")
         ),
     }
     evaluation = evaluate_proxy_study(study_rows, seed=20260814)
