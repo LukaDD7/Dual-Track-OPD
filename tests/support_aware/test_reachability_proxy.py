@@ -272,6 +272,7 @@ def test_analyze_combined_pools_sources(tmp_path: Path) -> None:
         (source / "prompt_results").mkdir(parents=True)
         rescue = []
         minimal = []
+        positive = {"p0", "p2"}
         for uid in uids:
             trace = _trace(uid, proposal_id=1, rank=1, length=80)
             with (source / "proxy_token_rows.jsonl").open("a", encoding="utf-8") as handle:
@@ -280,9 +281,9 @@ def test_analyze_combined_pools_sources(tmp_path: Path) -> None:
             with (source / "retained_proposals.jsonl").open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(trace, sort_keys=True) + "\n")
             rescue.append(
-                {"sample_uid": uid, "horizon": 64, "meets_preregistered_rescue_rule": uid.endswith("p")}
+                {"sample_uid": uid, "horizon": 64, "meets_preregistered_rescue_rule": uid in positive}
             )
-            if uid.endswith("p"):
+            if uid in positive:
                 minimal.append(
                     {"sample_uid": uid, "horizon": 64, "meets_preregistered_rescue_rule": True}
                 )
