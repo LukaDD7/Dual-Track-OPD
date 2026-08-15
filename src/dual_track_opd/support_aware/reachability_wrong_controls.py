@@ -166,7 +166,7 @@ def _aggregate(output_dir: Path, expected_uids: Sequence[str]) -> dict[str, Any]
         "schema_version": SCHEMA_VERSION,
         "expected_prompt_count": len(expected_uids),
         "completed_prompt_count": len(completed),
-        "complete": completed == list(expected_uids),
+        "complete": sorted(completed) == sorted(expected_uids),
         "rollout_count": len(rollouts),
         "wrong_rollout_count": sum(1 for row in rollouts if row["correct"] is False),
         "wrong_by_prompt": wrong_by_uid,
