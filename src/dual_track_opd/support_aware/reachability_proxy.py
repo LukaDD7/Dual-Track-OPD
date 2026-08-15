@@ -1351,7 +1351,7 @@ def run_analyze_combined(
 
     expected_minimal: dict[str, int] = {}
     for source in rescue_dirs:
-        for row in _read_jsonl_checked(Path(source) / "minimal_rescue_prefixes.jsonl"):
+        for row in read_jsonl(Path(source) / "minimal_rescue_prefixes.jsonl"):
             if row.get("meets_preregistered_rescue_rule") is True:
                 expected_minimal.setdefault(str(row["sample_uid"]), int(row["horizon"]))
     reproduced = {
