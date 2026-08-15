@@ -225,7 +225,7 @@ def test_analyze_partial_study_marks_missing_minimal_prompts(tmp_path: Path) -> 
         teacher_model_path="teacher",
         horizons=(64,),
     )
-    analysis = run_analyze(config)
+    analysis = run_analyze(config, prompt_uids=["p0"])
     coverage = analysis["coverage"]
     assert coverage["prompts"] == 1
     assert coverage["rescue_positive_prompts_in_study"] == 1
