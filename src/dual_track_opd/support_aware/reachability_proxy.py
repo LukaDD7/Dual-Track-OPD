@@ -21,6 +21,7 @@ CLI phases:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import csv
 import hashlib
 import json
@@ -905,10 +906,39 @@ def _score_trace(
 
 def run_score(config: ProxyConfig, *, prompt_uids: Sequence[str] | None = None) -> dict[str, Any]:
     output = _resolve_output(config)
-    rescue = _read_jsonl_checked(Path(config.rescue_dir) / "rescue_comparisons.jsonl")
+    with _exclusive_lock(output / "score.lock"):
+        return _run_score_impl(config, prompt_uids=prompt_uids)
+
+
+@contextlib.contextmanager
+def _exclusive_lock(path: Path):
+    """Best-effort exclusive lock so concurrent score runs cannot interleave."""
+
+    handle = None
+    try:
+        import fcntl
+
+        handle = path.open("w")
+        fcntl.flock(handle, fcntl.LOCK_EX)
+    except (ImportError, OSError):
+        handle = None
+    try:
+        yield
+    finally:
+        if handle is not None:
+            try:
+                import fcntl
+
+                fcntl.flock(handle, fcntl.LOCK_UN)
+            except Exception:
+                pass
+            handle.close()
+
+
+def _run_score_impl(config: ProxyConfig, *, prompt_uids: Sequence[str] | None = None) -> dict[str, Any]:
+    output = _resolve_output(config)
     retained = _read_jsonl_checked(Path(config.proposal_dir) / "retained_proposals.jsonl")
     retained_uids = {str(row["sample_uid"]) for row in retained}
-    rescue_uids = {str(row["sample_uid"]) for row in rescue}
     if prompt_uids:
         requested = set(prompt_uids)
         unknown = requested - retained_uids
@@ -916,6 +946,8 @@ def run_score(config: ProxyConfig, *, prompt_uids: Sequence[str] | None = None) 
             raise ValueError(f"prompts without retained teacher traces: {sorted(unknown)}")
         selected_uids = sorted(requested)
     else:
+        rescue = _read_jsonl_checked(Path(config.rescue_dir) / "rescue_comparisons.jsonl")
+        rescue_uids = {str(row["sample_uid"]) for row in rescue}
         selected_uids = sorted(rescue_uids)
         missing_traces = [uid for uid in selected_uids if uid not in retained_uids]
         if missing_traces:
