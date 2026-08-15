@@ -72,9 +72,12 @@ SHARD_DIRS=()
 for (( i=0; i<NUM_PROP_SHARDS; i++ )); do
     SHARD_DIRS+=("${OUTPUT_ROOT}/support_aware_opd/${PROPOSAL_PREFIX}_s${i}")
 done
+# Regenerable merge artifacts; remove before re-merge on resume.
+PROPOSAL_MERGED="${OUTPUT_ROOT}/support_aware_opd/${PROPOSAL_PREFIX}_merged"
+[[ -d "${PROPOSAL_MERGED}" ]] && rm -rf "${PROPOSAL_MERGED}"
 "${PYTHON_BIN}" -m dual_track_opd.support_aware.proposal_feasibility merge \
     --shard-dirs "${SHARD_DIRS[@]}" \
-    --output-dir "${OUTPUT_ROOT}/support_aware_opd/${PROPOSAL_PREFIX}_merged"
+    --output-dir "${PROPOSAL_MERGED}"
 
 echo "== Phase 3: adaptive rescue (${NUM_INT_SHARDS} shards, one GPU each) =="
 PIDS=()
@@ -94,9 +97,11 @@ SHARD_DIRS=()
 for (( i=0; i<NUM_INT_SHARDS; i++ )); do
     SHARD_DIRS+=("${OUTPUT_ROOT}/support_aware_opd/${INTERVENTION_PREFIX}_s${i}")
 done
+INTERVENTION_MERGED="${OUTPUT_ROOT}/support_aware_opd/${INTERVENTION_PREFIX}_merged"
+[[ -d "${INTERVENTION_MERGED}" ]] && rm -rf "${INTERVENTION_MERGED}"
 "${PYTHON_BIN}" -m dual_track_opd.support_aware.prefix_intervention merge \
     --shard-dirs "${SHARD_DIRS[@]}" \
-    --output-dir "${OUTPUT_ROOT}/support_aware_opd/${INTERVENTION_PREFIX}_merged"
+    --output-dir "${INTERVENTION_MERGED}"
 
 echo "== Phase 5: frozen proxy scoring + analysis =="
 FIRST_PAIR="${GPU_PAIRS[0]}"
