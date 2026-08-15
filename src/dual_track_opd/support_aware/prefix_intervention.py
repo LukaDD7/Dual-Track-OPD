@@ -75,6 +75,17 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _manifest_fingerprint(manifest: Mapping[str, Any]) -> str:
+    """Deterministic shard-manifest identity excluding resume timestamps/runtime."""
+
+    value = dict(manifest)
+    for key in ("started_at_unix", "finished_at_unix", "runtime"):
+        value.pop(key, None)
+    return hashlib.sha256(
+        json.dumps(value, sort_keys=True, ensure_ascii=False, default=str).encode()
+    ).hexdigest()
+
+
 def _git_state() -> tuple[str, bool]:
     try:
         commit = subprocess.check_output(
@@ -1003,7 +1014,12 @@ def merge_shards(shard_dirs: Sequence[str | Path], output_dir: str | Path) -> di
             "config": merged_config,
             "provenance": {
                 "expected_uids": expected_uids,
-                "source_manifest_sha256": [_sha256_file(path / "run_manifest.json") for path in shards],
+                "source_manifest_sha256": [
+                    _manifest_fingerprint(
+                        json.loads((path / "run_manifest.json").read_text(encoding="utf-8"))
+                    )
+                    for path in shards
+                ],
             },
             "summary": summary,
         })

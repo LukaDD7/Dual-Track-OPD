@@ -82,6 +82,11 @@ PROPOSAL_MERGED="${OUTPUT_ROOT}/support_aware_opd/${PROPOSAL_PREFIX}_merged"
 echo "== Phase 3: adaptive rescue (${NUM_INT_SHARDS} shards, one GPU each) =="
 PIDS=()
 for (( i=0; i<NUM_INT_SHARDS; i++ )); do
+    shard_dir="${OUTPUT_ROOT}/support_aware_opd/${INTERVENTION_PREFIX}_s${i}"
+    # Drop stale resume metadata so shards adopt the current merged proposal
+    # hash; prompt_results are preserved for resumption.
+    [[ -f "${shard_dir}/run_manifest.json" ]] && rm -f "${shard_dir}/run_manifest.json"
+    [[ -f "${shard_dir}/summary.json" ]] && rm -f "${shard_dir}/summary.json"
     log="${LOG_DIR}/intervention_s${i}.log"
     CUDA_VISIBLE_DEVICES="${GPUS[i]}" \
     EXPANSION_INTERVENTION_PREFIX="${INTERVENTION_PREFIX}" \
