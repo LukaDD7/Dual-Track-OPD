@@ -4,22 +4,32 @@ Read `AGENTS.md` first. Keep changes small, importable, tested, and reproducible
 
 ## User-Directed Research Convergence
 
-The research direction comes from the user's discussion with ChatGPT, captured
-for execution in `docs/cc_reachability_proxy_convergence_handoff_20260814.md`.
+The current research direction comes from the user's latest discussion with
+ChatGPT plus the Phase 0–6 evidence audit, captured for execution in
+`docs/cc_handoff_viability_proxy_adjustment_20260815.md`.
 Treat that user decision—not the current Claude Code implementation, old
 handoffs, or sunk engineering work—as the source of research scope.
 The execution brief is self-contained; do not depend on access to the original
 ChatGPT conversation.
 
-Claude Code's role is to verify evidence, implement the smallest offline
-measurement path, run the registered proxy study, and report results.  Do not
-reopen the STP-versus-proxy decision or use existing code to broaden the task.
+`docs/cc_reachability_proxy_convergence_handoff_20260814.md` is the completed
+first-round brief and
+`docs/cc_reachability_proxy_phase6_handback_20260815.md` is its evidence
+handback.  They remain provenance, but their three-scalar proxy restriction,
+prompt-level GO, and draft Phase-7 launch direction are superseded by the
+2026-08-15 adjustment brief.
+
+Claude Code's role is to correct the offline evaluation, extend the single-pass
+proxy cache, run the registered handoff-viability study, and report results.
+Do not reopen the STP-versus-proxy decision or use existing code to broaden the
+task.
 
 Effective immediately:
 
 - pause the STP canary, four-arm mechanics pilot, and all training launches;
 - preserve the implementation at `489d61a` and do not delete or unwind it;
-- run only the offline reachability-proxy work specified by the user brief;
+- run only the offline handoff-viability/proxy work specified by the current
+  user brief;
 - do not add a loss or start training until the proxy gate is reported and the
   user explicitly approves the next experiment.
 

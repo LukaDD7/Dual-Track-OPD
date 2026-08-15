@@ -2,6 +2,12 @@
 
 Date: 2026-08-14
 
+> **Superseded for future execution.** This brief produced the completed
+> Phase 0–6 evidence handback, but its exactly-three-scalars restriction and
+> proxy decision protocol are superseded by
+> `docs/cc_handoff_viability_proxy_adjustment_20260815.md`.  Keep this file as
+> provenance; do not use it to authorize Phase 7 or training.
+
 Source: the user's research decision, fully translated into this document.
 This specification is self-contained; Claude Code does not need access to any
 external conversation.

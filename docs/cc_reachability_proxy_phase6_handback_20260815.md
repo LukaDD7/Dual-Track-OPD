@@ -2,6 +2,12 @@
 
 Date: 2026-08-15
 
+> **Evidence handback, not current launch authority.** The user's subsequent
+> ChatGPT convergence separates handoff viability from native reachability and
+> requires a corrected, prefix-level proxy evaluation.  The prompt-level GO
+> and draft Phase-7 command below are therefore not approval to train.  Follow
+> `docs/cc_handoff_viability_proxy_adjustment_20260815.md` next.
+
 Execution brief: `docs/cc_reachability_proxy_convergence_handoff_20260814.md`
 (user–ChatGPT convergence).  This handback reports the completed offline
 reachability-proxy work and stops at the training gate.
