@@ -1286,6 +1286,129 @@ def run_analyze(config: ProxyConfig, *, prompt_uids: Sequence[str] | None = None
     return analysis
 
 
+def run_analyze_combined(
+    *,
+    token_dirs: Sequence[str | Path],
+    rescue_dirs: Sequence[str | Path],
+    proposal_dirs: Sequence[str | Path],
+    output_dir: str | Path,
+    horizons: Sequence[int] = DEFAULT_HORIZONS,
+    heldout_seed: int = 20260815,
+) -> dict[str, Any]:
+    """CPU-only combined proxy study across multiple gold sources (e.g., 12+33+19)."""
+
+    token_rows: list[dict[str, Any]] = []
+    seen_prompts: set[str] = set()
+    for source in token_dirs:
+        rows = _read_jsonl_checked(Path(source) / "proxy_token_rows.jsonl")
+        for row in rows:
+            if str(row["prompt_id"]) in seen_prompts:
+                continue
+            token_rows.append(row)
+        seen_prompts.update(str(row["prompt_id"]) for row in rows)
+
+    rescue_rows: list[dict[str, Any]] = []
+    seen_keys: set[tuple[str, int]] = set()
+    for source in rescue_dirs:
+        for row in _read_jsonl_checked(Path(source) / "rescue_comparisons.jsonl"):
+            key = (str(row["sample_uid"]), int(row["horizon"]))
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            rescue_rows.append(row)
+
+    retained_by_uid: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    seen_retained: set[tuple[str, str, str]] = set()
+    for source in proposal_dirs:
+        for row in _read_jsonl_checked(Path(source) / "retained_proposals.jsonl"):
+            identity = (
+                str(row.get("sample_uid")),
+                str(row.get("proposal_id")),
+                str(row.get("response_token_hash")),
+            )
+            if identity in seen_retained:
+                continue
+            seen_retained.add(identity)
+            retained_by_uid[identity[0]].append(row)
+
+    rescue_uids = sorted({str(row["sample_uid"]) for row in rescue_rows})
+    selected_traces: dict[str, dict[str, Any]] = {}
+    for uid in rescue_uids:
+        if uid not in retained_by_uid:
+            raise ValueError(f"{uid}: rescue gold without retained teacher trace")
+        selected_traces[uid] = _selected_teacher_trace(retained_by_uid[uid], uid)
+
+    study_rows = build_proxy_study_rows(
+        token_rows=token_rows,
+        rescue_rows=rescue_rows,
+        selected_traces=selected_traces,
+        horizons=horizons,
+    )
+    output = Path(output_dir).expanduser().resolve()
+    output.mkdir(parents=True, exist_ok=True)
+    csv_path = output / "proxy_study.csv"
+    csv_hash = write_proxy_study_csv(csv_path, study_rows)
+
+    expected_minimal: dict[str, int] = {}
+    for source in rescue_dirs:
+        for row in _read_jsonl_checked(Path(source) / "minimal_rescue_prefixes.jsonl"):
+            if row.get("meets_preregistered_rescue_rule") is True:
+                expected_minimal.setdefault(str(row["sample_uid"]), int(row["horizon"]))
+    reproduced = {
+        uid: {
+            "expected_minimal_horizon": horizon,
+            "reproduced_minimal_horizon": min(
+                row["horizon"] for row in study_rows if row["prompt_id"] == uid and row["rescue_gold"]
+            ),
+        }
+        for uid, horizon in expected_minimal.items()
+    }
+    coverage = {
+        "prompts": len({row["prompt_id"] for row in study_rows}),
+        "rows": len(study_rows),
+        "rescue_positive_prompts": sum(
+            1 for uid in expected_minimal if any(
+                row["prompt_id"] == uid and row["rescue_gold"] for row in study_rows
+            )
+        ),
+        "minimal_horizons_reproduced": all(
+            value["expected_minimal_horizon"] == value["reproduced_minimal_horizon"]
+            for value in reproduced.values()
+        ),
+    }
+    analysis: dict[str, Any] = {
+        "schema_version": "reachability-proxy-combined-analyze-v1",
+        "coverage": coverage,
+        "minimal_horizon_reproduction": reproduced,
+        "evaluation": evaluate_proxy_study(study_rows, seed=20260814),
+        "heldout_evaluation": evaluate_proxy_heldout(study_rows, seed=heldout_seed),
+        "sources": {
+            "token_dirs": [str(Path(value)) for value in token_dirs],
+            "rescue_dirs": [str(Path(value)) for value in rescue_dirs],
+            "proposal_dirs": [str(Path(value)) for value in proposal_dirs],
+        },
+        "disclaimer": "Combined gold from Experiment-B + expansion cohorts; held-out "
+                      "thresholds fit on train prompts and evaluated on disjoint prompts.",
+    }
+    analysis_path = output / "proxy_analysis.json"
+    _write_json_atomic(analysis_path, analysis)
+    (output / "resolved_config.yaml").write_text(
+        __import__("yaml").safe_dump(
+            {
+                "horizons": list(horizons),
+                "heldout_seed": heldout_seed,
+                "token_dirs": [str(Path(value)) for value in token_dirs],
+                "rescue_dirs": [str(Path(value)) for value in rescue_dirs],
+                "proposal_dirs": [str(Path(value)) for value in proposal_dirs],
+            },
+            allow_unicode=True,
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    return analysis
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="phase", required=True)
@@ -1303,12 +1426,29 @@ def build_parser() -> argparse.ArgumentParser:
     analyze.add_argument("--config", required=True)
     analyze.add_argument("--output-dir")
     analyze.add_argument("--prompt-uids", nargs="+")
+    combined = sub.add_parser("analyze-combined")
+    combined.add_argument("--token-dirs", nargs="+", required=True)
+    combined.add_argument("--rescue-dirs", nargs="+", required=True)
+    combined.add_argument("--proposal-dirs", nargs="+", required=True)
+    combined.add_argument("--output-dir", required=True)
+    combined.add_argument("--horizons", nargs="+", type=int, default=list(DEFAULT_HORIZONS))
+    combined.add_argument("--heldout-seed", type=int, default=20260815)
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.phase == "analyze-combined":
+        run_analyze_combined(
+            token_dirs=args.token_dirs,
+            rescue_dirs=args.rescue_dirs,
+            proposal_dirs=args.proposal_dirs,
+            output_dir=args.output_dir,
+            horizons=tuple(args.horizons),
+            heldout_seed=args.heldout_seed,
+        )
+        return 0
     config = load_config(args.config, args)
     if args.phase == "preflight":
         run_preflight(config)

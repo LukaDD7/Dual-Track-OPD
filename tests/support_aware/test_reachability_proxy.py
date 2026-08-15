@@ -262,6 +262,53 @@ def test_heldout_evaluation_is_deterministic() -> None:
         assert first[name]["within_prompt"]["n_prompts"] >= 0
 
 
+def test_analyze_combined_pools_sources(tmp_path: Path) -> None:
+    """Combined analyze must merge token/rescue/proposal sources without dupes."""
+
+    from dual_track_opd.support_aware.reachability_proxy import run_analyze_combined
+
+    def make_source(name: str, uids: list[str]) -> None:
+        source = tmp_path / name
+        (source / "prompt_results").mkdir(parents=True)
+        rescue = []
+        minimal = []
+        for uid in uids:
+            trace = _trace(uid, proposal_id=1, rank=1, length=80)
+            with (source / "proxy_token_rows.jsonl").open("a", encoding="utf-8") as handle:
+                for row in _token_rows(80, uid):
+                    handle.write(json.dumps(row, sort_keys=True) + "\n")
+            with (source / "retained_proposals.jsonl").open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(trace, sort_keys=True) + "\n")
+            rescue.append(
+                {"sample_uid": uid, "horizon": 64, "meets_preregistered_rescue_rule": uid.endswith("p")}
+            )
+            if uid.endswith("p"):
+                minimal.append(
+                    {"sample_uid": uid, "horizon": 64, "meets_preregistered_rescue_rule": True}
+                )
+        (source / "rescue_comparisons.jsonl").write_text(
+            "\n".join(json.dumps(row, sort_keys=True) for row in rescue) + "\n", encoding="utf-8"
+        )
+        (source / "minimal_rescue_prefixes.jsonl").write_text(
+            "\n".join(json.dumps(row, sort_keys=True) for row in minimal) + "\n", encoding="utf-8"
+        )
+
+    make_source("s1", ["p0", "p1"])
+    make_source("s2", ["p2", "p3"])
+    output = tmp_path / "combined"
+    analysis = run_analyze_combined(
+        token_dirs=[tmp_path / "s1", tmp_path / "s2"],
+        rescue_dirs=[tmp_path / "s1", tmp_path / "s2"],
+        proposal_dirs=[tmp_path / "s1", tmp_path / "s2"],
+        output_dir=output,
+        horizons=[64],
+    )
+    assert analysis["coverage"]["prompts"] == 4
+    assert analysis["coverage"]["rows"] == 4
+    assert analysis["coverage"]["rescue_positive_prompts"] == 2
+    assert analysis["coverage"]["minimal_horizons_reproduced"] is True
+
+
 def test_analyze_partial_study_marks_missing_minimal_prompts(tmp_path: Path) -> None:
     """Smoke analyze with a subset of prompts must not crash on other min rows."""
 
