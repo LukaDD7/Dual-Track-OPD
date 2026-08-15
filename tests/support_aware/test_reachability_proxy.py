@@ -175,7 +175,7 @@ def test_strict_join_rejects_missing_and_duplicate_keys() -> None:
         )
 
 
-def test_analyze_partial_study_marks_missing_minimal_prompts() -> None:
+def test_analyze_partial_study_marks_missing_minimal_prompts(tmp_path: Path) -> None:
     """Smoke analyze with a subset of prompts must not crash on other min rows."""
 
     from dual_track_opd.support_aware.reachability_proxy import ProxyConfig, run_analyze
