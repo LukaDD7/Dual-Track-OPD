@@ -36,7 +36,7 @@ from .verifier import verify_answer
 
 
 SCHEMA_VERSION = "support-aware-proposal-feasibility-v1"
-DEFAULT_STATES = ("no_correct_observed", "rare_success")
+DEFAULT_STATES = ("no_correct_observed", "rare_success", "mixed_support")
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -209,6 +209,7 @@ class ProposalConfig:
     output_dir: str
     student_model_path: str
     teacher_model_path: str
+    cohort_parquet_path: str | None = None
     pool256_run_dir: str | None = None
     prompt_manifest: str | None = None
     states: tuple[str, ...] = DEFAULT_STATES
@@ -247,21 +248,34 @@ def load_config(path: str | Path, overrides: argparse.Namespace) -> ProposalConf
     import yaml
 
     raw = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
+    override = (
+        lambda name, default=None: getattr(overrides, name, None)
+        if getattr(overrides, name, None) is not None
+        else default
+    )
     config = ProposalConfig(
         k32_run_dir=str(overrides.k32_run_dir or raw["data"]["k32_run_dir"]),
         cohort_dir=str(overrides.cohort_dir or raw["data"]["cohort_dir"]),
         output_dir=str(overrides.output_dir or raw["output"]["dir"]),
         student_model_path=str(raw["models"]["student"]),
         teacher_model_path=str(raw["models"]["teacher"]),
+        cohort_parquet_path=(
+            None
+            if override("cohort_parquet_path", raw.get("data", {}).get("cohort_parquet_path"))
+            in (None, "")
+            else str(
+                override("cohort_parquet_path", raw.get("data", {}).get("cohort_parquet_path"))
+            )
+        ),
         pool256_run_dir=(
             None
-            if override("pool256_run_dir", _nested(raw, "data", "pool256_run_dir")) in (None, "")
-            else str(override("pool256_run_dir", _nested(raw, "data", "pool256_run_dir")))
+            if override("pool256_run_dir", raw.get("data", {}).get("pool256_run_dir")) in (None, "")
+            else str(override("pool256_run_dir", raw.get("data", {}).get("pool256_run_dir")))
         ),
         prompt_manifest=(
             None
-            if override("prompt_manifest", _nested(raw, "data", "prompt_manifest")) in (None, "")
-            else str(override("prompt_manifest", _nested(raw, "data", "prompt_manifest")))
+            if override("prompt_manifest", raw.get("data", {}).get("prompt_manifest")) in (None, "")
+            else str(override("prompt_manifest", raw.get("data", {}).get("prompt_manifest")))
         ),
         states=tuple(raw["selection"].get("states", DEFAULT_STATES)),
         proposals_per_prompt=int(
@@ -297,7 +311,11 @@ def select_prompt_records(config: ProposalConfig) -> tuple[list[dict[str, Any]],
 
     k32_run = Path(config.k32_run_dir).expanduser().resolve()
     cohort_dir = Path(config.cohort_dir).expanduser().resolve()
-    cohort_path = cohort_dir / "cohort.parquet"
+    cohort_path = (
+        Path(config.cohort_parquet_path).expanduser().resolve()
+        if config.cohort_parquet_path
+        else cohort_dir / "cohort.parquet"
+    )
     pool256_mode = config.pool256_run_dir is not None
     if pool256_mode:
         pool256_root = Path(config.pool256_run_dir).expanduser().resolve()
@@ -791,6 +809,7 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--config", required=True)
     run_parser.add_argument("--k32-run-dir")
     run_parser.add_argument("--cohort-dir")
+    run_parser.add_argument("--cohort-parquet-path")
     run_parser.add_argument("--pool256-run-dir")
     run_parser.add_argument("--prompt-manifest")
     run_parser.add_argument("--output-dir")

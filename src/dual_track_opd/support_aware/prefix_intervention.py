@@ -148,6 +148,7 @@ class InterventionConfig:
     cohort_dir: str
     output_dir: str
     student_model_path: str
+    cohort_parquet_path: str | None = None
     prompt_manifest: str | None = None
     wrong_source_run_dir: str | None = None
     stage1_k: int = 4
@@ -199,6 +200,11 @@ def load_config(path: str | Path, args: argparse.Namespace) -> InterventionConfi
         cohort_dir=str(args.cohort_dir or raw["data"]["cohort_dir"]),
         output_dir=str(args.output_dir or raw["output"]["dir"]),
         student_model_path=str(raw["model"]["student"]),
+        cohort_parquet_path=(
+            None
+            if (args.cohort_parquet_path or raw["data"].get("cohort_parquet_path")) in (None, "")
+            else str(args.cohort_parquet_path or raw["data"]["cohort_parquet_path"])
+        ),
         prompt_manifest=(
             None
             if (args.prompt_manifest or raw["data"].get("prompt_manifest")) in (None, "")
@@ -250,6 +256,11 @@ def select_intervention_records(config: InterventionConfig) -> tuple[list[dict[s
     proposal_dir = Path(config.proposal_dir).expanduser().resolve()
     k32_dir = Path(config.k32_run_dir).expanduser().resolve()
     cohort_dir = Path(config.cohort_dir).expanduser().resolve()
+    cohort_path = (
+        Path(config.cohort_parquet_path).expanduser().resolve()
+        if config.cohort_parquet_path
+        else cohort_dir / "cohort.parquet"
+    )
     wrong_source_dir = (
         Path(config.wrong_source_run_dir).expanduser().resolve()
         if config.wrong_source_run_dir
@@ -260,7 +271,7 @@ def select_intervention_records(config: InterventionConfig) -> tuple[list[dict[s
         proposal_dir / "summary.json",
         proposal_dir / "retained_proposals.jsonl",
         wrong_source_dir / "rollouts.jsonl",
-        cohort_dir / "cohort.parquet",
+        cohort_path,
     )
     missing = [str(path) for path in required if not path.is_file()]
     if missing:
@@ -308,7 +319,7 @@ def select_intervention_records(config: InterventionConfig) -> tuple[list[dict[s
 
     import pandas as pd
 
-    frame = pd.read_parquet(cohort_dir / "cohort.parquet").copy()
+    frame = pd.read_parquet(cohort_path).copy()
     frame.index = frame["sample_uid"].astype(str)
     if frame.index.duplicated().any():
         raise ValueError("cohort contains duplicate sample_uid")
@@ -355,7 +366,7 @@ def select_intervention_records(config: InterventionConfig) -> tuple[list[dict[s
         "k32_validation_sha256": (
             _sha256_file(k32_dir / "k32_validation.json") if config.wrong_source_run_dir is None else None
         ),
-        "cohort_sha256": _sha256_file(cohort_dir / "cohort.parquet"),
+        "cohort_sha256": _sha256_file(cohort_path),
         "prompt_manifest_sha256": (
             _sha256_file(Path(config.prompt_manifest)) if config.prompt_manifest else None
         ),
@@ -991,6 +1002,7 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--proposal-dir")
     run_parser.add_argument("--k32-run-dir")
     run_parser.add_argument("--cohort-dir")
+    run_parser.add_argument("--cohort-parquet-path")
     run_parser.add_argument("--prompt-manifest")
     run_parser.add_argument("--wrong-source-run-dir")
     run_parser.add_argument("--stage1-k", type=int)

@@ -13,6 +13,7 @@ models:
 data:
   k32_run_dir: ${DTOPD_OUTPUT_ROOT}/support_aware_opd/diag_full_k32_20260804_merged
   cohort_dir: ${DTOPD_OUTPUT_ROOT}/support_aware_opd/k32_cohort_20260804
+  cohort_parquet_path: ${DTOPD_OUTPUT_ROOT}/fc_opd/geometry3k_full/train.parquet
   pool256_run_dir: ${DTOPD_OUTPUT_ROOT}/support_aware_opd/diag_full_20260802_256_merged.rescored-exact-v1
   prompt_manifest: ${DTOPD_OUTPUT_ROOT}/support_aware_opd/reachability_proxy_20260814/expansion_manifest_20260815.jsonl
 

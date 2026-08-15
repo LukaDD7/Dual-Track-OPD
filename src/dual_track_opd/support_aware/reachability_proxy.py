@@ -63,6 +63,7 @@ class ProxyConfig:
     proposal_dir: str
     k32_run_dir: str
     cohort_dir: str
+    cohort_parquet_path: str | None = None
     pool256_dir: str
     causal_dir: str
     rescue_dir: str
@@ -138,6 +139,11 @@ def load_config(path: str | Path, args: argparse.Namespace | None = None) -> Pro
         proposal_dir=str(_nested(raw, "data", "proposal_dir", default="")),
         k32_run_dir=str(_nested(raw, "data", "k32_run_dir", default="")),
         cohort_dir=str(_nested(raw, "data", "cohort_dir", default="")),
+        cohort_parquet_path=(
+            None
+            if _nested(raw, "data", "cohort_parquet_path") in (None, "")
+            else str(_nested(raw, "data", "cohort_parquet_path"))
+        ),
         pool256_dir=str(_nested(raw, "data", "pool256_dir", default="")),
         causal_dir=str(_nested(raw, "data", "causal_dir", default="")),
         rescue_dir=str(_nested(raw, "data", "rescue_dir", default="")),
@@ -711,10 +717,15 @@ def _percentile_ci(values: Sequence[float]) -> list[float | None]:
 # ---------------------------------------------------------------------------
 
 
-def _cohort_frame(cohort_dir: str):
+def _cohort_frame(cohort_dir: str, cohort_parquet_path: str | None = None):
     import pandas as pd
 
-    frame = pd.read_parquet(Path(cohort_dir) / "cohort.parquet").copy()
+    cohort_path = (
+        Path(cohort_parquet_path).expanduser().resolve()
+        if cohort_parquet_path
+        else Path(cohort_dir) / "cohort.parquet"
+    )
+    frame = pd.read_parquet(cohort_path).copy()
     frame.index = frame["sample_uid"].astype(str)
     if frame.index.duplicated().any():
         raise ValueError("cohort contains duplicate sample_uid")
@@ -903,7 +914,7 @@ def run_score(config: ProxyConfig, *, prompt_uids: Sequence[str] | None = None) 
     if config.max_prompts is not None:
         selected_uids = selected_uids[: config.max_prompts]
 
-    frame = _cohort_frame(config.cohort_dir)
+    frame = _cohort_frame(config.cohort_dir, config.cohort_parquet_path)
     models = load_runtime_models(
         student_model_path=config.student_model_path,
         student_device=config.student_device,
