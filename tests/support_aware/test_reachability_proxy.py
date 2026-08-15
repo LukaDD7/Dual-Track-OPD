@@ -18,6 +18,7 @@ from dual_track_opd.support_aware.reachability_proxy import (
     load_config,
     teacher_trace_id,
     write_proxy_study_csv,
+    _complete_scored_prompts,
     _selected_teacher_trace,
 )
 
@@ -173,6 +174,49 @@ def test_strict_join_rejects_missing_and_duplicate_keys() -> None:
         build_proxy_study_rows(
             token_rows=token_rows, rescue_rows=duplicate, selected_traces=selected, horizons=[64, 128]
         )
+
+
+def test_build_study_ignores_prescored_extras() -> None:
+    """Token rows for prompts without rescue gold must be skipped, not crash."""
+
+    token_rows = _token_rows(80, "p0") + _token_rows(80, "extra")
+    rescue = [
+        {"sample_uid": "p0", "horizon": 64, "meets_preregistered_rescue_rule": True},
+    ]
+    study = build_proxy_study_rows(
+        token_rows=token_rows,
+        rescue_rows=rescue,
+        selected_traces={"p0": _trace("p0", proposal_id=1, rank=1)},
+        horizons=[64],
+    )
+    assert len(study) == 1
+    assert study[0]["prompt_id"] == "p0"
+
+
+def test_complete_scored_prompts_checks_coverage_and_hash(tmp_path: Path) -> None:
+    trace = _trace("p0", proposal_id=1, rank=1, length=80)
+    path = tmp_path / "proxy_token_rows.jsonl"
+
+    def write(rows: list[dict]) -> None:
+        path.write_text(
+            "\n".join(json.dumps(row, sort_keys=True) for row in rows) + "\n",
+            encoding="utf-8",
+        )
+
+    rows = _token_rows(80, "p0")
+    for row in rows:
+        row["teacher_trace_id"] = f"p0:proposal-1:{trace['response_token_hash'][:16]}"
+    write(rows)
+    assert _complete_scored_prompts(path, {"p0": trace}) == {"p0"}
+
+    write(rows[:40])
+    assert _complete_scored_prompts(path, {"p0": trace}) == set()
+
+    mismatched = [dict(row) for row in rows]
+    for row in mismatched:
+        row["teacher_trace_id"] = "p0:proposal-1:deadbeefcafe"
+    write(mismatched)
+    assert _complete_scored_prompts(path, {"p0": trace}) == set()
 
 
 def test_analyze_partial_study_marks_missing_minimal_prompts(tmp_path: Path) -> None:

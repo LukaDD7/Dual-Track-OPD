@@ -506,6 +506,9 @@ def build_proxy_study_rows(
 
     horizon_rows: dict[tuple[str, int], dict[str, Any]] = {}
     for trace_uid, rows in _group_by_prompt(token_rows).items():
+        if trace_uid not in selected_traces:
+            # Pre-scored extras without rescue gold are not part of this study.
+            continue
         trace = selected_traces[trace_uid]
         trace_length = len(trace.get("response_token_ids") or ())
         for aggregate in horizon_aggregates(
@@ -904,13 +907,20 @@ def run_score(config: ProxyConfig, *, prompt_uids: Sequence[str] | None = None) 
     output = _resolve_output(config)
     rescue = _read_jsonl_checked(Path(config.rescue_dir) / "rescue_comparisons.jsonl")
     retained = _read_jsonl_checked(Path(config.proposal_dir) / "retained_proposals.jsonl")
-    selected_uids = sorted({str(row["sample_uid"]) for row in rescue})
+    retained_uids = {str(row["sample_uid"]) for row in retained}
+    rescue_uids = {str(row["sample_uid"]) for row in rescue}
     if prompt_uids:
         requested = set(prompt_uids)
-        unknown = requested - set(selected_uids)
+        unknown = requested - retained_uids
         if unknown:
-            raise ValueError(f"unknown rescue prompts: {sorted(unknown)}")
-        selected_uids = [uid for uid in selected_uids if uid in requested]
+            raise ValueError(f"prompts without retained teacher traces: {sorted(unknown)}")
+        selected_uids = sorted(requested)
+    else:
+        selected_uids = sorted(rescue_uids)
+        missing_traces = [uid for uid in selected_uids if uid not in retained_uids]
+        if missing_traces:
+            raise ValueError(f"rescue prompts without retained traces: {missing_traces[:10]}")
+    selected_uids = [uid for uid in selected_uids if uid in retained_uids]
     if config.max_prompts is not None:
         selected_uids = selected_uids[: config.max_prompts]
 
@@ -923,6 +933,12 @@ def run_score(config: ProxyConfig, *, prompt_uids: Sequence[str] | None = None) 
         teacher_device=config.teacher_device,
     )
     token_rows_path = output / "proxy_token_rows.jsonl"
+    expected_traces = {
+        uid: _selected_teacher_trace(retained, uid) for uid in selected_uids
+    }
+    completed = _complete_scored_prompts(token_rows_path, expected_traces)
+    pending = [uid for uid in selected_uids if uid not in completed]
+    skipped = [uid for uid in selected_uids if uid in completed]
     manifest: dict[str, Any] = {
         "schema_version": "reachability-proxy-score-v1",
         "config": asdict(config),
@@ -934,9 +950,9 @@ def run_score(config: ProxyConfig, *, prompt_uids: Sequence[str] | None = None) 
         },
         "prompts": {},
     }
-    with token_rows_path.open("w", encoding="utf-8") as handle:
-        for uid in selected_uids:
-            trace = _selected_teacher_trace(retained, uid)
+    with token_rows_path.open("w" if not token_rows_path.is_file() else "a", encoding="utf-8") as handle:
+        for uid in pending:
+            trace = expected_traces[uid]
             cohort_row = frame.loc[uid].to_dict()
             question = str(cohort_row.get("question") or "").strip()
             gold_answer = cohort_row.get("answer")
@@ -954,9 +970,49 @@ def run_score(config: ProxyConfig, *, prompt_uids: Sequence[str] | None = None) 
                 handle.write(json.dumps(row, ensure_ascii=False) + "\n")
             handle.flush()
             manifest["prompts"][uid] = audit
+    for uid in skipped:
+        manifest["prompts"][uid] = {
+            "sample_uid": uid,
+            "skipped_existing": True,
+            "trace_id": teacher_trace_id(expected_traces[uid]),
+        }
+    manifest["scored_prompts"] = len(pending)
+    manifest["skipped_existing_prompts"] = skipped
     manifest_path = output / "run_manifest.json"
     _write_json_atomic(manifest_path, manifest)
     return manifest
+
+
+def _complete_scored_prompts(
+    token_rows_path: Path,
+    expected_traces: Mapping[str, Mapping[str, Any]],
+) -> set[str]:
+    """Prompts whose token rows fully cover the trace and match its hash."""
+
+    if not token_rows_path.is_file():
+        return set()
+    rows_by_prompt: dict[str, dict[int, str]] = defaultdict(dict)
+    for line in token_rows_path.open(encoding="utf-8"):
+        if not line.strip():
+            continue
+        row = json.loads(line)
+        rows_by_prompt[str(row["prompt_id"])][int(row["position_index"])] = str(
+            row["teacher_trace_id"]
+        )
+    complete: set[str] = set()
+    for uid, trace in expected_traces.items():
+        positions = rows_by_prompt.get(uid)
+        if positions is None:
+            continue
+        expected_length = len(trace.get("response_token_ids") or ())
+        expected_hash_prefix = str(trace.get("response_token_hash") or "")[:16]
+        if len(positions) != expected_length or set(positions) != set(range(expected_length)):
+            continue
+        trace_ids = {value for value in positions.values()}
+        if len(trace_ids) != 1 or expected_hash_prefix not in next(iter(trace_ids)):
+            continue
+        complete.add(uid)
+    return complete
 
 
 def run_analyze(config: ProxyConfig, *, prompt_uids: Sequence[str] | None = None) -> dict[str, Any]:
