@@ -1,5 +1,12 @@
 # CC Handoff: Causal-State Final Audit → STP-OPD Mechanics Pilot
 
+> **Superseded by user research decision (2026-08-14).**  Preserve the
+> implementation and historical evidence in this document, but do not execute
+> its canary, four-arm pilot, or training phases.  Follow the user–ChatGPT
+> convergence brief in
+> `docs/cc_reachability_proxy_convergence_handoff_20260814.md`; this older
+> Claude Code handoff is implementation history, not research direction.
+
 Date: 2026-08-13
 
 Starting commit: `ef3f2f3`

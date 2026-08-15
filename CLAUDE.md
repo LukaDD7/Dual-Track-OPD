@@ -2,12 +2,26 @@
 
 Read `AGENTS.md` first. Keep changes small, importable, tested, and reproducible.
 
-## Current Required Handoff
+## User-Directed Research Convergence
 
-For the causal-state-probe → STP-OPD transition, follow
-`docs/cc_causal_state_to_stp_handoff_20260813.md`.  It is the current
-authoritative implementation and launch gate.  Do not start an STP-OPD full
-training run before completing its evidence, implementation, and canary gates.
+The research direction comes from the user's discussion with ChatGPT, captured
+for execution in `docs/cc_reachability_proxy_convergence_handoff_20260814.md`.
+Treat that user decision—not the current Claude Code implementation, old
+handoffs, or sunk engineering work—as the source of research scope.
+The execution brief is self-contained; do not depend on access to the original
+ChatGPT conversation.
+
+Claude Code's role is to verify evidence, implement the smallest offline
+measurement path, run the registered proxy study, and report results.  Do not
+reopen the STP-versus-proxy decision or use existing code to broaden the task.
+
+Effective immediately:
+
+- pause the STP canary, four-arm mechanics pilot, and all training launches;
+- preserve the implementation at `489d61a` and do not delete or unwind it;
+- run only the offline reachability-proxy work specified by the user brief;
+- do not add a loss or start training until the proxy gate is reported and the
+  user explicitly approves the next experiment.
 
 Default verification:
 
