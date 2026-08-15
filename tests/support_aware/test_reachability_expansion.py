@@ -18,6 +18,7 @@ from dual_track_opd.support_aware.proposal_feasibility import ProposalConfig, se
 from dual_track_opd.support_aware.prefix_intervention import (
     InterventionConfig,
     _aggregate,
+    _adaptive_candidate,
     _rescue_decision,
     load_config as load_intervention_config,
 )
@@ -320,3 +321,51 @@ def test_aggregate_adaptive_stage_mix_matches_baseline_k(tmp_path: Path) -> None
         for line in (tmp_path / "minimal_rescue_prefixes.jsonl").read_text(encoding="utf-8").splitlines()
     ]
     assert [row["horizon"] for row in minimal] == [128]
+
+
+def test_adaptive_candidate_ignores_skipped_units() -> None:
+    """Skipped (K=0) arms must not reach the rescue decision."""
+
+    config = _intervention_config(
+        horizons=(64, 128, 256, 512),
+        stage1_k=4,
+        stage2_k=8,
+        adaptive_confirm=True,
+        rescue_min_mean_lift=0.20,
+        rescue_min_probability=0.90,
+        seed=7,
+    )
+
+    def unit(arm: str, horizon: int, K: int, correct: int, skipped: str | None = None) -> dict:
+        return {
+            "sample_uid": "p0",
+            "arm": arm,
+            "horizon": horizon,
+            "K": K,
+            "correct_count": correct,
+            "pass_rate": correct / K if K else None,
+            "expected_U8": 0.5 if K else None,
+            "skipped_reason": skipped,
+        }
+
+    units = [
+        unit("unaided", 0, 4, 1),
+        unit("teacher_prefix", 64, 4, 2),
+        unit("wrong_student_prefix", 64, 4, 0),
+        unit("teacher_prefix", 128, 4, 3),
+        unit("wrong_student_prefix", 128, 4, 0),
+        unit("teacher_prefix", 256, 4, 2),
+        unit("wrong_student_prefix", 256, 4, 1),
+        # Trace shorter than the horizon: skipped units must be ignored.
+        unit("teacher_prefix", 512, 0, 0, skipped="source_shorter_than_horizon"),
+        unit("wrong_student_prefix", 512, 0, 0, skipped="source_shorter_than_horizon"),
+    ]
+    assert _adaptive_candidate(units, config, "p0") == 128
+
+    # If every teacher arm is skipped, no candidate may be selected.
+    skipped_only = [
+        unit("unaided", 0, 4, 1),
+        unit("teacher_prefix", 64, 0, 0, skipped="source_shorter_than_horizon"),
+        unit("wrong_student_prefix", 64, 4, 0),
+    ]
+    assert _adaptive_candidate(skipped_only, config, "p0") is None

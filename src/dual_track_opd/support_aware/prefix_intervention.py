@@ -592,6 +592,40 @@ def _rescue_decision(
     }
 
 
+def _adaptive_candidate(
+    intervention_units: Sequence[Mapping[str, Any]],
+    config: InterventionConfig,
+    uid: str,
+) -> int | None:
+    """First valid horizon meeting the stored rule at stage-1 K."""
+
+    def valid(arm: str, horizon: int) -> Mapping[str, Any] | None:
+        return next(
+            (
+                unit
+                for unit in intervention_units
+                if unit["arm"] == arm
+                and unit["horizon"] == horizon
+                and unit.get("skipped_reason") is None
+                and int(unit.get("K") or 0) > 0
+            ),
+            None,
+        )
+
+    baseline = valid("unaided", 0)
+    if baseline is None:
+        return None
+    for horizon in config.horizons:
+        teacher = valid("teacher_prefix", horizon)
+        wrong = valid("wrong_student_prefix", horizon)
+        if teacher is None or wrong is None:
+            continue
+        decision = _rescue_decision(uid, horizon, teacher, wrong, baseline, config)
+        if decision["meets_preregistered_rescue_rule"]:
+            return horizon
+    return None
+
+
 def _aggregate(output_dir: Path, expected_uids: Sequence[str], config: InterventionConfig) -> dict[str, Any]:
     prompt_results = []
     result_dir = output_dir / "prompt_results"
@@ -880,33 +914,7 @@ def run(config: InterventionConfig) -> dict[str, Any]:
 
         intervention_units = _execute_arms(_arm_specs_for(config.horizons), config.stage1_k)
         if config.adaptive_confirm:
-            baseline_unit = next(
-                unit for unit in intervention_units if unit["arm"] == "unaided" and unit["horizon"] == 0
-            )
-            candidate = None
-            for horizon in config.horizons:
-                teacher_unit = next(
-                    (
-                        unit
-                        for unit in intervention_units
-                        if unit["arm"] == "teacher_prefix" and unit["horizon"] == horizon
-                    ),
-                    None,
-                )
-                wrong_unit = next(
-                    (
-                        unit
-                        for unit in intervention_units
-                        if unit["arm"] == "wrong_student_prefix" and unit["horizon"] == horizon
-                    ),
-                    None,
-                )
-                if teacher_unit is None or wrong_unit is None:
-                    continue
-                decision = _rescue_decision(uid, horizon, teacher_unit, wrong_unit, baseline_unit, config)
-                if decision["meets_preregistered_rescue_rule"]:
-                    candidate = horizon
-                    break
+            candidate = _adaptive_candidate(intervention_units, config, uid)
             if candidate is not None:
                 intervention_units.extend(
                     _execute_arms(_arm_specs_for([candidate]), config.stage2_k)
