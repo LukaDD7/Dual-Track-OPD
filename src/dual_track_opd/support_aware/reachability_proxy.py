@@ -716,6 +716,118 @@ def _percentile_ci(values: Sequence[float]) -> list[float | None]:
     return [lower, upper]
 
 
+def _horizon_bin(horizon: int, horizons: Sequence[int]) -> int:
+    return list(horizons).index(horizon)
+
+
+def _fit_horizon_tau(
+    rows_by_prompt: Mapping[str, Sequence[Mapping[str, Any]]],
+    scaffoldable_prompts: Sequence[str],
+    scalar: str,
+    horizons: Sequence[int],
+) -> float:
+    """Calibrate one scalar threshold on training prompts (min mean bin distance)."""
+
+    values = sorted(
+        {
+            float(row[scalar])
+            for uid in scaffoldable_prompts
+            for row in rows_by_prompt[uid]
+        }
+    )
+    if not values:
+        raise ValueError("no training scalar values for threshold calibration")
+    grid = values
+    if len(grid) > 40:
+        step = (len(grid) - 1) / 39
+        grid = [grid[int(round(index * step))] for index in range(40)]
+
+    def mean_bin_distance(tau: float) -> float:
+        total = 0.0
+        for uid in scaffoldable_prompts:
+            rows = rows_by_prompt[uid]
+            h_star = min(int(row["horizon"]) for row in rows if row["rescue_gold"])
+            scalar_by_h = {int(row["horizon"]): float(row[scalar]) for row in rows}
+            h_hat = min(scalar_by_h, key=lambda h: abs(scalar_by_h[h] - tau))
+            total += abs(_horizon_bin(h_hat, horizons) - _horizon_bin(h_star, horizons))
+        return total / max(1, len(scaffoldable_prompts))
+
+    return min(grid, key=mean_bin_distance)
+
+
+def evaluate_proxy_heldout(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    seed: int,
+    test_fraction: float = 0.4,
+) -> dict[str, Any]:
+    """Formal §9 evaluation: fit thresholds on train prompts, score test prompts."""
+
+    if not 0 < test_fraction < 1:
+        raise ValueError("test_fraction must lie in (0, 1)")
+    prompt_ids = sorted({str(row["prompt_id"]) for row in rows})
+    rng = __import__("random").Random(seed)
+    shuffled = list(prompt_ids)
+    rng.shuffle(shuffled)
+    n_test = max(1, int(round(len(shuffled) * test_fraction)))
+    test_set = set(shuffled[:n_test])
+    train_set = set(shuffled[n_test:])
+    horizons = sorted({int(row["horizon"]) for row in rows})
+    by_prompt: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
+    for row in rows:
+        by_prompt[str(row["prompt_id"])].append(row)
+    scaffoldable_train = [
+        uid for uid in sorted(train_set) if any(row["rescue_gold"] for row in by_prompt[uid])
+    ]
+    result: dict[str, Any] = {
+        "seed": seed,
+        "test_fraction": test_fraction,
+        "train_prompts": sorted(train_set),
+        "test_prompts": sorted(test_set),
+    }
+    for name in ("position", "cum_student_nll", "cum_top100_fkl_tail"):
+        tau = _fit_horizon_tau(by_prompt, scaffoldable_train, name, horizons)
+        scores: list[float] = []
+        labels: list[bool] = []
+        for uid in sorted(test_set):
+            prompt_rows = by_prompt[uid]
+            scaffoldable = any(row["rescue_gold"] for row in prompt_rows)
+            chosen = (
+                min((row for row in prompt_rows if row["rescue_gold"]), key=lambda row: row["horizon"])
+                if scaffoldable
+                else max(prompt_rows, key=lambda row: row["horizon"])
+            )
+            scores.append(-float(chosen[name]))
+            labels.append(scaffoldable)
+        recall_at_1 = plus_minus_one = bin_distance = 0.0
+        n_within = 0
+        for uid in sorted(test_set):
+            prompt_rows = by_prompt[uid]
+            gold_rows = [row for row in prompt_rows if row["rescue_gold"]]
+            if not gold_rows:
+                continue
+            h_star = min(int(row["horizon"]) for row in gold_rows)
+            scalar_by_h = {int(row["horizon"]): float(row[name]) for row in prompt_rows}
+            h_hat = min(scalar_by_h, key=lambda h: abs(scalar_by_h[h] - tau))
+            distance = abs(_horizon_bin(h_hat, horizons) - _horizon_bin(h_star, horizons))
+            recall_at_1 += 1.0 if distance == 0 else 0.0
+            plus_minus_one += 1.0 if distance <= 1 else 0.0
+            bin_distance += distance
+            n_within += 1
+        result[name] = {
+            "tau": tau,
+            "test_auroc": _auroc(scores, labels),
+            "test_auprc": _auprc(scores, labels),
+            "within_prompt": {
+                "n_prompts": n_within,
+                "recall_at_1": recall_at_1 / n_within if n_within else None,
+                "plus_minus_one_bin": plus_minus_one / n_within if n_within else None,
+                "mean_abs_bin_distance": bin_distance / n_within if n_within else None,
+            },
+        }
+    return result
+
+
 # ---------------------------------------------------------------------------
 # GPU scoring
 # ---------------------------------------------------------------------------
@@ -1135,13 +1247,17 @@ def run_analyze(config: ProxyConfig, *, prompt_uids: Sequence[str] | None = None
         ),
     }
     evaluation = evaluate_proxy_study(study_rows, seed=20260814)
+    heldout = evaluate_proxy_heldout(study_rows, seed=20260815)
     analysis: dict[str, Any] = {
         "schema_version": "reachability-proxy-analyze-v1",
         "coverage": coverage,
         "minimal_horizon_reproduction": reproduced,
         "evaluation": evaluation,
-        "disclaimer": "12-prompt plumbing study: seven positives cannot select a proxy; "
-                     "metrics are plumbing evidence only.",
+        "heldout_evaluation": heldout,
+        "disclaimer": "Expansion-stage evaluation: descriptive full-set metrics plus "
+                      "held-out §9 metrics (thresholds fit on train prompts, evaluated "
+                      "on disjoint test prompts). Selection is a GO/NO-GO decision for "
+                      "the user based on held-out evidence.",
         "csv": {"path": str(csv_path), "sha256": csv_hash},
     }
     analysis_path = output / "proxy_analysis.json"
