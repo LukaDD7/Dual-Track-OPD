@@ -22,6 +22,10 @@ from dual_track_opd.support_aware.prefix_intervention import (
     _rescue_decision,
     load_config as load_intervention_config,
 )
+from dual_track_opd.support_aware.reachability_wrong_controls import (
+    WrongControlConfig,
+    select_targets,
+)
 
 
 def _frontier(pool256: Path, strata: dict[str, list[str]]) -> None:
@@ -369,3 +373,41 @@ def test_adaptive_candidate_ignores_skipped_units() -> None:
         unit("wrong_student_prefix", 64, 4, 0),
     ]
     assert _adaptive_candidate(skipped_only, config, "p0") is None
+
+
+def test_wrong_control_target_selection(tmp_path: Path) -> None:
+    manifest = tmp_path / "manifest.jsonl"
+    proposal = tmp_path / "proposals"
+    rescued = tmp_path / "rescued"
+    proposal.mkdir()
+    rescued.mkdir()
+    manifest.write_text(
+        "\n".join(
+            json.dumps({"sample_uid": f"geo3k:{uid}"}) for uid in ("a", "b", "c")
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (proposal / "retained_proposals.jsonl").write_text(
+        "\n".join(
+            json.dumps({"sample_uid": f"geo3k:{uid}"}) for uid in ("a", "b", "c")
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (rescued / "rescue_comparisons.jsonl").write_text(
+        json.dumps({"sample_uid": "geo3k:a", "horizon": 64}) + "\n",
+        encoding="utf-8",
+    )
+    config = WrongControlConfig(
+        manifest_path=str(manifest),
+        proposal_dir=str(proposal),
+        rescue_dirs=(str(rescued),),
+        cohort_dir=str(tmp_path),
+        cohort_parquet_path=None,
+        output_dir=str(tmp_path / "out"),
+        student_model_path="student",
+    )
+    targets, info = select_targets(config)
+    assert targets == ["geo3k:b", "geo3k:c"]
+    assert info["targets"] == 2
