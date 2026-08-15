@@ -23,6 +23,7 @@ from dual_track_opd.support_aware.reachability_proxy import (
     _complete_scored_prompts,
     derive_salvaged_features,
     evaluate_prefix_study,
+    _per_token_symmetric_stats,
     _purge_scored_rows,
     _selected_teacher_trace,
 )
@@ -342,6 +343,92 @@ def test_derive_salvaged_features_matches_hand_computation() -> None:
         rel_tol=1e-9,
     )
     assert row["D_endpoint_fkl"] == 0.2 + 0.005 * 15
+
+
+def test_symmetric_stats_pure_torch() -> None:
+    import torch
+
+    torch.manual_seed(3)
+    tokens, vocab = 8, 5000
+    teacher_logits = torch.randn(tokens, vocab)
+    student_logits = torch.randn(tokens, vocab)
+    response_ids = torch.randint(0, vocab, (tokens,))
+    teacher_logp = torch.log_softmax(teacher_logits.float(), dim=-1)
+    student_logp = torch.log_softmax(student_logits.float(), dim=-1)
+    stats = _per_token_symmetric_stats(
+        teacher_logp=teacher_logp,
+        student_logp=student_logp,
+        response_token_ids=response_ids,
+        top_k=100,
+        epsilon=1e-12,
+        mass_tolerance=1e-3,
+    )
+    assert len(stats) == tokens
+    sample = stats[3]
+    teacher_values, teacher_indices = torch.topk(teacher_logp[3], k=100)
+    student_values, student_indices = torch.topk(student_logp[3], k=100)
+    assert sample["teacher_top100_ids"] == teacher_indices.tolist()
+    assert sample["student_top100_ids"] == student_indices.tolist()
+    assert math.isclose(
+        sample["student_sampled_logp"],
+        float(student_logp[3, response_ids[3]]),
+        rel_tol=1e-5,
+    )
+    overlap = len(set(teacher_indices[:16].tolist()) & set(student_indices[:16].tolist())) / 16
+    assert math.isclose(sample["overlap_top16"], overlap, rel_tol=1e-9)
+    teacher_on_student = float(teacher_logp[3, student_indices[:16]].exp().sum())
+    assert math.isclose(
+        sample["teacher_mass_on_student_top16"], teacher_on_student, rel_tol=1e-5
+    )
+    student_on_teacher = float(student_logp[3, teacher_indices].exp().sum())
+    assert math.isclose(
+        1.0 - sample["student_tail_on_teacher_support"], student_on_teacher, abs_tol=1e-5
+    )
+    teacher_probs = teacher_logp[3].exp()
+    entropy = float(-(teacher_probs * teacher_logp[3]).sum())
+    assert math.isclose(sample["teacher_entropy"], entropy, rel_tol=1e-5)
+    assert math.isclose(
+        sample["teacher_top1_top2_margin"],
+        float(teacher_values[0] - teacher_values[1]),
+        rel_tol=1e-5,
+    )
+    assert abs(sample["teacher_mass_residual"]) < 1e-3
+    assert abs(sample["student_mass_residual"]) < 1e-3
+    assert math.isclose(
+        sample["student_top1_top2_margin"],
+        float(student_values[0] - student_values[1]),
+        rel_tol=1e-5,
+    )
+
+
+def test_salvage_marks_missing_symmetric_fields() -> None:
+    token_rows = []
+    for t in range(16):
+        token_rows.append(
+            {
+                "prompt_id": "p0",
+                "position_index": t,
+                "student_nll": 0.5,
+                "d_coarse_fkl": 0.2,
+                "student_p_logp_top100_at_teacher_ids": [math.log(0.02)] * 100,
+                "teacher_trace_id": "p0:proposal-1:abc",
+            }
+        )
+    study_rows = [
+        {
+            "prompt_id": "p0",
+            "horizon": 8,
+            "rescue_gold": True,
+            "position": 0.5,
+            "cum_student_nll": 1.0,
+            "cum_top100_fkl_tail": 1.0,
+        }
+    ]
+    enriched = derive_salvaged_features(token_rows, study_rows)
+    assert enriched[0]["C_h_16"] is None
+    assert enriched[0]["O_h_16"] is None
+    evaluation = evaluate_prefix_study(enriched)
+    assert "M1_compat" not in evaluation["models"]
 
 
 def test_analyze_combined_pools_sources(tmp_path: Path) -> None:

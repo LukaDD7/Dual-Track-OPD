@@ -1118,59 +1118,53 @@ def _score_trace(
         student_logp = torch.log_softmax(student_chunk.float(), dim=-1)
         teacher_logp = torch.log_softmax(teacher_chunk.float(), dim=-1)
 
-        teacher_values, teacher_indices = torch.topk(teacher_logp, k=config.top_k, dim=-1)
-        teacher_topk_mass = teacher_values.exp().sum(dim=-1)
-        teacher_tail = torch.clamp(1.0 - teacher_topk_mass, min=config.epsilon)
-        teacher_tail_logp = teacher_tail.log()
-
-        student_sampled = student_logp[
-            torch.arange(end - start, device=student_logp.device), ids[start:end]
-        ]
-        teacher_ids_on_student = teacher_indices.to(student_logp.device)
-        student_at_teacher_ids = student_logp.gather(
-            dim=-1, index=teacher_ids_on_student
+        stats = _per_token_symmetric_stats(
+            teacher_logp=teacher_logp,
+            student_logp=student_logp,
+            response_token_ids=ids[start:end],
+            top_k=config.top_k,
+            epsilon=config.epsilon,
+            mass_tolerance=config.mass_tolerance,
         )
-        student_mass = student_at_teacher_ids.exp().sum(dim=-1)
-        student_tail = torch.clamp(1.0 - student_mass, min=config.epsilon)
-        student_tail_logp = student_tail.log()
-
-        # Cross-model KL: teacher Top-100 values and tail live on the teacher
-        # device; move them to the student device for the per-token math.
-        teacher_values_on_student = teacher_values.to(student_logp.device)
-        teacher_tail_on_student = teacher_tail.to(student_logp.device)
-        teacher_tail_logp_on_student = teacher_tail_logp.to(student_logp.device)
-        q_i = teacher_values_on_student.exp()
-        d_t = (q_i * (teacher_values_on_student - student_at_teacher_ids)).sum(dim=-1) + (
-            teacher_tail_on_student
-            * (teacher_tail_logp_on_student - student_tail_logp)
-        )
-        teacher_mass_residual = teacher_topk_mass + teacher_tail - 1.0
-        student_mass_residual = student_mass + student_tail - 1.0
-        if float(teacher_mass_residual.abs().max()) > config.mass_tolerance:
-            raise RuntimeError("teacher Top-K+tail mass conservation failed")
-        if float(student_mass_residual.abs().max()) > config.mass_tolerance:
-            raise RuntimeError("student Top-K+tail mass conservation failed")
 
         for offset in range(end - start):
             position = start + offset
             token_id = int(ids[start + offset].item())
+            token_stats = stats[offset]
             rows.append(
                 {
                     "prompt_id": str(trace["sample_uid"]),
                     "teacher_trace_id": trace_id,
                     "position_index": position,
                     "token_id": token_id,
-                    "student_nll": float(-student_sampled[offset].cpu()),
-                    "d_coarse_fkl": float(d_t[offset].cpu()),
-                    "teacher_q_top100_ids": tuple(int(value) for value in teacher_indices[offset].cpu().tolist()),
-                    "teacher_q_logp_top100": tuple(float(value) for value in teacher_values[offset].cpu().tolist()),
-                    "teacher_q_tail_logp": float(teacher_tail_logp[offset].cpu()),
+                    "student_nll": float(-token_stats["student_sampled_logp"]),
+                    "d_coarse_fkl": float(token_stats["fkl_teacher_support"]),
+                    "teacher_q_top100_ids": tuple(int(value) for value in token_stats["teacher_top100_ids"]),
+                    "teacher_q_logp_top100": tuple(float(value) for value in token_stats["teacher_top100_logp"]),
+                    "teacher_q_tail_logp": float(token_stats["teacher_tail_logp"]),
                     "student_p_logp_top100_at_teacher_ids": tuple(
-                        float(value) for value in student_at_teacher_ids[offset].cpu().tolist()
+                        float(value) for value in token_stats["student_logp_at_teacher_ids"]
                     ),
-                    "student_p_tail_prob": float(student_tail[offset].cpu()),
-                    "teacher_mass_residual": float(teacher_mass_residual[offset].cpu()),
-                    "student_mass_residual": float(student_mass_residual[offset].cpu()),
+                    "student_p_tail_prob": float(token_stats["student_tail_on_teacher_support"]),
+                    "teacher_mass_residual": float(token_stats["teacher_mass_residual"]),
+                    "student_mass_residual": float(token_stats["student_mass_residual"]),
+                    "student_top100_ids": tuple(int(value) for value in token_stats["student_top100_ids"]),
+                    "student_top100_logp": tuple(float(value) for value in token_stats["student_top100_logp"]),
+                    "teacher_logp_at_student_top100_ids": tuple(
+                        float(value) for value in token_stats["teacher_logp_at_student_ids"]
+                    ),
+                    "student_tail_on_student_support": float(
+                        token_stats["student_tail_on_student_support"]
+                    ),
+                    "teacher_tail_on_student_support": float(
+                        token_stats["teacher_tail_on_student_support"]
+                    ),
+                    "teacher_entropy": float(token_stats["teacher_entropy"]),
+                    "student_entropy": float(token_stats["student_entropy"]),
+                    "teacher_top1_top2_margin": float(token_stats["teacher_top1_top2_margin"]),
+                    "student_top1_top2_margin": float(token_stats["student_top1_top2_margin"]),
+                    "C_h_16": float(token_stats["teacher_mass_on_student_top16"]),
+                    "O_h_16": float(token_stats["overlap_top16"]),
                 }
             )
         del student_chunk, teacher_chunk, student_logp, teacher_logp
@@ -1188,6 +1182,124 @@ def _score_trace(
         "logits_to_keep": bool(student_keep and teacher_keep),
     }
     return rows, audit
+
+
+def _per_token_symmetric_stats(
+    *,
+    teacher_logp: torch.Tensor,
+    student_logp: torch.Tensor,
+    response_token_ids: torch.Tensor,
+    top_k: int,
+    epsilon: float,
+    mass_tolerance: float,
+) -> list[dict[str, Any]]:
+    """Per-token symmetric Top-K stats (pure, torch; unit-testable).
+
+    One teacher and one student log-probability matrix per token, aligned at
+    the same response positions.  Returns every field needed by the symmetric
+    cache schema plus mass-conservation checks.
+    """
+
+    if teacher_logp.shape != student_logp.shape:
+        raise ValueError("teacher/student log-prob shapes must match")
+    length = int(teacher_logp.shape[0])
+    if int(response_token_ids.shape[0]) != length:
+        raise ValueError("response token IDs must align with log-prob rows")
+
+    teacher_values, teacher_indices = torch.topk(teacher_logp, k=top_k, dim=-1)
+    student_values, student_indices = torch.topk(student_logp, k=top_k, dim=-1)
+    teacher_topk_mass = teacher_values.exp().sum(dim=-1)
+    teacher_tail = torch.clamp(1.0 - teacher_topk_mass, min=epsilon)
+    teacher_tail_logp = teacher_tail.log()
+
+    sampled = student_logp[
+        torch.arange(length, device=student_logp.device), response_token_ids
+    ]
+    teacher_ids_on_student = teacher_indices.to(student_logp.device)
+    student_at_teacher_ids = student_logp.gather(dim=-1, index=teacher_ids_on_student)
+    student_mass_on_teacher = student_at_teacher_ids.exp().sum(dim=-1)
+    student_tail_on_teacher = torch.clamp(
+        1.0 - student_mass_on_teacher, min=epsilon
+    )
+
+    student_ids_on_teacher = student_indices.to(teacher_logp.device)
+    teacher_at_student_ids = teacher_logp.gather(dim=-1, index=student_ids_on_teacher)
+    teacher_mass_on_student = teacher_at_student_ids.exp().sum(dim=-1)
+    teacher_tail_on_student = torch.clamp(
+        1.0 - teacher_mass_on_student, min=epsilon
+    )
+    student_tail_on_student = torch.clamp(
+        1.0 - student_values.exp().sum(dim=-1), min=epsilon
+    )
+
+    teacher_on_student = teacher_values.to(student_logp.device)
+    teacher_tail_t = teacher_tail.to(student_logp.device)
+    teacher_tail_logp_t = teacher_tail_logp.to(student_logp.device)
+    q_i = teacher_on_student.exp()
+    fkl_teacher_support = (q_i * (teacher_on_student - student_at_teacher_ids)).sum(
+        dim=-1
+    ) + (teacher_tail_t * (teacher_tail_logp_t - student_tail_on_teacher.log()))
+
+    probs_t = teacher_logp.exp()
+    probs_s = student_logp.exp()
+    teacher_entropy = -(probs_t * teacher_logp).sum(dim=-1)
+    student_entropy = -(probs_s * student_logp).sum(dim=-1)
+
+    teacher_mass_residual = teacher_topk_mass + teacher_tail - 1.0
+    student_mass_residual = student_mass_on_teacher + student_tail_on_teacher - 1.0
+    if float(teacher_mass_residual.abs().max()) > mass_tolerance:
+        raise RuntimeError("teacher Top-K+tail mass conservation failed")
+    if float(student_mass_residual.abs().max()) > mass_tolerance:
+        raise RuntimeError("student Top-K+tail mass conservation failed")
+
+    teacher_mass_on_student_top16 = (
+        teacher_at_student_ids[:, :16].exp().sum(dim=-1)
+    )
+    overlap_top16 = torch.tensor(
+        [
+            len(
+                set(teacher_indices[t, :16].cpu().tolist())
+                & set(student_indices[t, :16].cpu().tolist())
+            )
+            / 16
+            for t in range(length)
+        ],
+        device=teacher_logp.device,
+    )
+
+    stats: list[dict[str, Any]] = []
+    for t in range(length):
+        stats.append(
+            {
+                "student_sampled_logp": float(sampled[t].cpu()),
+                "fkl_teacher_support": float(fkl_teacher_support[t].cpu()),
+                "teacher_top100_ids": teacher_indices[t].cpu().tolist(),
+                "teacher_top100_logp": teacher_values[t].cpu().tolist(),
+                "teacher_tail_logp": float(teacher_tail_logp[t].cpu()),
+                "student_logp_at_teacher_ids": student_at_teacher_ids[t].cpu().tolist(),
+                "student_tail_on_teacher_support": float(student_tail_on_teacher[t].cpu()),
+                "teacher_mass_residual": float(teacher_mass_residual[t].cpu()),
+                "student_mass_residual": float(student_mass_residual[t].cpu()),
+                "student_top100_ids": student_indices[t].cpu().tolist(),
+                "student_top100_logp": student_values[t].cpu().tolist(),
+                "teacher_logp_at_student_ids": teacher_at_student_ids[t].cpu().tolist(),
+                "student_tail_on_student_support": float(student_tail_on_student[t].cpu()),
+                "teacher_tail_on_student_support": float(teacher_tail_on_student[t].cpu()),
+                "teacher_entropy": float(teacher_entropy[t].cpu()),
+                "student_entropy": float(student_entropy[t].cpu()),
+                "teacher_top1_top2_margin": float(
+                    (teacher_values[t, 0] - teacher_values[t, 1]).cpu()
+                ),
+                "student_top1_top2_margin": float(
+                    (student_values[t, 0] - student_values[t, 1]).cpu()
+                ),
+                "teacher_mass_on_student_top16": float(
+                    teacher_mass_on_student_top16[t].cpu()
+                ),
+                "overlap_top16": float(overlap_top16[t].cpu()),
+            }
+        )
+    return stats
 
 
 def run_score(config: ProxyConfig, *, prompt_uids: Sequence[str] | None = None) -> dict[str, Any]:
@@ -1643,6 +1755,17 @@ def derive_salvaged_features(
         feature_row["D_endpoint_fkl"] = (
             float(tokens[horizon - 1]["d_coarse_fkl"]) if horizon - 1 >= 0 else None
         )
+        endpoint_tokens = tokens[horizon - 1] if horizon - 1 >= 0 else {}
+        feature_row["C_h_16"] = (
+            float(endpoint_tokens["C_h_16"])
+            if horizon - 1 >= 0 and "C_h_16" in endpoint_tokens
+            else None
+        )
+        feature_row["O_h_16"] = (
+            float(endpoint_tokens["O_h_16"])
+            if horizon - 1 >= 0 and "O_h_16" in endpoint_tokens
+            else None
+        )
         for window in (32, 64):
             feature_row[f"fkl_takeoff_{window}"] = window_mean(
                 "d_coarse_fkl", horizon, window
@@ -1667,10 +1790,12 @@ def derive_salvaged_features(
 
 SALVAGE_FEATURES: dict[str, str] = {
     "position": "position",
+    "C_h_16": "C_h_16",
     "M_h_4": "M_h_4",
     "M_h_16": "M_h_16",
     "M_h_64": "M_h_64",
     "M_h_100": "M_h_100",
+    "O_h_16": "O_h_16",
     "D_endpoint_fkl": "D_endpoint_fkl",
     "fkl_takeoff_32": "fkl_takeoff_32",
     "fkl_takeoff_64": "fkl_takeoff_64",
@@ -1684,6 +1809,7 @@ SALVAGE_FEATURES: dict[str, str] = {
 MODEL_SETS: dict[str, tuple[str, ...]] = {
     "M0_position": ("position",),
     "M1_compat_partial": ("M_h_16",),
+    "M1_compat": ("C_h_16", "M_h_16", "O_h_16"),
     "M2_takeoff": ("fkl_takeoff_32", "fkl_takeoff_64"),
     "M3_mechanistic_lite": ("position", "M_h_16", "fkl_takeoff_64", "delta_handoff_64"),
 }
