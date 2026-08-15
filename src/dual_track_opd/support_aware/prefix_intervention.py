@@ -595,23 +595,42 @@ def _aggregate(output_dir: Path, expected_uids: Sequence[str], config: Intervent
     rollouts = [item for uid in completed for item in by_uid[uid]["rollouts"]]
     units = [item for uid in completed for item in by_uid[uid]["intervention_units"]]
 
-    unit_by_key = {
-        (str(row["sample_uid"]), str(row["arm"]), int(row["horizon"])): row
-        for row in units if not row.get("skipped_reason")
-    }
+    units_by_key: dict[tuple[str, str, int], list[dict[str, Any]]] = defaultdict(list)
+    for row in units:
+        if row.get("skipped_reason"):
+            continue
+        units_by_key[(str(row["sample_uid"]), str(row["arm"]), int(row["horizon"]))].append(row)
     rescue_rows = []
     minimal_rescue = []
     for uid in completed:
-        baseline = unit_by_key.get((uid, "unaided", 0))
-        if baseline is None:
+        baselines = units_by_key.get((uid, "unaided", 0))
+        if not baselines:
             continue
         first_rescue = None
         for horizon in config.horizons:
-            teacher = unit_by_key.get((uid, "teacher_prefix", horizon))
-            wrong = unit_by_key.get((uid, "wrong_student_prefix", horizon))
-            if teacher is None or wrong is None:
+            teacher_units = units_by_key.get((uid, "teacher_prefix", horizon), [])
+            wrong_units = units_by_key.get((uid, "wrong_student_prefix", horizon), [])
+            if not teacher_units or not wrong_units:
                 continue
-            rescue = _rescue_decision(uid, horizon, teacher, wrong, baseline, config)
+            # Stage-2 units (larger K, appended later) win for the confirmed
+            # horizon; the baseline must match the teacher arm's K.
+            rescue = None
+            for teacher in reversed(teacher_units):
+                K = int(teacher.get("K") or 0)
+                wrong = next(
+                    (row for row in reversed(wrong_units) if int(row.get("K") or 0) == K),
+                    None,
+                )
+                baseline = next(
+                    (row for row in reversed(baselines) if int(row.get("K") or 0) == K),
+                    None,
+                )
+                if wrong is None or baseline is None:
+                    continue
+                rescue = _rescue_decision(uid, horizon, teacher, wrong, baseline, config)
+                break
+            if rescue is None:
+                continue
             rescue_rows.append(rescue)
             if rescue["meets_preregistered_rescue_rule"] and first_rescue is None:
                 first_rescue = rescue

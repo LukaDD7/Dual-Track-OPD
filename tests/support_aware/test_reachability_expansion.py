@@ -17,6 +17,7 @@ from dual_track_opd.support_aware.reachability_expansion import (
 from dual_track_opd.support_aware.proposal_feasibility import ProposalConfig, select_prompt_records
 from dual_track_opd.support_aware.prefix_intervention import (
     InterventionConfig,
+    _aggregate,
     _rescue_decision,
     load_config as load_intervention_config,
 )
@@ -256,3 +257,66 @@ def test_proposal_selection_pool256_manifest(tmp_path: Path) -> None:
     by_uid = {record["sample_uid"]: record for record in records}
     assert by_uid["geo3k:r1"]["k32_summary"]["observed_stratum"] == "rare_success"
     assert by_uid["geo3k:m1"]["k32_summary"]["observed_stratum"] == "mixed_support"
+
+
+def test_aggregate_adaptive_stage_mix_matches_baseline_k(tmp_path: Path) -> None:
+    """Stage-2 K=8 units must not corrupt stage-1 K=4 horizon decisions."""
+
+    uid = "p0"
+    def unit(arm: str, horizon: int, K: int, correct: int) -> dict:
+        return {
+            "sample_uid": uid,
+            "arm": arm,
+            "horizon": horizon,
+            "K": K,
+            "correct_count": correct,
+            "pass_rate": correct / K,
+            "expected_U8": 0.5,
+            "skipped_reason": None,
+        }
+
+    units = [
+        unit("unaided", 0, 4, 1),
+        unit("teacher_prefix", 64, 4, 2),
+        unit("wrong_student_prefix", 64, 4, 0),
+        unit("teacher_prefix", 128, 4, 3),
+        unit("wrong_student_prefix", 128, 4, 0),
+        unit("unaided", 0, 8, 2),
+        unit("teacher_prefix", 128, 8, 6),
+        unit("wrong_student_prefix", 128, 8, 0),
+    ]
+    result_dir = tmp_path / "prompt_results"
+    result_dir.mkdir()
+    (result_dir / "p0.json").write_text(
+        json.dumps(
+            {"schema_version": "x", "sample_uid": uid, "intervention_units": units, "rollouts": []}
+        ),
+        encoding="utf-8",
+    )
+    config = _intervention_config(
+        horizons=(64, 128),
+        stage1_k=4,
+        stage2_k=8,
+        adaptive_confirm=True,
+        rescue_min_mean_lift=0.20,
+        rescue_min_probability=0.90,
+        seed=7,
+    )
+    summary = _aggregate(tmp_path, [uid], config)
+    assert summary["rescue_comparison_count"] == 2
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "rescue_comparisons.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    by_horizon = {int(row["horizon"]): row for row in rows}
+    assert by_horizon[64]["rescue_K"] == 4
+    assert by_horizon[64]["rescue_stage"] == "stage1"
+    assert by_horizon[64]["meets_preregistered_rescue_rule"] is False
+    assert by_horizon[128]["rescue_K"] == 8
+    assert by_horizon[128]["rescue_stage"] == "stage2"
+    assert by_horizon[128]["meets_preregistered_rescue_rule"] is True
+    minimal = [
+        json.loads(line)
+        for line in (tmp_path / "minimal_rescue_prefixes.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert [row["horizon"] for row in minimal] == [128]
