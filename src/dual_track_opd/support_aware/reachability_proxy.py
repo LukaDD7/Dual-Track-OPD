@@ -833,9 +833,15 @@ def _score_trace(
         student_tail = torch.clamp(1.0 - student_mass, min=config.epsilon)
         student_tail_logp = student_tail.log()
 
-        q_i = teacher_values.exp()
-        d_t = (q_i * (teacher_values - student_at_teacher_ids)).sum(dim=-1) + (
-            teacher_tail * (teacher_tail_logp - student_tail_logp)
+        # Cross-model KL: teacher Top-100 values and tail live on the teacher
+        # device; move them to the student device for the per-token math.
+        teacher_values_on_student = teacher_values.to(student_logp.device)
+        teacher_tail_on_student = teacher_tail.to(student_logp.device)
+        teacher_tail_logp_on_student = teacher_tail_logp.to(student_logp.device)
+        q_i = teacher_values_on_student.exp()
+        d_t = (q_i * (teacher_values_on_student - student_at_teacher_ids)).sum(dim=-1) + (
+            teacher_tail_on_student
+            * (teacher_tail_logp_on_student - student_tail_logp)
         )
         teacher_mass_residual = teacher_topk_mass + teacher_tail - 1.0
         student_mass_residual = student_mass + student_tail - 1.0
