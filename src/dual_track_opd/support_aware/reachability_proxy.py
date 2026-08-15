@@ -584,6 +584,175 @@ def _auroc(scores: Sequence[float], labels: Sequence[bool]) -> float:
     return (rank_sum - positives * (positives + 1) / 2.0) / (positives * negatives)
 
 
+def tie_correct_auroc(scores: Sequence[float], labels: Sequence[bool]) -> float:
+    """Tie-correct (Mann-Whitney) AUROC; ties share the average rank."""
+
+    pairs = sorted(zip(scores, labels), key=lambda item: item[0])
+    positives = sum(1 for _, label in pairs if label)
+    negatives = len(pairs) - positives
+    if positives == 0 or negatives == 0:
+        return float("nan")
+    rank_sum = 0.0
+    index = 0
+    while index < len(pairs):
+        end = index + 1
+        while end < len(pairs) and pairs[end][0] == pairs[index][0]:
+            end += 1
+        average_rank = (index + 1 + end) / 2.0
+        rank_sum += average_rank * sum(1 for _, label in pairs[index:end] if label)
+        index = end
+    return (rank_sum - positives * (positives + 1) / 2.0) / (positives * negatives)
+
+
+def fit_l2_logistic(
+    features: Sequence[Sequence[float]],
+    labels: Sequence[bool],
+    *,
+    l2: float = 1.0,
+    iterations: int = 50,
+) -> tuple[list[float], float]:
+    """L2-regularized logistic regression via iteratively reweighted least squares."""
+
+    import numpy as np
+
+    X = np.asarray(features, dtype=np.float64)
+    y = np.asarray(labels, dtype=np.float64)
+    if X.ndim != 2 or len(X) != len(y):
+        raise ValueError("features and labels must align")
+    n, d = X.shape
+    if n < 2 or d < 1:
+        raise ValueError("need at least two rows and one feature")
+    mean = X.mean(axis=0)
+    std = X.std(axis=0)
+    std[std == 0] = 1.0
+    Z = (X - mean) / std
+    weights = np.ones(n)
+    beta = np.zeros(d + 1)
+    for _ in range(iterations):
+        design = np.concatenate([np.ones((n, 1)), Z], axis=1)
+        eta = design @ beta
+        eta = np.clip(eta, -30, 30)
+        p = 1.0 / (1.0 + np.exp(-eta))
+        w = np.clip(p * (1.0 - p), 1e-9, None)
+        W = np.diag(w)
+        reg = np.eye(d + 1)
+        reg[0, 0] = 0.0
+        H = design.T @ W @ design + l2 * reg
+        grad = design.T @ (y - p)
+        try:
+            step = np.linalg.solve(H, grad)
+        except np.linalg.LinAlgError:
+            step = np.linalg.lstsq(H, grad, rcond=None)[0]
+        beta += step
+    scale = list((beta[1:] / std).tolist())
+    intercept = float(beta[0] - np.sum(beta[1:] * mean / std))
+    return scale, intercept
+
+
+def logistic_predict_proba(
+    features: Sequence[Sequence[float]],
+    weights: Sequence[float],
+    intercept: float,
+) -> list[float]:
+    """Sigmoid predictions from L2-logistic weights (standardized at fit time)."""
+
+    import numpy as np
+
+    X = np.asarray(features, dtype=np.float64)
+    eta = X @ np.asarray(weights) + intercept
+    return (1.0 / (1.0 + np.exp(-np.clip(eta, -30, 30)))).tolist()
+
+
+def cluster_bootstrap_metrics(
+    prompt_ids: Sequence[str],
+    scores: Sequence[float],
+    labels: Sequence[bool],
+    *,
+    seed: int,
+    resamples: int = 2000,
+) -> dict[str, list[float | None]]:
+    """Prompt-cluster bootstrap: resample prompts, carrying all their rows."""
+
+    import random
+
+    rng = random.Random(seed)
+    grouped: dict[str, list[tuple[float, bool]]] = defaultdict(list)
+    for uid, score, label in zip(prompt_ids, scores, labels):
+        grouped[str(uid)].append((float(score), bool(label)))
+    keys = sorted(grouped)
+    auroc_values: list[float] = []
+    auprc_values: list[float] = []
+    for _ in range(resamples):
+        sampled_scores: list[float] = []
+        sampled_labels: list[bool] = []
+        for _ in range(len(keys)):
+            for score, label in grouped[rng.choice(keys)]:
+                sampled_scores.append(score)
+                sampled_labels.append(label)
+        if not any(sampled_labels) or all(sampled_labels):
+            continue
+        auroc_values.append(tie_correct_auroc(sampled_scores, sampled_labels))
+        auprc_values.append(_auprc(sampled_scores, sampled_labels))
+    return {
+        "auroc_ci95": _percentile_ci(auroc_values),
+        "auprc_ci95": _percentile_ci(auprc_values),
+    }
+
+
+def grouped_cv_auroc(
+    prompt_ids: Sequence[str],
+    features: Sequence[Sequence[float]],
+    labels: Sequence[bool],
+    *,
+    n_folds: int = 5,
+    repeats: int = 5,
+    seed: int = 20260815,
+    fit_model: bool = False,
+) -> dict[str, Any]:
+    """Grouped stratified repeated CV; prompts never split across folds."""
+
+    import random
+
+    rng = random.Random(seed)
+    by_prompt: dict[str, list[tuple[list[float], bool]]] = defaultdict(list)
+    for uid, feature_row, label in zip(prompt_ids, features, labels):
+        by_prompt[str(uid)].append((list(feature_row), bool(label)))
+    keys = sorted(by_prompt)
+    fold_aurocs: list[float] = []
+    fold_auprcs: list[float] = []
+    for repeat in range(repeats):
+        shuffled = list(keys)
+        rng.shuffle(shuffled)
+        folds: list[list[str]] = [[] for _ in range(n_folds)]
+        for index, uid in enumerate(shuffled):
+            folds[index % n_folds].append(uid)
+        for fold_index in range(n_folds):
+            test_uids = set(folds[fold_index])
+            train_uids = [uid for uid in keys if uid not in test_uids]
+            train_features = [
+                row for uid in train_uids for row, _ in by_prompt[uid]
+            ]
+            train_labels = [label for uid in train_uids for _, label in by_prompt[uid]]
+            test_features = [row for uid in sorted(test_uids) for row, _ in by_prompt[uid]]
+            test_labels = [label for uid in sorted(test_uids) for _, label in by_prompt[uid]]
+            if fit_model:
+                if not any(train_labels) or all(train_labels) or not test_labels:
+                    continue
+                weights, intercept = fit_l2_logistic(train_features, train_labels)
+                test_scores = logistic_predict_proba(test_features, weights, intercept)
+            else:
+                test_scores = [row[0] for row in test_features]
+            fold_aurocs.append(tie_correct_auroc(test_scores, test_labels))
+            fold_auprcs.append(_auprc(test_scores, test_labels))
+    return {
+        "n_folds": n_folds,
+        "repeats": repeats,
+        "mean_heldout_auroc": float(sum(fold_aurocs) / len(fold_aurocs)) if fold_aurocs else None,
+        "mean_heldout_auprc": float(sum(fold_auprcs) / len(fold_auprcs)) if fold_auprcs else None,
+        "fold_count": len(fold_aurocs),
+    }
+
+
 def _auprc(scores: Sequence[float], labels: Sequence[bool]) -> float:
     pairs = sorted(zip(scores, labels), key=lambda item: -item[0])
     if not any(labels):
@@ -1286,16 +1455,14 @@ def run_analyze(config: ProxyConfig, *, prompt_uids: Sequence[str] | None = None
     return analysis
 
 
-def run_analyze_combined(
+def _merge_sources(
     *,
     token_dirs: Sequence[str | Path],
     rescue_dirs: Sequence[str | Path],
     proposal_dirs: Sequence[str | Path],
-    output_dir: str | Path,
-    horizons: Sequence[int] = DEFAULT_HORIZONS,
-    heldout_seed: int = 20260815,
-) -> dict[str, Any]:
-    """CPU-only combined proxy study across multiple gold sources (e.g., 12+33+19)."""
+    horizons: Sequence[int],
+) -> tuple[list[dict[str, Any]], dict[str, int], list[dict[str, Any]]]:
+    """Merge token/rescue/proposal sources into one strict combined study."""
 
     token_rows: list[dict[str, Any]] = []
     seen_prompts: set[str] = set()
@@ -1344,16 +1511,36 @@ def run_analyze_combined(
         selected_traces=selected_traces,
         horizons=horizons,
     )
-    output = Path(output_dir).expanduser().resolve()
-    output.mkdir(parents=True, exist_ok=True)
-    csv_path = output / "proxy_study.csv"
-    csv_hash = write_proxy_study_csv(csv_path, study_rows)
-
     expected_minimal: dict[str, int] = {}
     for source in rescue_dirs:
         for row in read_jsonl(Path(source) / "minimal_rescue_prefixes.jsonl"):
             if row.get("meets_preregistered_rescue_rule") is True:
                 expected_minimal.setdefault(str(row["sample_uid"]), int(row["horizon"]))
+    return study_rows, expected_minimal, rescue_rows
+
+
+def run_analyze_combined(
+    *,
+    token_dirs: Sequence[str | Path],
+    rescue_dirs: Sequence[str | Path],
+    proposal_dirs: Sequence[str | Path],
+    output_dir: str | Path,
+    horizons: Sequence[int] = DEFAULT_HORIZONS,
+    heldout_seed: int = 20260815,
+) -> dict[str, Any]:
+    """CPU-only combined proxy study across multiple gold sources (e.g., 12+33+19)."""
+
+    study_rows, expected_minimal, _ = _merge_sources(
+        token_dirs=token_dirs,
+        rescue_dirs=rescue_dirs,
+        proposal_dirs=proposal_dirs,
+        horizons=horizons,
+    )
+    output = Path(output_dir).expanduser().resolve()
+    output.mkdir(parents=True, exist_ok=True)
+    csv_path = output / "proxy_study.csv"
+    csv_hash = write_proxy_study_csv(csv_path, study_rows)
+
     reproduced = {
         uid: {
             "expected_minimal_horizon": horizon,
@@ -1409,6 +1596,236 @@ def run_analyze_combined(
     return analysis
 
 
+def derive_salvaged_features(
+    token_rows: Sequence[Mapping[str, Any]],
+    study_rows: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Enrich (prompt, horizon) rows with features from the existing cache.
+
+    Salvageable today: position, M_h^K (student mass on teacher Top-K support),
+    endpoint/window NLL and FKL, handoff contrasts, cumulative barriers.
+    Not cached yet: student Top-100 IDs/overlap O_h, teacher mass on student
+    support C_h, exact entropies, and margins.
+    """
+
+    by_prompt = _group_by_prompt(token_rows)
+    enriched: list[dict[str, Any]] = []
+    for row in study_rows:
+        uid = str(row["prompt_id"])
+        horizon = int(row["horizon"])
+        tokens = by_prompt.get(uid)
+        if tokens is None:
+            raise ValueError(f"{uid}: scored token rows missing for study row")
+        trace_length = len(tokens)
+
+        def window_mean(key: str, start: int, length: int) -> float | None:
+            low = max(0, start)
+            high = min(trace_length, start + length)
+            if high <= low:
+                return None
+            values = [float(tokens[index][key]) for index in range(low, high)]
+            return sum(values) / len(values)
+
+        student_at_teacher = (
+            [
+                float(value)
+                for value in tokens[horizon - 1]["student_p_logp_top100_at_teacher_ids"]
+            ]
+            if horizon - 1 >= 0
+            else []
+        )
+        feature_row = dict(row)
+        feature_row["trace_length"] = trace_length
+        for K in (4, 16, 64, 100):
+            feature_row[f"M_h_{K}"] = sum(
+                math.exp(value) for value in student_at_teacher[:K]
+            )
+        feature_row["D_endpoint_fkl"] = (
+            float(tokens[horizon - 1]["d_coarse_fkl"]) if horizon - 1 >= 0 else None
+        )
+        for window in (32, 64):
+            feature_row[f"fkl_takeoff_{window}"] = window_mean(
+                "d_coarse_fkl", horizon, window
+            )
+            feature_row[f"nll_takeoff_{window}"] = window_mean(
+                "student_nll", horizon, window
+            )
+            feature_row[f"fkl_past_{window}"] = window_mean(
+                "d_coarse_fkl", horizon - window, window
+            )
+            feature_row[f"nll_past_{window}"] = window_mean(
+                "student_nll", horizon - window, window
+            )
+        past_64 = feature_row["fkl_past_64"]
+        takeoff_64 = feature_row["fkl_takeoff_64"]
+        feature_row["delta_handoff_64"] = (
+            past_64 - takeoff_64 if past_64 is not None and takeoff_64 is not None else None
+        )
+        enriched.append(feature_row)
+    return enriched
+
+
+SALVAGE_FEATURES: dict[str, str] = {
+    "position": "position",
+    "M_h_4": "M_h_4",
+    "M_h_16": "M_h_16",
+    "M_h_64": "M_h_64",
+    "M_h_100": "M_h_100",
+    "D_endpoint_fkl": "D_endpoint_fkl",
+    "fkl_takeoff_32": "fkl_takeoff_32",
+    "fkl_takeoff_64": "fkl_takeoff_64",
+    "nll_takeoff_32": "nll_takeoff_32",
+    "nll_takeoff_64": "nll_takeoff_64",
+    "delta_handoff_64": "delta_handoff_64",
+    "cum_student_nll": "cum_student_nll",
+    "cum_top100_fkl_tail": "cum_top100_fkl_tail",
+}
+
+MODEL_SETS: dict[str, tuple[str, ...]] = {
+    "M0_position": ("position",),
+    "M1_compat_partial": ("M_h_16",),
+    "M2_takeoff": ("fkl_takeoff_32", "fkl_takeoff_64"),
+    "M3_mechanistic_lite": ("position", "M_h_16", "fkl_takeoff_64", "delta_handoff_64"),
+}
+
+
+def evaluate_prefix_study(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    seed: int = 20260815,
+    n_folds: int = 5,
+    repeats: int = 5,
+) -> dict[str, Any]:
+    """Prefix-level evaluation: every (prompt, horizon) row scored before labels."""
+
+    complete = [row for row in rows if row.get("rescue_gold") is not None]
+    prompt_ids = [str(row["prompt_id"]) for row in complete]
+    labels = [bool(row["rescue_gold"]) for row in complete]
+    evaluation: dict[str, Any] = {
+        "unit": "(prompt_id, horizon) rows",
+        "n_rows": len(complete),
+        "n_prompts": len({str(row["prompt_id"]) for row in complete}),
+        "n_positive_rows": sum(1 for value in labels if value),
+        "single_features": {},
+        "models": {},
+    }
+    for name, feature_key in SALVAGE_FEATURES.items():
+        valid = [
+            (uid, score, label)
+            for uid, row, label in zip(prompt_ids, complete, labels)
+            if (score := row.get(feature_key)) is not None
+        ]
+        if len(valid) < 4 or not any(label for _, _, label in valid) or all(
+            label for _, _, label in valid
+        ):
+            continue
+        scores = [float(score) for _, score, _ in valid]
+        row_labels = [bool(label) for _, _, label in valid]
+        row_uids = [str(uid) for uid, _, _ in valid]
+        evaluation["single_features"][name] = {
+            "auroc": tie_correct_auroc(scores, row_labels),
+            "auprc": _auprc(scores, row_labels),
+            "cluster_bootstrap": cluster_bootstrap_metrics(
+                row_uids, scores, row_labels, seed=seed
+            ),
+            "grouped_cv": grouped_cv_auroc(
+                row_uids, [[score] for score in scores], row_labels,
+                n_folds=n_folds, repeats=repeats, seed=seed, fit_model=False,
+            ),
+            "n_rows": len(valid),
+        }
+    for name, feature_keys in MODEL_SETS.items():
+        available = [key for key in feature_keys if key in SALVAGE_FEATURES]
+        if not available:
+            continue
+        feature_rows: list[list[float]] = []
+        valid_uids: list[str] = []
+        valid_labels: list[bool] = []
+        for row in complete:
+            values = [row.get(SALVAGE_FEATURES[key]) for key in available]
+            if any(value is None for value in values):
+                continue
+            feature_rows.append([float(value) for value in values])
+            valid_uids.append(str(row["prompt_id"]))
+            valid_labels.append(bool(row["rescue_gold"]))
+        if len(feature_rows) < 8 or not any(valid_labels) or all(valid_labels):
+            continue
+        evaluation["models"][name] = {
+            "features": available,
+            "grouped_cv": grouped_cv_auroc(
+                valid_uids, feature_rows, valid_labels,
+                n_folds=n_folds, repeats=repeats, seed=seed, fit_model=True,
+            ),
+            "n_rows": len(feature_rows),
+        }
+    # Null-feature audit: a random feature must stay at chance.
+    import random
+
+    rng = random.Random(seed)
+    null_scores = [rng.random() for _ in complete]
+    evaluation["null_feature_audit"] = {
+        "auroc": tie_correct_auroc(null_scores, labels),
+        "cluster_bootstrap": cluster_bootstrap_metrics(
+            prompt_ids, null_scores, labels, seed=seed, resamples=500
+        ),
+    }
+    return evaluation
+
+
+def run_salvage_analysis(
+    *,
+    token_dirs: Sequence[str | Path],
+    rescue_dirs: Sequence[str | Path],
+    proposal_dirs: Sequence[str | Path],
+    output_dir: str | Path,
+    horizons: Sequence[int] = DEFAULT_HORIZONS,
+    seed: int = 20260815,
+) -> dict[str, Any]:
+    """Phase-A CPU-only prefix-level analysis on the existing asymmetric cache."""
+
+    study_rows, expected_minimal, _ = _merge_sources(
+        token_dirs=token_dirs,
+        rescue_dirs=rescue_dirs,
+        proposal_dirs=proposal_dirs,
+        horizons=horizons,
+    )
+    token_rows: list[dict[str, Any]] = []
+    seen_prompts: set[str] = set()
+    for source in token_dirs:
+        for row in _read_jsonl_checked(Path(source) / "proxy_token_rows.jsonl"):
+            if str(row["prompt_id"]) in seen_prompts:
+                continue
+            token_rows.append(row)
+        seen_prompts.update(str(row["prompt_id"]) for row in token_rows)
+    enriched = derive_salvaged_features(token_rows, study_rows)
+    evaluation = evaluate_prefix_study(enriched, seed=seed)
+    analysis: dict[str, Any] = {
+        "schema_version": "reachability-prefix-salvage-v1",
+        "coverage": {
+            "prompts": len({row["prompt_id"] for row in study_rows}),
+            "rows": len(study_rows),
+            "rescue_positive_prompts": sum(
+                1
+                for uid in expected_minimal
+                if any(row["prompt_id"] == uid and row["rescue_gold"] for row in study_rows)
+            ),
+        },
+        "evaluation": evaluation,
+        "cache_limitations": [
+            "C_h (teacher mass on student Top-K support) not cached",
+            "O_h (Top-K overlap) not cached",
+            "exact student/teacher entropy and Top1-Top2 margins not cached",
+            "visual JS features not cached",
+        ],
+        "label": "partial: compatibility features C_h/O_h pending symmetric cache rescore",
+    }
+    output = Path(output_dir).expanduser().resolve()
+    output.mkdir(parents=True, exist_ok=True)
+    analysis_path = output / "proxy_prefix_salvage_analysis.json"
+    _write_json_atomic(analysis_path, analysis)
+    return analysis
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="phase", required=True)
@@ -1433,6 +1850,13 @@ def build_parser() -> argparse.ArgumentParser:
     combined.add_argument("--output-dir", required=True)
     combined.add_argument("--horizons", nargs="+", type=int, default=list(DEFAULT_HORIZONS))
     combined.add_argument("--heldout-seed", type=int, default=20260815)
+    salvage = sub.add_parser("salvage")
+    salvage.add_argument("--token-dirs", nargs="+", required=True)
+    salvage.add_argument("--rescue-dirs", nargs="+", required=True)
+    salvage.add_argument("--proposal-dirs", nargs="+", required=True)
+    salvage.add_argument("--output-dir", required=True)
+    salvage.add_argument("--horizons", nargs="+", type=int, default=list(DEFAULT_HORIZONS))
+    salvage.add_argument("--seed", type=int, default=20260815)
     return parser
 
 
@@ -1447,6 +1871,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             output_dir=args.output_dir,
             horizons=tuple(args.horizons),
             heldout_seed=args.heldout_seed,
+        )
+        return 0
+    if args.phase == "salvage":
+        run_salvage_analysis(
+            token_dirs=args.token_dirs,
+            rescue_dirs=args.rescue_dirs,
+            proposal_dirs=args.proposal_dirs,
+            output_dir=args.output_dir,
+            horizons=tuple(args.horizons),
+            seed=args.seed,
         )
         return 0
     config = load_config(args.config, args)

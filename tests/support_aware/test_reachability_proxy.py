@@ -18,8 +18,11 @@ from dual_track_opd.support_aware.reachability_proxy import (
     horizon_aggregates,
     load_config,
     teacher_trace_id,
+    tie_correct_auroc,
     write_proxy_study_csv,
     _complete_scored_prompts,
+    derive_salvaged_features,
+    evaluate_prefix_study,
     _purge_scored_rows,
     _selected_teacher_trace,
 )
@@ -260,6 +263,85 @@ def test_heldout_evaluation_is_deterministic() -> None:
         assert name in first
         assert "tau" in first[name]
         assert first[name]["within_prompt"]["n_prompts"] >= 0
+
+
+def test_tie_correct_auroc_known_value() -> None:
+    scores = [0.0, 0.0, 1.0, 1.0]
+    labels = [False, True, False, True]
+    assert tie_correct_auroc(scores, labels) == 0.5
+
+
+def test_null_feature_stays_at_chance() -> None:
+    import random
+
+    rng = random.Random(7)
+    rows = []
+    for index in range(40):
+        uid = f"p{index % 10}"
+        for horizon in (64, 128, 256, 512):
+            rows.append(
+                {
+                    "prompt_id": uid,
+                    "horizon": horizon,
+                    "rescue_gold": horizon >= (128 if index % 2 else 256),
+                    "null_feature": rng.random(),
+                    "position": horizon / 512,
+                }
+            )
+    evaluation = evaluate_prefix_study(rows, seed=11)
+    null_auroc = evaluation["null_feature_audit"]["auroc"]
+    assert 0.30 <= null_auroc <= 0.70
+    ci = evaluation["null_feature_audit"]["cluster_bootstrap"]["auroc_ci95"]
+    assert (ci[0] - 0.05) <= 0.5 <= (ci[1] + 0.05)
+
+
+def test_derive_salvaged_features_matches_hand_computation() -> None:
+    trace_length = 80
+    token_rows = []
+    for t in range(trace_length):
+        teacher_logps = [math.log(0.5 - 0.001 * t)] + [math.log(0.01)] * 99
+        student_at_teacher = [math.log(0.3 - 0.0005 * t)] + [math.log(0.02)] * 99
+        token_rows.append(
+            {
+                "prompt_id": "p0",
+                "position_index": t,
+                "student_nll": 0.5 + 0.01 * t,
+                "d_coarse_fkl": 0.2 + 0.005 * t,
+                "student_p_logp_top100_at_teacher_ids": student_at_teacher,
+                "teacher_trace_id": "p0:proposal-1:abc",
+            }
+        )
+    study_rows = [
+        {
+            "prompt_id": "p0",
+            "horizon": 16,
+            "rescue_gold": True,
+            "position": 16 / trace_length,
+            "cum_student_nll": 0.0,
+            "cum_top100_fkl_tail": 0.0,
+        }
+    ]
+    enriched = derive_salvaged_features(token_rows, study_rows)
+    row = enriched[0]
+    expected_m16 = math.exp(math.log(0.3 - 0.0005 * 15)) + 15 * math.exp(
+        math.log(0.02)
+    )
+    assert math.isclose(row["M_h_16"], expected_m16, rel_tol=1e-9)
+    assert math.isclose(
+        row["fkl_takeoff_32"],
+        sum(0.2 + 0.005 * t for t in range(16, 48)) / 32,
+        rel_tol=1e-9,
+    )
+    assert math.isclose(
+        row["fkl_past_32"], sum(0.2 + 0.005 * t for t in range(0, 16)) / 16, rel_tol=1e-9
+    )
+    assert math.isclose(
+        row["delta_handoff_64"],
+        (sum(0.2 + 0.005 * t for t in range(0, 16)) / 16)
+        - (sum(0.2 + 0.005 * t for t in range(16, 80)) / 64),
+        rel_tol=1e-9,
+    )
+    assert row["D_endpoint_fkl"] == 0.2 + 0.005 * 15
 
 
 def test_analyze_combined_pools_sources(tmp_path: Path) -> None:
