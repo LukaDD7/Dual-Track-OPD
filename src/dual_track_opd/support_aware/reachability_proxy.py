@@ -786,7 +786,11 @@ def evaluate_proxy_heldout(
         "test_prompts": sorted(test_set),
     }
     for name in ("position", "cum_student_nll", "cum_top100_fkl_tail"):
-        tau = _fit_horizon_tau(by_prompt, scaffoldable_train, name, horizons)
+        tau = (
+            _fit_horizon_tau(by_prompt, scaffoldable_train, name, horizons)
+            if scaffoldable_train
+            else None
+        )
         scores: list[float] = []
         labels: list[bool] = []
         for uid in sorted(test_set):
@@ -801,19 +805,20 @@ def evaluate_proxy_heldout(
             labels.append(scaffoldable)
         recall_at_1 = plus_minus_one = bin_distance = 0.0
         n_within = 0
-        for uid in sorted(test_set):
-            prompt_rows = by_prompt[uid]
-            gold_rows = [row for row in prompt_rows if row["rescue_gold"]]
-            if not gold_rows:
-                continue
-            h_star = min(int(row["horizon"]) for row in gold_rows)
-            scalar_by_h = {int(row["horizon"]): float(row[name]) for row in prompt_rows}
-            h_hat = min(scalar_by_h, key=lambda h: abs(scalar_by_h[h] - tau))
-            distance = abs(_horizon_bin(h_hat, horizons) - _horizon_bin(h_star, horizons))
-            recall_at_1 += 1.0 if distance == 0 else 0.0
-            plus_minus_one += 1.0 if distance <= 1 else 0.0
-            bin_distance += distance
-            n_within += 1
+        if tau is not None:
+            for uid in sorted(test_set):
+                prompt_rows = by_prompt[uid]
+                gold_rows = [row for row in prompt_rows if row["rescue_gold"]]
+                if not gold_rows:
+                    continue
+                h_star = min(int(row["horizon"]) for row in gold_rows)
+                scalar_by_h = {int(row["horizon"]): float(row[name]) for row in prompt_rows}
+                h_hat = min(scalar_by_h, key=lambda h: abs(scalar_by_h[h] - tau))
+                distance = abs(_horizon_bin(h_hat, horizons) - _horizon_bin(h_star, horizons))
+                recall_at_1 += 1.0 if distance == 0 else 0.0
+                plus_minus_one += 1.0 if distance <= 1 else 0.0
+                bin_distance += distance
+                n_within += 1
         result[name] = {
             "tau": tau,
             "test_auroc": _auroc(scores, labels),

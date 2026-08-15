@@ -252,7 +252,9 @@ def test_heldout_evaluation_is_deterministic() -> None:
             )
     first = evaluate_proxy_heldout(rows, seed=20260815)
     second = evaluate_proxy_heldout(rows, seed=20260815)
-    assert first == second
+    assert json.dumps(first, sort_keys=True, allow_nan=True) == json.dumps(
+        second, sort_keys=True, allow_nan=True
+    )
     assert len(first["train_prompts"]) + len(first["test_prompts"]) == 12
     for name in ("position", "cum_student_nll", "cum_top100_fkl_tail"):
         assert name in first
