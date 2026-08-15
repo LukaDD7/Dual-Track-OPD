@@ -63,12 +63,12 @@ class ProxyConfig:
     proposal_dir: str
     k32_run_dir: str
     cohort_dir: str
-    cohort_parquet_path: str | None = None
     pool256_dir: str
     causal_dir: str
     rescue_dir: str
     student_model_path: str
     teacher_model_path: str
+    cohort_parquet_path: str | None = None
     student_device: str = "cuda:0"
     teacher_device: str = "cuda:1"
     dtype: str = "bfloat16"
