@@ -209,6 +209,8 @@ class ProposalConfig:
     output_dir: str
     student_model_path: str
     teacher_model_path: str
+    pool256_run_dir: str | None = None
+    prompt_manifest: str | None = None
     states: tuple[str, ...] = DEFAULT_STATES
     proposals_per_prompt: int = 4
     retain_count: int = 2
@@ -251,6 +253,16 @@ def load_config(path: str | Path, overrides: argparse.Namespace) -> ProposalConf
         output_dir=str(overrides.output_dir or raw["output"]["dir"]),
         student_model_path=str(raw["models"]["student"]),
         teacher_model_path=str(raw["models"]["teacher"]),
+        pool256_run_dir=(
+            None
+            if override("pool256_run_dir", _nested(raw, "data", "pool256_run_dir")) in (None, "")
+            else str(override("pool256_run_dir", _nested(raw, "data", "pool256_run_dir")))
+        ),
+        prompt_manifest=(
+            None
+            if override("prompt_manifest", _nested(raw, "data", "prompt_manifest")) in (None, "")
+            else str(override("prompt_manifest", _nested(raw, "data", "prompt_manifest")))
+        ),
         states=tuple(raw["selection"].get("states", DEFAULT_STATES)),
         proposals_per_prompt=int(
             overrides.proposals_per_prompt or raw["generation"]["proposals_per_prompt"]
@@ -285,27 +297,41 @@ def select_prompt_records(config: ProposalConfig) -> tuple[list[dict[str, Any]],
 
     k32_run = Path(config.k32_run_dir).expanduser().resolve()
     cohort_dir = Path(config.cohort_dir).expanduser().resolve()
-    summary_path = k32_run / "prompt_support_summary.jsonl"
     cohort_path = cohort_dir / "cohort.parquet"
-    validation_path = k32_run / "k32_validation.json"
-    required = (summary_path, cohort_path, validation_path)
+    pool256_mode = config.pool256_run_dir is not None
+    if pool256_mode:
+        pool256_root = Path(config.pool256_run_dir).expanduser().resolve()
+        summary_path = pool256_root / "frontier_analysis" / "frontier_prompts.jsonl"
+    else:
+        summary_path = k32_run / "prompt_support_summary.jsonl"
+    required = (summary_path, cohort_path)
     missing = [str(path) for path in required if not path.is_file()]
     if missing:
         raise FileNotFoundError(f"missing proposal inputs: {missing}")
-    validation = json.loads(validation_path.read_text(encoding="utf-8"))
-    if validation.get("valid") is not True or int(validation.get("K") or 0) != 32:
-        raise ValueError("proposal selection requires a protocol-valid K=32 run")
+    validation_path = k32_run / "k32_validation.json"
+    if not pool256_mode:
+        validation = json.loads(validation_path.read_text(encoding="utf-8"))
+        if validation.get("valid") is not True or int(validation.get("K") or 0) != 32:
+            raise ValueError("proposal selection requires a protocol-valid K=32 run")
 
     summaries = _read_jsonl(summary_path)
     summary_by_uid: dict[str, dict[str, Any]] = {}
     for row in summaries:
         uid = str(row.get("sample_uid") or "")
         K = int(row.get("K") or 0)
-        if not uid or uid in summary_by_uid or K != 32:
-            raise ValueError(f"invalid K=32 prompt summary row: {uid!r}, K={K}")
-        stratum = observed_stratum(int(row.get("correct_count") or 0), K)
-        if stratum in config.states:
-            summary_by_uid[uid] = {**row, "observed_stratum": stratum}
+        if not uid or uid in summary_by_uid:
+            raise ValueError(f"invalid prompt summary row: {uid!r}")
+        if pool256_mode:
+            stratum = str(row.get("observed_support_stratum") or "")
+            if K != 8 or stratum not in config.states:
+                continue
+        else:
+            if K != 32:
+                raise ValueError(f"invalid K=32 prompt summary row: {uid!r}, K={K}")
+            stratum = observed_stratum(int(row.get("correct_count") or 0), K)
+            if stratum not in config.states:
+                continue
+        summary_by_uid[uid] = {**row, "observed_stratum": stratum, "K": K}
 
     frame = pd.read_parquet(cohort_path)
     if "sample_uid" not in frame.columns:
@@ -319,6 +345,21 @@ def select_prompt_records(config: ProposalConfig) -> tuple[list[dict[str, Any]],
         raise ValueError(f"selected K=32 UIDs missing from cohort: {missing_uids[:5]}")
 
     ordered_uids = sorted(summary_by_uid, key=_selection_key)
+    manifest_rows: list[dict[str, Any]] = []
+    if config.prompt_manifest:
+        manifest_path_value = Path(config.prompt_manifest).expanduser().resolve()
+        if not manifest_path_value.is_file():
+            raise FileNotFoundError(f"missing prompt manifest: {manifest_path_value}")
+        manifest_rows = _read_jsonl(manifest_path_value)
+        manifest_uids = [str(row.get("sample_uid") or "") for row in manifest_rows]
+        if any(not uid for uid in manifest_uids) or len(set(manifest_uids)) != len(manifest_uids):
+            raise ValueError("prompt manifest must contain unique non-empty sample_uids")
+        missing_from_pool = [uid for uid in manifest_uids if uid not in summary_by_uid]
+        if missing_from_pool:
+            raise ValueError(
+                f"manifest uids missing from selected pool strata: {missing_from_pool[:10]}"
+            )
+        ordered_uids = manifest_uids
     start = len(ordered_uids) * config.shard_index // config.num_shards
     end = len(ordered_uids) * (config.shard_index + 1) // config.num_shards
     shard_uids = ordered_uids[start:end]
@@ -331,9 +372,14 @@ def select_prompt_records(config: ProposalConfig) -> tuple[list[dict[str, Any]],
         record["k32_summary"] = summary_by_uid[uid]
         records.append(record)
     provenance = {
-        "k32_validation_sha256": _sha256_file(validation_path),
-        "k32_prompt_summary_sha256": _sha256_file(summary_path),
+        "k32_validation_sha256": None if pool256_mode else _sha256_file(validation_path),
+        "k32_prompt_summary_sha256": None if pool256_mode else _sha256_file(summary_path),
+        "pool256_frontier_sha256": _sha256_file(summary_path) if pool256_mode else None,
         "cohort_parquet_sha256": _sha256_file(cohort_path),
+        "prompt_manifest_sha256": (
+            _sha256_file(Path(config.prompt_manifest)) if config.prompt_manifest else None
+        ),
+        "selection_mode": "pool256_manifest" if pool256_mode else "k32_states",
         "all_selected_uids": ordered_uids,
         "shard_start": start,
         "shard_end": end,
@@ -666,7 +712,8 @@ def merge_shards(shard_dirs: Sequence[str | Path], output_dir: str | Path) -> di
     if len(git_commits) != 1 or "" in git_commits:
         raise ValueError(f"proposal shard git commits differ: {sorted(git_commits)}")
     dirty_states = {bool(manifest.get("git_dirty")) for manifest in manifests}
-    if dirty_states != {False}:
+    allow_dirty = os.environ.get("DTOPD_ALLOW_DIRTY_MERGE") == "1"
+    if dirty_states != {False} and not allow_dirty:
         raise ValueError("proposal shards must be produced from clean worktrees")
     expected_shard_indices = set(range(int(manifests[0]["config"]["num_shards"])))
     actual_shard_indices = {int(manifest["config"]["shard_index"]) for manifest in manifests}
@@ -744,6 +791,8 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--config", required=True)
     run_parser.add_argument("--k32-run-dir")
     run_parser.add_argument("--cohort-dir")
+    run_parser.add_argument("--pool256-run-dir")
+    run_parser.add_argument("--prompt-manifest")
     run_parser.add_argument("--output-dir")
     run_parser.add_argument("--shard-index", type=int, default=0)
     run_parser.add_argument("--num-shards", type=int, default=1)

@@ -1,0 +1,49 @@
+# Phase-5 adaptive rescue-gold expansion on the frozen 256-pool manifest.
+# Stage-1 K=4 probes all horizons; K=8 confirms only the first transition
+# interval.  Same stored rescue thresholds as Experiment B; no training.
+
+experiment:
+  name: reachability_expansion_intervention
+  objective: adaptive_k4_k8_rescue_gold_on_frozen_256_pool
+
+model:
+  student: ${DTOPD_MODEL_ROOT}/Qwen3-VL-4B-Instruct
+
+data:
+  proposal_dir: ${DTOPD_OUTPUT_ROOT}/support_aware_opd/proposal_feasibility_20260815_merged
+  k32_run_dir: ${DTOPD_OUTPUT_ROOT}/support_aware_opd/diag_full_k32_20260804_merged
+  cohort_dir: ${DTOPD_OUTPUT_ROOT}/support_aware_opd/k32_cohort_20260804
+  wrong_source_run_dir: ${DTOPD_OUTPUT_ROOT}/support_aware_opd/diag_full_20260802_256_merged.rescored-exact-v1
+  prompt_manifest: ${DTOPD_OUTPUT_ROOT}/support_aware_opd/reachability_proxy_20260814/expansion_manifest_20260815.jsonl
+
+intervention:
+  horizons: [64, 128, 256, 512]
+  stage1_k: 4
+  stage2_k: 8
+  adaptive_confirm: true
+  teacher_prefix_answer_free_required: true
+  wrong_student_prefix_control_required: true
+  fresh_unaided_control_required: true
+
+generation:
+  continuations_per_arm: 8
+  max_continuation_tokens: 2048
+  temperature: 0.7
+  top_p: 0.95
+  seed: 20260806
+  response_format: legacy_answer
+
+analysis:
+  posterior: jeffreys_beta_half_half
+  posterior_draws: 20000
+  group_utility_size: 8
+  rescue_min_mean_lift: 0.20
+  rescue_min_probability: 0.90
+
+hardware:
+  dtype: bfloat16
+  # The launcher exposes one physical GPU as logical cuda:0 per shard.
+  device: cuda:0
+
+output:
+  dir: ${DTOPD_OUTPUT_ROOT}/support_aware_opd/prefix_intervention_20260815

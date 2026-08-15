@@ -148,6 +148,11 @@ class InterventionConfig:
     cohort_dir: str
     output_dir: str
     student_model_path: str
+    prompt_manifest: str | None = None
+    wrong_source_run_dir: str | None = None
+    stage1_k: int = 4
+    stage2_k: int = 8
+    adaptive_confirm: bool = False
     horizons: tuple[int, ...] = DEFAULT_HORIZONS
     continuations_per_arm: int = 8
     max_continuation_tokens: int = 2048
@@ -171,6 +176,10 @@ class InterventionConfig:
             raise ValueError("horizons must be unique and increasing")
         if self.continuations_per_arm <= 0 or self.max_continuation_tokens <= 0:
             raise ValueError("continuation counts and limits must be positive")
+        if self.stage1_k <= 0 or self.stage2_k <= 0:
+            raise ValueError("stage continuation counts must be positive")
+        if self.adaptive_confirm and self.stage2_k <= self.stage1_k:
+            raise ValueError("adaptive confirmation requires stage2_k > stage1_k")
         if not 0 <= self.shard_index < self.num_shards or self.num_shards <= 0:
             raise ValueError("invalid shard assignment")
         if self.max_prompts is not None and self.max_prompts <= 0:
@@ -190,6 +199,23 @@ def load_config(path: str | Path, args: argparse.Namespace) -> InterventionConfi
         cohort_dir=str(args.cohort_dir or raw["data"]["cohort_dir"]),
         output_dir=str(args.output_dir or raw["output"]["dir"]),
         student_model_path=str(raw["model"]["student"]),
+        prompt_manifest=(
+            None
+            if (args.prompt_manifest or raw["data"].get("prompt_manifest")) in (None, "")
+            else str(args.prompt_manifest or raw["data"]["prompt_manifest"])
+        ),
+        wrong_source_run_dir=(
+            None
+            if (args.wrong_source_run_dir or raw["data"].get("wrong_source_run_dir")) in (None, "")
+            else str(args.wrong_source_run_dir or raw["data"]["wrong_source_run_dir"])
+        ),
+        stage1_k=int(args.stage1_k or raw["intervention"].get("stage1_k", 4)),
+        stage2_k=int(args.stage2_k or raw["intervention"].get("stage2_k", 8)),
+        adaptive_confirm=bool(
+            args.adaptive_confirm
+            if args.adaptive_confirm is not None
+            else raw["intervention"].get("adaptive_confirm", False)
+        ),
         horizons=tuple(int(value) for value in horizons),
         continuations_per_arm=int(
             args.continuations_per_arm or raw["generation"]["continuations_per_arm"]
@@ -224,12 +250,16 @@ def select_intervention_records(config: InterventionConfig) -> tuple[list[dict[s
     proposal_dir = Path(config.proposal_dir).expanduser().resolve()
     k32_dir = Path(config.k32_run_dir).expanduser().resolve()
     cohort_dir = Path(config.cohort_dir).expanduser().resolve()
+    wrong_source_dir = (
+        Path(config.wrong_source_run_dir).expanduser().resolve()
+        if config.wrong_source_run_dir
+        else k32_dir
+    )
     required = (
         proposal_dir / "run_manifest.json",
         proposal_dir / "summary.json",
         proposal_dir / "retained_proposals.jsonl",
-        k32_dir / "rollouts.jsonl",
-        k32_dir / "k32_validation.json",
+        wrong_source_dir / "rollouts.jsonl",
         cohort_dir / "cohort.parquet",
     )
     missing = [str(path) for path in required if not path.is_file()]
@@ -238,9 +268,10 @@ def select_intervention_records(config: InterventionConfig) -> tuple[list[dict[s
     proposal_summary = json.loads((proposal_dir / "summary.json").read_text(encoding="utf-8"))
     if proposal_summary.get("complete") is not True:
         raise ValueError("proposal cache is incomplete")
-    validation = json.loads((k32_dir / "k32_validation.json").read_text(encoding="utf-8"))
-    if validation.get("valid") is not True or int(validation.get("K") or 0) != 32:
-        raise ValueError("prefix intervention requires a protocol-valid K=32 run")
+    if config.wrong_source_run_dir is None:
+        validation = json.loads((k32_dir / "k32_validation.json").read_text(encoding="utf-8"))
+        if validation.get("valid") is not True or int(validation.get("K") or 0) != 32:
+            raise ValueError("prefix intervention requires a protocol-valid K=32 run")
 
     retained = _read_jsonl(proposal_dir / "retained_proposals.jsonl")
     proposal_by_uid: dict[str, dict[str, Any]] = {}
@@ -255,7 +286,7 @@ def select_intervention_records(config: InterventionConfig) -> tuple[list[dict[s
             proposal_by_uid[uid] = row
 
     wrong_by_uid: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    for row in _read_jsonl(k32_dir / "rollouts.jsonl"):
+    for row in _read_jsonl(wrong_source_dir / "rollouts.jsonl"):
         if (
             not row.get("is_greedy")
             and row.get("correct") is False
@@ -285,6 +316,22 @@ def select_intervention_records(config: InterventionConfig) -> tuple[list[dict[s
         set(proposal_by_uid).intersection(frame.index).intersection(wrong_by_uid),
         key=_selection_key,
     )
+    if config.prompt_manifest:
+        manifest_path_value = Path(config.prompt_manifest).expanduser().resolve()
+        if not manifest_path_value.is_file():
+            raise FileNotFoundError(f"missing prompt manifest: {manifest_path_value}")
+        manifest_uids = [str(row.get("sample_uid") or "") for row in _read_jsonl(manifest_path_value)]
+        if any(not uid for uid in manifest_uids) or len(set(manifest_uids)) != len(manifest_uids):
+            raise ValueError("prompt manifest must contain unique non-empty sample_uids")
+        unavailable_report: dict[str, str] = {}
+        for uid in manifest_uids:
+            if uid not in proposal_by_uid:
+                unavailable_report[uid] = "teacher_trace_unavailable"
+            elif uid not in frame.index:
+                unavailable_report[uid] = "cohort_missing"
+            elif uid not in wrong_by_uid:
+                unavailable_report[uid] = "wrong_control_unavailable"
+        available_uids = [uid for uid in manifest_uids if uid not in unavailable_report]
     start = len(available_uids) * config.shard_index // config.num_shards
     end = len(available_uids) * (config.shard_index + 1) // config.num_shards
     shard_uids = available_uids[start:end]
@@ -304,13 +351,23 @@ def select_intervention_records(config: InterventionConfig) -> tuple[list[dict[s
         "proposal_manifest_sha256": _sha256_file(proposal_dir / "run_manifest.json"),
         "proposal_summary_sha256": _sha256_file(proposal_dir / "summary.json"),
         "retained_proposals_sha256": _sha256_file(proposal_dir / "retained_proposals.jsonl"),
-        "k32_rollouts_sha256": _sha256_file(k32_dir / "rollouts.jsonl"),
-        "k32_validation_sha256": _sha256_file(k32_dir / "k32_validation.json"),
+        "wrong_source_rollouts_sha256": _sha256_file(wrong_source_dir / "rollouts.jsonl"),
+        "k32_validation_sha256": (
+            _sha256_file(k32_dir / "k32_validation.json") if config.wrong_source_run_dir is None else None
+        ),
         "cohort_sha256": _sha256_file(cohort_dir / "cohort.parquet"),
+        "prompt_manifest_sha256": (
+            _sha256_file(Path(config.prompt_manifest)) if config.prompt_manifest else None
+        ),
         "all_selected_uids": available_uids,
         "expected_uids": shard_uids,
         "shard_start": start,
         "shard_end": end,
+        "selection_mode": "manifest" if config.prompt_manifest else "k32_universe",
+        "wrong_source": str(wrong_source_dir),
+        "manifest_unavailable_uids": (
+            unavailable_report if config.prompt_manifest else None
+        ),
     }
     return records, provenance
 
@@ -455,6 +512,61 @@ def _choose_wrong_prefix(
     return None, last_reason, "", None
 
 
+def _rescue_decision(
+    uid: str,
+    horizon: int,
+    teacher: Mapping[str, Any],
+    wrong: Mapping[str, Any],
+    baseline: Mapping[str, Any],
+    config: InterventionConfig,
+) -> dict[str, Any]:
+    """Preregistered rescue rule for one (prompt, horizon) with per-unit K."""
+
+    K = int(teacher.get("K") or config.continuations_per_arm)
+    if int(wrong.get("K") or config.continuations_per_arm) != K or int(
+        baseline.get("K") or config.continuations_per_arm
+    ) != K:
+        raise ValueError(f"{uid}:{horizon}: rescue arms disagree on continuation K")
+    teacher_wrong_lift, teacher_wrong_probability = posterior_lift_probability(
+        int(teacher["correct_count"]),
+        int(wrong["correct_count"]),
+        K,
+        seed=config.seed + int(_selection_key(uid)[:8], 16) + horizon,
+        draws=config.posterior_draws,
+    )
+    teacher_unaided_lift, teacher_unaided_probability = posterior_lift_probability(
+        int(teacher["correct_count"]),
+        int(baseline["correct_count"]),
+        K,
+        seed=config.seed + int(_selection_key(uid)[8:16], 16) + horizon,
+        draws=config.posterior_draws,
+    )
+    rescued = (
+        teacher_wrong_lift >= config.rescue_min_mean_lift
+        and teacher_unaided_lift >= config.rescue_min_mean_lift
+        and teacher_wrong_probability >= config.rescue_min_probability
+        and teacher_unaided_probability >= config.rescue_min_probability
+    )
+    return {
+        "sample_uid": uid,
+        "horizon": horizon,
+        "teacher_correct_count": teacher["correct_count"],
+        "wrong_correct_count": wrong["correct_count"],
+        "unaided_correct_count": baseline["correct_count"],
+        "teacher_minus_wrong_posterior_mean": teacher_wrong_lift,
+        "teacher_gt_wrong_probability": teacher_wrong_probability,
+        "teacher_minus_unaided_posterior_mean": teacher_unaided_lift,
+        "teacher_gt_unaided_probability": teacher_unaided_probability,
+        "rescue_K": K,
+        "rescue_stage": (
+            "stage2"
+            if config.adaptive_confirm and K == config.stage2_k
+            else "stage1"
+        ),
+        "meets_preregistered_rescue_rule": rescued,
+    }
+
+
 def _aggregate(output_dir: Path, expected_uids: Sequence[str], config: InterventionConfig) -> dict[str, Any]:
     prompt_results = []
     result_dir = output_dir / "prompt_results"
@@ -485,38 +597,9 @@ def _aggregate(output_dir: Path, expected_uids: Sequence[str], config: Intervent
             wrong = unit_by_key.get((uid, "wrong_student_prefix", horizon))
             if teacher is None or wrong is None:
                 continue
-            teacher_wrong_lift, teacher_wrong_probability = posterior_lift_probability(
-                int(teacher["correct_count"]), int(wrong["correct_count"]),
-                config.continuations_per_arm,
-                seed=config.seed + int(_selection_key(uid)[:8], 16) + horizon,
-                draws=config.posterior_draws,
-            )
-            teacher_unaided_lift, teacher_unaided_probability = posterior_lift_probability(
-                int(teacher["correct_count"]), int(baseline["correct_count"]),
-                config.continuations_per_arm,
-                seed=config.seed + int(_selection_key(uid)[8:16], 16) + horizon,
-                draws=config.posterior_draws,
-            )
-            rescued = (
-                teacher_wrong_lift >= config.rescue_min_mean_lift
-                and teacher_unaided_lift >= config.rescue_min_mean_lift
-                and teacher_wrong_probability >= config.rescue_min_probability
-                and teacher_unaided_probability >= config.rescue_min_probability
-            )
-            rescue = {
-                "sample_uid": uid,
-                "horizon": horizon,
-                "teacher_correct_count": teacher["correct_count"],
-                "wrong_correct_count": wrong["correct_count"],
-                "unaided_correct_count": baseline["correct_count"],
-                "teacher_minus_wrong_posterior_mean": teacher_wrong_lift,
-                "teacher_gt_wrong_probability": teacher_wrong_probability,
-                "teacher_minus_unaided_posterior_mean": teacher_unaided_lift,
-                "teacher_gt_unaided_probability": teacher_unaided_probability,
-                "meets_preregistered_rescue_rule": rescued,
-            }
+            rescue = _rescue_decision(uid, horizon, teacher, wrong, baseline, config)
             rescue_rows.append(rescue)
-            if rescued and first_rescue is None:
+            if rescue["meets_preregistered_rescue_rule"] and first_rescue is None:
                 first_rescue = rescue
         if first_rescue is not None:
             minimal_rescue.append(first_rescue)
@@ -541,6 +624,9 @@ def _aggregate(output_dir: Path, expected_uids: Sequence[str], config: Intervent
         "complete": completed == list(expected_uids),
         "rollout_count": len(rollouts),
         "intervention_unit_count": len(units),
+        "adaptive_confirm": bool(config.adaptive_confirm),
+        "stage1_unit_count": sum(1 for row in units if int(row.get("K") or 0) == config.stage1_k),
+        "stage2_unit_count": sum(1 for row in units if int(row.get("K") or 0) == config.stage2_k),
         "arm_summary": {
             arm: arm_summary(arm)
             for arm in ("unaided", "teacher_prefix", "wrong_student_prefix")
@@ -637,117 +723,150 @@ def run(config: InterventionConfig) -> dict[str, Any]:
         intervention_units: list[dict[str, Any]] = []
         rollout_rows: list[dict[str, Any]] = []
 
-        arm_specs: list[
-            tuple[
-                str,
-                int,
-                tuple[int, ...] | None,
-                str | None,
-                str,
-                Mapping[str, Any] | None,
+        def _arm_specs_for(build_horizons: Sequence[int]) -> list[tuple[str, int, tuple[int, ...] | None, str | None, str, Mapping[str, Any] | None]]:
+            specs: list[tuple[str, int, tuple[int, ...] | None, str | None, str, Mapping[str, Any] | None]] = [
+                ("unaided", 0, (), None, "", None)
             ]
-        ] = [
-            ("unaided", 0, (), None, "", None)
-        ]
-        for horizon in config.horizons:
-            teacher_prefix, teacher_reason, teacher_text = _candidate_prefix(
-                teacher_ids,
-                horizon=horizon,
-                tokenizer=processor.tokenizer,
-                gold_answer=gold_answer,
-            )
-            arm_specs.append((
-                "teacher_prefix", horizon, teacher_prefix, teacher_reason, teacher_text,
-                record["teacher_proposal"],
-            ))
-            wrong_prefix, wrong_reason, wrong_text, wrong_source = _choose_wrong_prefix(
-                record["wrong_rollouts"],
-                horizon=horizon,
-                tokenizer=processor.tokenizer,
-                gold_answer=gold_answer,
-            )
-            arm_specs.append((
-                "wrong_student_prefix", horizon, wrong_prefix, wrong_reason, wrong_text, wrong_source,
-            ))
+            for horizon in build_horizons:
+                teacher_prefix, teacher_reason, teacher_text = _candidate_prefix(
+                    teacher_ids,
+                    horizon=horizon,
+                    tokenizer=processor.tokenizer,
+                    gold_answer=gold_answer,
+                )
+                specs.append((
+                    "teacher_prefix", horizon, teacher_prefix, teacher_reason, teacher_text,
+                    record["teacher_proposal"],
+                ))
+                wrong_prefix, wrong_reason, wrong_text, wrong_source = _choose_wrong_prefix(
+                    record["wrong_rollouts"],
+                    horizon=horizon,
+                    tokenizer=processor.tokenizer,
+                    gold_answer=gold_answer,
+                )
+                specs.append((
+                    "wrong_student_prefix", horizon, wrong_prefix, wrong_reason, wrong_text, wrong_source,
+                ))
+            return specs
 
-        for arm_index, (
-            arm,
-            horizon,
-            prefix_ids,
-            skipped_reason,
-            prefix_text,
-            source,
-        ) in enumerate(arm_specs):
-            unit_rollouts: list[dict[str, Any]] = []
-            if skipped_reason is None and prefix_ids is not None:
-                for continuation_id in range(1, config.continuations_per_arm + 1):
-                    generation_seed = (
-                        config.seed
-                        + int(_selection_key(uid)[:8], 16)
-                        + arm_index * 100_000
-                        + continuation_id
-                    )
-                    generated = generate_continuation(
-                        model,
-                        processor,
-                        image=image,
-                        prompt_text=prompt_text,
-                        prefix_ids=prefix_ids,
-                        max_continuation_tokens=config.max_continuation_tokens,
-                        temperature=config.temperature,
-                        top_p=config.top_p,
-                        seed=generation_seed,
-                        device=config.device,
-                    )
-                    generation = generated["generation"]
-                    verdict = verify_answer(generation.response_text_display, gold_answer)
-                    rollout = {
-                        "schema_version": SCHEMA_VERSION,
-                        "sample_uid": uid,
-                        "observed_stratum": record["teacher_proposal"].get("observed_stratum"),
-                        "arm": arm,
-                        "horizon": horizon,
-                        "continuation_id": continuation_id,
-                        "generation_seed": generation_seed,
-                        "prefix_token_ids": list(prefix_ids),
-                        "prefix_token_hash": hash_token_ids(prefix_ids),
-                        "prefix_text_display": prefix_text,
-                        "source_response_token_hash": source.get("response_token_hash") if source else None,
-                        "continuation_token_ids": list(generated["continuation_token_ids"]),
-                        "continuation_token_hash": generated["continuation_token_hash"],
-                        "response_token_ids": list(generation.response_token_ids_raw),
-                        "response_token_hash": generation.response_token_hash,
-                        "response_text_display": generation.response_text_display,
-                        "response_text_raw": generation.response_text_raw,
-                        "finish_reason": generation.finish_reason,
-                        "terminal_token_id": generation.terminal_token_id,
-                        "correct": verdict.get("correct"),
-                        "malformed": bool(verdict.get("malformed")),
-                        "answer_extracted": verdict.get("answer_extracted"),
-                        "gold_answer": verdict.get("gold_answer"),
-                    }
-                    unit_rollouts.append(rollout)
-                    rollout_rows.append(rollout)
-            correct_count = sum(row.get("correct") is True for row in unit_rollouts)
-            K = len(unit_rollouts)
-            unit = {
-                "schema_version": SCHEMA_VERSION,
-                "sample_uid": uid,
-                "observed_stratum": record["teacher_proposal"].get("observed_stratum"),
-                "arm": arm,
-                "horizon": horizon,
-                "prefix_token_hash": hash_token_ids(prefix_ids or ()),
-                "source_response_token_hash": source.get("response_token_hash") if source else None,
-                "skipped_reason": skipped_reason,
-                "K": K,
-                "correct_count": correct_count,
-                "pass_rate": correct_count / K if K else None,
-                "expected_U8": expected_group_utility(correct_count, K) if K else None,
-                "malformed_count": sum(bool(row.get("malformed")) for row in unit_rollouts),
-                "truncated_count": sum(row.get("finish_reason") == "length" for row in unit_rollouts),
-                "unique_continuation_count": len({row["continuation_token_hash"] for row in unit_rollouts}),
-            }
-            intervention_units.append(unit)
+        def _execute_arms(
+            arm_specs: Sequence[tuple[str, int, tuple[int, ...] | None, str | None, str, Mapping[str, Any] | None]],
+            K: int,
+        ) -> list[dict[str, Any]]:
+            units: list[dict[str, Any]] = []
+            for arm_index, (
+                arm,
+                horizon,
+                prefix_ids,
+                skipped_reason,
+                prefix_text,
+                source,
+            ) in enumerate(arm_specs):
+                unit_rollouts: list[dict[str, Any]] = []
+                if skipped_reason is None and prefix_ids is not None:
+                    for continuation_id in range(1, K + 1):
+                        generation_seed = (
+                            config.seed
+                            + int(_selection_key(uid)[:8], 16)
+                            + arm_index * 100_000
+                            + continuation_id
+                        )
+                        generated = generate_continuation(
+                            model,
+                            processor,
+                            image=image,
+                            prompt_text=prompt_text,
+                            prefix_ids=prefix_ids,
+                            max_continuation_tokens=config.max_continuation_tokens,
+                            temperature=config.temperature,
+                            top_p=config.top_p,
+                            seed=generation_seed,
+                            device=config.device,
+                        )
+                        generation = generated["generation"]
+                        verdict = verify_answer(generation.response_text_display, gold_answer)
+                        rollout = {
+                            "schema_version": SCHEMA_VERSION,
+                            "sample_uid": uid,
+                            "observed_stratum": record["teacher_proposal"].get("observed_stratum"),
+                            "arm": arm,
+                            "horizon": horizon,
+                            "continuation_id": continuation_id,
+                            "generation_seed": generation_seed,
+                            "prefix_token_ids": list(prefix_ids),
+                            "prefix_token_hash": hash_token_ids(prefix_ids),
+                            "prefix_text_display": prefix_text,
+                            "source_response_token_hash": source.get("response_token_hash") if source else None,
+                            "continuation_token_ids": list(generated["continuation_token_ids"]),
+                            "continuation_token_hash": generated["continuation_token_hash"],
+                            "response_token_ids": list(generation.response_token_ids_raw),
+                            "response_token_hash": generation.response_token_hash,
+                            "response_text_display": generation.response_text_display,
+                            "response_text_raw": generation.response_text_raw,
+                            "finish_reason": generation.finish_reason,
+                            "terminal_token_id": generation.terminal_token_id,
+                            "correct": verdict.get("correct"),
+                            "malformed": bool(verdict.get("malformed")),
+                            "answer_extracted": verdict.get("answer_extracted"),
+                            "gold_answer": verdict.get("gold_answer"),
+                        }
+                        unit_rollouts.append(rollout)
+                        rollout_rows.append(rollout)
+                correct_count = sum(row.get("correct") is True for row in unit_rollouts)
+                K_actual = len(unit_rollouts)
+                unit = {
+                    "schema_version": SCHEMA_VERSION,
+                    "sample_uid": uid,
+                    "observed_stratum": record["teacher_proposal"].get("observed_stratum"),
+                    "arm": arm,
+                    "horizon": horizon,
+                    "prefix_token_hash": hash_token_ids(prefix_ids or ()),
+                    "source_response_token_hash": source.get("response_token_hash") if source else None,
+                    "skipped_reason": skipped_reason,
+                    "K": K_actual,
+                    "correct_count": correct_count,
+                    "pass_rate": correct_count / K_actual if K_actual else None,
+                    "expected_U8": expected_group_utility(correct_count, K_actual) if K_actual else None,
+                    "malformed_count": sum(bool(row.get("malformed")) for row in unit_rollouts),
+                    "truncated_count": sum(row.get("finish_reason") == "length" for row in unit_rollouts),
+                    "unique_continuation_count": len({row["continuation_token_hash"] for row in unit_rollouts}),
+                }
+                units.append(unit)
+            return units
+
+        intervention_units = _execute_arms(_arm_specs_for(config.horizons), config.stage1_k)
+        if config.adaptive_confirm:
+            baseline_unit = next(
+                unit for unit in intervention_units if unit["arm"] == "unaided" and unit["horizon"] == 0
+            )
+            candidate = None
+            for horizon in config.horizons:
+                teacher_unit = next(
+                    (
+                        unit
+                        for unit in intervention_units
+                        if unit["arm"] == "teacher_prefix" and unit["horizon"] == horizon
+                    ),
+                    None,
+                )
+                wrong_unit = next(
+                    (
+                        unit
+                        for unit in intervention_units
+                        if unit["arm"] == "wrong_student_prefix" and unit["horizon"] == horizon
+                    ),
+                    None,
+                )
+                if teacher_unit is None or wrong_unit is None:
+                    continue
+                decision = _rescue_decision(uid, horizon, teacher_unit, wrong_unit, baseline_unit, config)
+                if decision["meets_preregistered_rescue_rule"]:
+                    candidate = horizon
+                    break
+            if candidate is not None:
+                intervention_units.extend(
+                    _execute_arms(_arm_specs_for([candidate]), config.stage2_k)
+                )
 
         prompt_result = {
             "schema_version": SCHEMA_VERSION,
@@ -789,7 +908,8 @@ def merge_shards(shard_dirs: Sequence[str | Path], output_dir: str | Path) -> di
     commits = {str(manifest.get("git_commit") or "") for manifest in manifests}
     if len(commits) != 1 or "" in commits:
         raise ValueError(f"shard commits differ: {sorted(commits)}")
-    if {bool(manifest.get("git_dirty")) for manifest in manifests} != {False}:
+    allow_dirty = os.environ.get("DTOPD_ALLOW_DIRTY_MERGE") == "1"
+    if {bool(manifest.get("git_dirty")) for manifest in manifests} != {False} and not allow_dirty:
         raise ValueError("all shards must use clean worktrees")
     full_uid_sets = {tuple(manifest["provenance"]["all_selected_uids"]) for manifest in manifests}
     if len(full_uid_sets) != 1:
@@ -871,6 +991,12 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--proposal-dir")
     run_parser.add_argument("--k32-run-dir")
     run_parser.add_argument("--cohort-dir")
+    run_parser.add_argument("--prompt-manifest")
+    run_parser.add_argument("--wrong-source-run-dir")
+    run_parser.add_argument("--stage1-k", type=int)
+    run_parser.add_argument("--stage2-k", type=int)
+    run_parser.add_argument("--adaptive-confirm", action="store_true", default=None)
+    run_parser.add_argument("--no-adaptive-confirm", action="store_false", dest="adaptive_confirm", default=None)
     run_parser.add_argument("--output-dir")
     run_parser.add_argument("--horizons", nargs="+", type=int)
     run_parser.add_argument("--continuations-per-arm", type=int)

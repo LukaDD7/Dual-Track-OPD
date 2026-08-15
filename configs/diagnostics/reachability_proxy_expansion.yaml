@@ -1,0 +1,35 @@
+# Phase-5 proxy scoring on the expanded rescue gold (brief 2026-08-14, §8).
+# Frozen student/teacher; inference/export only.
+
+experiment:
+  name: reachability_proxy_expansion_20260815
+  objective: score_frozen_traces_on_expanded_rescue_gold
+
+models:
+  student: ${DTOPD_MODEL_ROOT}/Qwen3-VL-4B-Instruct
+  teacher: ${DTOPD_MODEL_ROOT}/Qwen3-VL-32B-Instruct
+  shared_tokenizer_required: true
+
+data:
+  proposal_dir: ${DTOPD_OUTPUT_ROOT}/support_aware_opd/proposal_feasibility_20260815_merged
+  k32_run_dir: ${DTOPD_OUTPUT_ROOT}/support_aware_opd/diag_full_k32_20260804_merged
+  cohort_dir: ${DTOPD_OUTPUT_ROOT}/support_aware_opd/k32_cohort_20260804
+  pool256_dir: ${DTOPD_OUTPUT_ROOT}/support_aware_opd/diag_full_20260802_256_merged.rescored-exact-v1
+  causal_dir: ${DTOPD_OUTPUT_ROOT}/support_aware_opd/causal_state_probe_20260808_merged
+  rescue_dir: ${DTOPD_OUTPUT_ROOT}/support_aware_opd/prefix_intervention_20260815_merged
+  response_format: legacy_answer
+
+proxy:
+  top_k: 100
+  horizons: [64, 128, 256, 512]
+  epsilon: 1.0e-12
+  mass_tolerance: 1.0e-3
+  chunk_size: 64
+
+hardware:
+  student_device: cuda:0
+  teacher_device: cuda:1
+  dtype: bfloat16
+
+output:
+  dir: ${DTOPD_OUTPUT_ROOT}/support_aware_opd/reachability_proxy_20260815
