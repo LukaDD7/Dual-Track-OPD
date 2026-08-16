@@ -23,6 +23,7 @@ from dual_track_opd.support_aware.reachability_proxy import (
     _complete_scored_prompts,
     derive_salvaged_features,
     evaluate_prefix_study,
+    merge_token_shards,
     _per_token_symmetric_stats,
     _purge_scored_rows,
     _selected_teacher_trace,
@@ -439,6 +440,47 @@ def test_salvage_marks_missing_symmetric_fields() -> None:
     assert enriched[0]["O_h_16"] is None
     evaluation = evaluate_prefix_study(enriched)
     assert "M1_compat" not in evaluation["models"]
+
+
+def test_merge_token_shards_is_deterministic_and_strict(tmp_path: Path) -> None:
+    first = tmp_path / "a.jsonl"
+    second = tmp_path / "b.jsonl"
+    rows_p0 = _token_rows(80, "p0")
+    rows_p1 = _token_rows(80, "p1")
+    first.write_text(
+        "\n".join(json.dumps(row, sort_keys=True) for row in rows_p0) + "\n",
+        encoding="utf-8",
+    )
+    second.write_text(
+        "\n".join(json.dumps(row, sort_keys=True) for row in rows_p1) + "\n",
+        encoding="utf-8",
+    )
+    out_a = tmp_path / "merged_a"
+    out_b = tmp_path / "merged_b"
+    result_a = merge_token_shards([first, second], out_a)
+    result_b = merge_token_shards([first, second], out_b)
+    assert result_a["prompts"] == 2
+    assert result_a["rows"] == 160
+    assert result_a["output_sha256"] == result_b["output_sha256"]
+
+    partial = tmp_path / "partial.jsonl"
+    partial.write_text(
+        "\n".join(json.dumps(row, sort_keys=True) for row in rows_p0[:40]) + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError):
+        merge_token_shards([partial], tmp_path / "bad_out")
+
+    mismatched = [dict(row) for row in rows_p0]
+    for row in mismatched:
+        row["teacher_trace_id"] = "p0:proposal-2:deadbeef"
+    conflict = tmp_path / "conflict.jsonl"
+    conflict.write_text(
+        "\n".join(json.dumps(row, sort_keys=True) for row in mismatched) + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError):
+        merge_token_shards([conflict], tmp_path / "conflict_out")
 
 
 def test_analyze_combined_pools_sources(tmp_path: Path) -> None:

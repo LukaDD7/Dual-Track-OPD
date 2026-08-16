@@ -1302,10 +1302,22 @@ def _per_token_symmetric_stats(
     return stats
 
 
-def run_score(config: ProxyConfig, *, prompt_uids: Sequence[str] | None = None) -> dict[str, Any]:
+def run_score(
+    config: ProxyConfig,
+    *,
+    prompt_uids: Sequence[str] | None = None,
+    shard_index: int = 0,
+    num_shards: int = 1,
+) -> dict[str, Any]:
     output = _resolve_output(config)
-    with _exclusive_lock(output / "score.lock"):
-        return _run_score_impl(config, prompt_uids=prompt_uids)
+    lock_name = "score.lock" if num_shards <= 1 else f"score.s{shard_index}.lock"
+    with _exclusive_lock(output / lock_name):
+        return _run_score_impl(
+            config,
+            prompt_uids=prompt_uids,
+            shard_index=shard_index,
+            num_shards=num_shards,
+        )
 
 
 @contextlib.contextmanager
@@ -1333,8 +1345,16 @@ def _exclusive_lock(path: Path):
             handle.close()
 
 
-def _run_score_impl(config: ProxyConfig, *, prompt_uids: Sequence[str] | None = None) -> dict[str, Any]:
+def _run_score_impl(
+    config: ProxyConfig,
+    *,
+    prompt_uids: Sequence[str] | None = None,
+    shard_index: int = 0,
+    num_shards: int = 1,
+) -> dict[str, Any]:
     output = _resolve_output(config)
+    if num_shards <= 0 or not 0 <= shard_index < num_shards:
+        raise ValueError("invalid shard assignment")
     retained = _read_jsonl_checked(Path(config.proposal_dir) / "retained_proposals.jsonl")
     retained_uids = {str(row["sample_uid"]) for row in retained}
     if prompt_uids:
@@ -1353,6 +1373,9 @@ def _run_score_impl(config: ProxyConfig, *, prompt_uids: Sequence[str] | None = 
     selected_uids = [uid for uid in selected_uids if uid in retained_uids]
     if config.max_prompts is not None:
         selected_uids = selected_uids[: config.max_prompts]
+    start = len(selected_uids) * shard_index // num_shards
+    end = len(selected_uids) * (shard_index + 1) // num_shards
+    selected_uids = selected_uids[start:end]
 
     frame = _cohort_frame(config.cohort_dir, config.cohort_parquet_path)
     models = load_runtime_models(
@@ -1362,7 +1385,9 @@ def _run_score_impl(config: ProxyConfig, *, prompt_uids: Sequence[str] | None = 
         teacher_model_path=config.teacher_model_path,
         teacher_device=config.teacher_device,
     )
-    token_rows_path = output / "proxy_token_rows.jsonl"
+    token_rows_path = output / (
+        "proxy_token_rows.jsonl" if num_shards <= 1 else f"proxy_token_rows.s{shard_index}.jsonl"
+    )
     expected_traces = {
         uid: _selected_teacher_trace(retained, uid) for uid in selected_uids
     }
@@ -1412,7 +1437,11 @@ def _run_score_impl(config: ProxyConfig, *, prompt_uids: Sequence[str] | None = 
         }
     manifest["scored_prompts"] = len(pending)
     manifest["skipped_existing_prompts"] = skipped
-    manifest_path = output / "run_manifest.json"
+    manifest_path = output / (
+        "run_manifest.json" if num_shards <= 1 else f"run_manifest.s{shard_index}.json"
+    )
+    manifest["shard_index"] = shard_index
+    manifest["num_shards"] = num_shards
     _write_json_atomic(manifest_path, manifest)
     return manifest
 
@@ -1963,6 +1992,72 @@ def run_salvage_analysis(
     return analysis
 
 
+def merge_token_shards(
+    token_files: Sequence[str | Path],
+    output_dir: str | Path,
+) -> dict[str, Any]:
+    """Merge sharded symmetric-cache token files into one canonical JSONL."""
+
+    if not token_files:
+        raise ValueError("at least one token file is required")
+    rows_by_prompt: dict[str, dict[int, dict[str, Any]]] = defaultdict(dict)
+    prompt_order: list[str] = []
+    input_hashes: dict[str, str] = {}
+    for source in token_files:
+        path = Path(source).expanduser().resolve()
+        if not path.is_file():
+            raise FileNotFoundError(path)
+        input_hashes[str(path)] = _sha256(path)
+        for line in path.open(encoding="utf-8"):
+            if not line.strip():
+                continue
+            row = json.loads(line)
+            uid = str(row["prompt_id"])
+            if uid not in rows_by_prompt:
+                prompt_order.append(uid)
+            rows_by_prompt[uid][int(row["position_index"])] = row
+    for uid in prompt_order:
+        positions = rows_by_prompt[uid]
+        if not positions:
+            raise ValueError(f"{uid}: empty token rows")
+        trace_length = max(positions) + 1
+        if set(positions) != set(range(trace_length)):
+            raise ValueError(f"{uid}: non-contiguous token rows")
+        trace_ids = {str(positions[index].get("teacher_trace_id")) for index in range(trace_length)}
+        if len(trace_ids) != 1:
+            raise ValueError(f"{uid}: token rows disagree on teacher trace identity")
+
+    output = Path(output_dir).expanduser().resolve()
+    output.mkdir(parents=True, exist_ok=True)
+    token_path = output / "proxy_token_rows.jsonl"
+    row_count = 0
+    with token_path.open("w", encoding="utf-8") as handle:
+        for uid in sorted(prompt_order):
+            positions = rows_by_prompt[uid]
+            for index in sorted(positions):
+                handle.write(json.dumps(positions[index], ensure_ascii=False, sort_keys=True) + "\n")
+                row_count += 1
+    result = {
+        "schema_version": "reachability-token-merge-v1",
+        "token_files": [str(Path(value).expanduser().resolve()) for value in token_files],
+        "input_sha256": input_hashes,
+        "prompts": len(prompt_order),
+        "rows": row_count,
+        "output": str(token_path),
+        "output_sha256": _sha256(token_path),
+    }
+    manifest_path = output / "run_manifest.json"
+    if manifest_path.is_file():
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["token_merge"] = result
+        _write_json_atomic(manifest_path, manifest)
+    (output / "token_merge_report.json").write_text(
+        json.dumps(result, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    return result
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="phase", required=True)
@@ -1976,6 +2071,8 @@ def build_parser() -> argparse.ArgumentParser:
     score.add_argument("--teacher-device")
     score.add_argument("--max-prompts", type=int)
     score.add_argument("--prompt-uids", nargs="+")
+    score.add_argument("--shard-index", type=int, default=0)
+    score.add_argument("--num-shards", type=int, default=1)
     analyze = sub.add_parser("analyze")
     analyze.add_argument("--config", required=True)
     analyze.add_argument("--output-dir")
@@ -1994,6 +2091,9 @@ def build_parser() -> argparse.ArgumentParser:
     salvage.add_argument("--output-dir", required=True)
     salvage.add_argument("--horizons", nargs="+", type=int, default=list(DEFAULT_HORIZONS))
     salvage.add_argument("--seed", type=int, default=20260815)
+    merge_tokens = sub.add_parser("merge-tokens")
+    merge_tokens.add_argument("--token-files", nargs="+", required=True)
+    merge_tokens.add_argument("--output-dir", required=True)
     return parser
 
 
@@ -2020,11 +2120,19 @@ def main(argv: Sequence[str] | None = None) -> int:
             seed=args.seed,
         )
         return 0
+    if args.phase == "merge-tokens":
+        merge_token_shards(args.token_files, args.output_dir)
+        return 0
     config = load_config(args.config, args)
     if args.phase == "preflight":
         run_preflight(config)
     elif args.phase == "score":
-        run_score(config, prompt_uids=args.prompt_uids)
+        run_score(
+            config,
+            prompt_uids=args.prompt_uids,
+            shard_index=args.shard_index,
+            num_shards=args.num_shards,
+        )
     elif args.phase == "analyze":
         run_analyze(config, prompt_uids=args.prompt_uids)
     else:
