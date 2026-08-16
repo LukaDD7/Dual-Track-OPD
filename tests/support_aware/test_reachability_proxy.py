@@ -463,9 +463,11 @@ def test_merge_token_shards_is_deterministic_and_strict(tmp_path: Path) -> None:
     assert result_a["rows"] == 160
     assert result_a["output_sha256"] == result_b["output_sha256"]
 
+    partial_rows = [dict(row) for row in rows_p0[:40]]
+    partial_rows.pop(10)  # drop a middle position: must be rejected as non-contiguous
     partial = tmp_path / "partial.jsonl"
     partial.write_text(
-        "\n".join(json.dumps(row, sort_keys=True) for row in rows_p0[:40]) + "\n",
+        "\n".join(json.dumps(row, sort_keys=True) for row in partial_rows) + "\n",
         encoding="utf-8",
     )
     with pytest.raises(ValueError):
