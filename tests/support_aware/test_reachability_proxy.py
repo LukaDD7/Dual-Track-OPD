@@ -474,8 +474,10 @@ def test_merge_token_shards_is_deterministic_and_strict(tmp_path: Path) -> None:
         merge_token_shards([partial], tmp_path / "bad_out")
 
     mismatched = [dict(row) for row in rows_p0]
-    for row in mismatched:
-        row["teacher_trace_id"] = "p0:proposal-2:deadbeef"
+    for index, row in enumerate(mismatched):
+        row["teacher_trace_id"] = (
+            "p0:proposal-1:abc" if index < 40 else "p0:proposal-2:def"
+        )
     conflict = tmp_path / "conflict.jsonl"
     conflict.write_text(
         "\n".join(json.dumps(row, sort_keys=True) for row in mismatched) + "\n",
