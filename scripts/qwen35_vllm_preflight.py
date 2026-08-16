@@ -1,4 +1,4 @@
-"""GPU 预检：torch CUDA + vLLM 0.23 qwen3_5 引擎（vLLM spawn 需要真实文件作为 __main__）。
+"""GPU 预检：torch CUDA + vLLM qwen3_5 引擎（vLLM spawn 需要真实文件作为 __main__）。
 
 环境变量覆盖（均为可选）：
   PREFLIGHT_MODEL        默认 /inspire/hdd/global_user/mengweicheng-240108120092/lzy/models/Qwen3.5-4B
@@ -6,6 +6,8 @@
   PREFLIGHT_GPU_MEM      默认 0.3
   PREFLIGHT_MAX_MODEL_LEN 默认 2049
   PREFLIGHT_MAX_TOKENS   默认 8
+  PREFLIGHT_EAGER        默认 1；设 0 则开启 CUDA graphs（用于验证 vLLM #50445
+                         的 CUDA-graph warmup 是否在新 torch/vLLM 组合下崩溃）
 """
 
 import os
@@ -18,6 +20,7 @@ TP = int(os.environ.get("PREFLIGHT_TP", "1"))
 GPU_MEM = float(os.environ.get("PREFLIGHT_GPU_MEM", "0.3"))
 MAX_MODEL_LEN = int(os.environ.get("PREFLIGHT_MAX_MODEL_LEN", "2049"))
 MAX_TOKENS = int(os.environ.get("PREFLIGHT_MAX_TOKENS", "8"))
+EAGER = os.environ.get("PREFLIGHT_EAGER", "1") not in ("0", "false", "False")
 
 
 def main() -> None:
@@ -38,7 +41,7 @@ def main() -> None:
         tensor_parallel_size=TP,
         gpu_memory_utilization=GPU_MEM,
         max_model_len=MAX_MODEL_LEN,
-        enforce_eager=True,
+        enforce_eager=EAGER,
     )
     out = llm.generate(["1+1=?"], SamplingParams(max_tokens=MAX_TOKENS))
     print(f"[preflight] vllm qwen3_5 engine OK ({MODEL}, TP={TP}, mem={GPU_MEM}, max_len={MAX_MODEL_LEN}):",
