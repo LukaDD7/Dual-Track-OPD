@@ -29,7 +29,7 @@ uids = sorted({json.loads(line)['sample_uid'] for line in open(path)})
 print(' '.join(uids))
 ")"
 
-echo "Prescoring ${#UIDS} prompts into ${OUTPUT_ROOT}/support_aware_opd/reachability_proxy_20260815"
+echo "Prescoring $(wc -w <<< "${UIDS}") prompts into ${OUTPUT_ROOT}/support_aware_opd/reachability_proxy_20260815"
 exec "${PYTHON_BIN}" -u -m dual_track_opd.support_aware.reachability_proxy score \
     --config "${CONFIG}" \
     --prompt-uids ${UIDS}

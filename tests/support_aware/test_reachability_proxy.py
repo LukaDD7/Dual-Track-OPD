@@ -212,8 +212,18 @@ def test_complete_scored_prompts_checks_coverage_and_hash(tmp_path: Path) -> Non
     rows = _token_rows(80, "p0")
     for row in rows:
         row["teacher_trace_id"] = f"p0:proposal-1:{trace['response_token_hash'][:16]}"
+        row["student_top100_ids"] = [1, 2, 3]
     write(rows)
     assert _complete_scored_prompts(path, {"p0": trace}) == {"p0"}
+
+    stale = [dict(row) for row in rows]
+    for row in stale:
+        row.pop("student_top100_ids", None)
+    write(stale)
+    assert _complete_scored_prompts(path, {"p0": trace}) == set()
+    assert _complete_scored_prompts(
+        path, {"p0": trace}, require_symmetric_cache=False
+    ) == {"p0"}
 
     write(rows[:40])
     assert _complete_scored_prompts(path, {"p0": trace}) == set()

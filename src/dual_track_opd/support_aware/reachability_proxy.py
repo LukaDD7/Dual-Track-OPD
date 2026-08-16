@@ -1433,23 +1433,34 @@ def _purge_scored_rows(token_rows_path: Path, pending_uids: set[str]) -> None:
 def _complete_scored_prompts(
     token_rows_path: Path,
     expected_traces: Mapping[str, Mapping[str, Any]],
+    *,
+    require_symmetric_cache: bool = True,
 ) -> set[str]:
-    """Prompts whose token rows fully cover the trace and match its hash."""
+    """Prompts whose token rows fully cover the trace and match its hash.
+
+    With ``require_symmetric_cache`` (Phase-B default) a prompt is only
+    complete when its rows carry the symmetric Top-100 fields, so stale v1
+    caches are re-scored instead of being treated as done.
+    """
 
     if not token_rows_path.is_file():
         return set()
     rows_by_prompt: dict[str, dict[int, str]] = defaultdict(dict)
+    symmetric_ok: dict[str, bool] = defaultdict(bool)
     for line in token_rows_path.open(encoding="utf-8"):
         if not line.strip():
             continue
         row = json.loads(line)
-        rows_by_prompt[str(row["prompt_id"])][int(row["position_index"])] = str(
-            row["teacher_trace_id"]
-        )
+        uid = str(row["prompt_id"])
+        rows_by_prompt[uid][int(row["position_index"])] = str(row["teacher_trace_id"])
+        if "student_top100_ids" in row:
+            symmetric_ok[uid] = True
     complete: set[str] = set()
     for uid, trace in expected_traces.items():
         positions = rows_by_prompt.get(uid)
         if positions is None:
+            continue
+        if require_symmetric_cache and not symmetric_ok.get(uid):
             continue
         expected_length = len(trace.get("response_token_ids") or ())
         expected_hash_prefix = str(trace.get("response_token_hash") or "")[:16]
