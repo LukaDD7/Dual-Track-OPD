@@ -486,3 +486,41 @@ CUDA 13.x 应用最小驱动 >= 580 → **cu130/cu132 用户态栈在本节点�
 - 脚本：`scripts/setup_qwen35_cu129.sh`（切换 12.9 栈）→
   `scripts/run_qwen35_gpu_smoke.sh`（8 卡预检 + 自蒸馏 smoke）。
 - 需要先探测 GPU 节点到 `download.pytorch.org` / `wheels.vllm.ai` 的网络。
+
+## 11. GPU 实例台账（2026-08-16 实测，opd-lzy-lowp 系列）
+
+> 当前 cu132 主线所在实例。任何在该实例上跑的新实验都应核对本节，
+> 尤其是 NVLS/Fabric Manager 与 CUDA_VISIBLE_DEVICES 占用两项。
+
+### 11.1 硬件与驱动
+
+| 项 | 值 |
+|---|---|
+| 实例类型 | 共享低优先级（hostname `opd-lzy-lowp-*`），容器化，无外网 |
+| GPU | 8× NVIDIA H200，compute_cap **9.0 (SM90)**，各 143771 MiB（实际可用 ~139.8 GiB） |
+| 驱动 | **595.58.03**；nvidia-smi 显示 CUDA 13.2（MVC：CUDA 13.x 运行时需 driver ≥580） |
+| NVLink | **NV18 全互联 mesh**（任意 GPU 对 NV18），无跨 NUMA 掉速 |
+| 拓扑 | 双 NUMA：GPU0-3 ↔ NUMA0（CPU 0-47,96-143）；GPU4-7 ↔ NUMA1（CPU 48-95,144-191） |
+| NIC | NIC0-7 = mlx5_0..7（各对应一卡，PIX/NODE 本地）；NIC8/9 = mlx5_10/11；NIC10 = mlx5_bond_0；跨 NUMA 为 SYS |
+| CPU/内存（Ray 视角） | 160 CPU、8 GPU、~15.7 TiB 内存 |
+| 共享存储 | 项目数据在 GPFS/NFS（`/inspire/hdd/global_user/mengweicheng-240108120092/lzy/`）；vLLM 日志 `Filesystem type for checkpoints: GPFS` |
+
+### 11.2 运行时系统事实
+
+| 项 | 值 |
+|---|---|
+| 系统 nvcc | **不存在**（`command not found`）；编译工具链一律用独立 conda prefix `cuda132-toolchain` |
+| libcuda.so.1 | 非标准路径 `/lib/x86_64-linux-gnu/`（launcher 的 LD_LIBRARY_PATH 必须含它） |
+| Fabric Manager | **未运行/未安装**（`nvidia-smi -q` 中 `GPU Fabric GUID: N/A`、Fabric 段为空；无 `nv-fabricmanager` 进程/服务） |
+| NVLink SHARP (NVLS) | **不可用**：NCCL ≥2.28 默认开 NVLS 时集体通信报 `CUDA error 401 Failed to bind NVLink SHARP Multicast memory`；**必须 `NCCL_NVLS_ENABLE=0`**（NVLink P2P 不受影响） |
+| 并发负载 | 与其它租户/实验共享；vLLM 内存 profiling 曾因并发进程释放显存报错；正式跑需显式 `FORMAL_GPUS`/`SMOKE_GPUS` 且避开占用卡 |
+
+### 11.3 实例相关决策记录
+
+- 2026-08-16：确认 FM 缺失 → cu132 栈 smoke/formal/AB 全部默认 `NCCL_NVLS_ENABLE=0`；
+  AB 对照旧栈同样必须加（NCCL 2.28.9 也默认 NVLS）。
+- NVLS 恢复需要平台侧补齐 Fabric Manager（`systemctl start nv-fabricmanager`），
+  修好后 `NCCL_NVLS_ENABLE=1` 可重新验证大消息归约收益（nccl-tests
+  `all_reduce_perf` 对比 on/off 量化）。
+- 若换新实例（非 lowp/非容器），先跑 `scripts/hpc/audit_nccl_stack.sh` +
+  `collect_va_opd_gpu_facts.sh` 复核以上事实再决定是否仍关闭 NVLS。
