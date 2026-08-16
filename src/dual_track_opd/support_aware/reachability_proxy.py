@@ -1959,7 +1959,9 @@ def evaluate_prefix_study(
     )
 
     if strata:
-        strata_metrics: dict[str, dict[str, dict[str, float | int | None]]] = defaultdict(dict)
+        strata_metrics: dict[str, dict[str, dict[str, Any]]] = defaultdict(
+            lambda: defaultdict(lambda: {"n_rows": 0, "n_positive": 0, "scores": [], "labels": []})
+        )
         for name, feature_key in SALVAGE_FEATURES.items():
             for uid, row, label in zip(prompt_ids, complete, labels):
                 stratum = strata.get(str(uid))
@@ -1969,21 +1971,17 @@ def evaluate_prefix_study(
                 if score is None:
                     continue
                 oriented = direction.get(name, 1) * float(score)
-                bucket = strata_metrics[stratum].setdefault(
-                    name, {"n_rows": 0, "n_positive": 0, "scores": [], "labels": []}
-                )
+                bucket = strata_metrics[stratum][name]
                 bucket["n_rows"] += 1
                 bucket["n_positive"] += 1 if label else 0
                 bucket["scores"].append(oriented)
                 bucket["labels"].append(bool(label))
-            for stratum, features in strata_metrics.items():
-                for feature_name, bucket in features.items():
-                    if bucket["n_rows"] >= 4 and 0 < bucket["n_positive"] < bucket["n_rows"]:
-                        bucket["auroc"] = tie_correct_auroc(
-                            bucket["scores"], bucket["labels"]
-                        )
-                    bucket.pop("scores", None)
-                    bucket.pop("labels", None)
+        for stratum, features in strata_metrics.items():
+            for feature_name, bucket in features.items():
+                if bucket["n_rows"] >= 4 and 0 < bucket["n_positive"] < bucket["n_rows"]:
+                    bucket["auroc"] = tie_correct_auroc(bucket["scores"], bucket["labels"])
+                bucket.pop("scores", None)
+                bucket.pop("labels", None)
         evaluation["strata"] = {
             stratum: dict(features) for stratum, features in strata_metrics.items()
         }
