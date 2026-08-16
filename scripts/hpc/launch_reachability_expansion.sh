@@ -110,11 +110,12 @@ INTERVENTION_MERGED="${OUTPUT_ROOT}/support_aware_opd/${INTERVENTION_PREFIX}_mer
 
 echo "== Phase 5: frozen proxy scoring + analysis =="
 FIRST_PAIR="${GPU_PAIRS[0]}"
+REACH_PROXY_CONFIG="${REACH_PROXY_CONFIG:-${PROJECT_ROOT}/configs/diagnostics/reachability_proxy_expansion.yaml}"
 CUDA_VISIBLE_DEVICES="${FIRST_PAIR%%:*},${FIRST_PAIR##*:}" \
 "${PYTHON_BIN}" -m dual_track_opd.support_aware.reachability_proxy score \
-    --config "${PROJECT_ROOT}/configs/diagnostics/reachability_proxy_expansion.yaml"
+    --config "${REACH_PROXY_CONFIG}"
 CUDA_VISIBLE_DEVICES="${FIRST_PAIR%%:*},${FIRST_PAIR##*:}" \
 "${PYTHON_BIN}" -m dual_track_opd.support_aware.reachability_proxy analyze \
-    --config "${PROJECT_ROOT}/configs/diagnostics/reachability_proxy_expansion.yaml"
+    --config "${REACH_PROXY_CONFIG}"
 
 echo "DONE. See ${OUTPUT_ROOT}/support_aware_opd/reachability_proxy_20260815/"

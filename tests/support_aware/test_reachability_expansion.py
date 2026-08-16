@@ -115,6 +115,50 @@ def test_verify_manifest_rejects_mismatch(tmp_path: Path) -> None:
         verify_manifest(manifest, pool256)
 
 
+def test_freeze_manifest_excludes_previous_manifest(tmp_path: Path) -> None:
+    pool256 = tmp_path / "pool256"
+    rescue = tmp_path / "rescue"
+    output = tmp_path / "out"
+    rescue.mkdir()
+    strata = {
+        "rare_success": [f"geo3k:r{i}" for i in range(5)],
+        "no_correct_observed": [f"geo3k:n{i}" for i in range(6)],
+        "mixed_support": [f"geo3k:m{i}" for i in range(5)],
+    }
+    _frontier(pool256, strata)
+    previous = tmp_path / "previous.jsonl"
+    previous.write_text(
+        "\n".join(
+            json.dumps({"sample_uid": uid, "stratum": "rare_success"})
+            for uid in ("geo3k:r1", "geo3k:r2", "geo3k:n3", "geo3k:m4")
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    spec = ManifestSpec(
+        pool256_dir=str(pool256),
+        rescue_dir=str(rescue),
+        output_dir=str(output),
+        seed=20260816,
+        no_correct_count=3,
+        mixed_control_count=2,
+        exclude_manifest=str(previous),
+    )
+    report = freeze_manifest(spec)
+    assert report["excluded_previous_prompt_count"] == 4
+    assert report["stratum_counts"] == {
+        "rare_success": 3,
+        "no_correct_observed": 3,
+        "mixed_support": 2,
+    }
+    assert report["total_prompts"] == 8
+    manifest_path = output / "expansion_manifest_20260816.jsonl"
+    uids = [json.loads(line)["sample_uid"] for line in manifest_path.read_text().splitlines()]
+    for excluded in ("geo3k:r1", "geo3k:r2", "geo3k:n3", "geo3k:m4"):
+        assert excluded not in uids
+    assert verify_manifest(manifest_path, pool256)["verified"] is True
+
+
 def _intervention_config(**overrides) -> InterventionConfig:
     base = dict(
         proposal_dir="proposals",

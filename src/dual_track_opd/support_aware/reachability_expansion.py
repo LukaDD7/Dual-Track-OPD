@@ -42,6 +42,7 @@ class ManifestSpec:
     seed: int = 20260815
     no_correct_count: int = DEFAULT_NO_CORRECT_COUNT
     mixed_control_count: int = DEFAULT_MIXED_CONTROL_COUNT
+    exclude_manifest: str | None = None
 
     def validate(self) -> None:
         if not 0 <= self.no_correct_count <= 85:
@@ -70,6 +71,14 @@ def freeze_manifest(spec: ManifestSpec) -> dict[str, Any]:
     if rescue_path.is_file():
         rescue_uids = {str(row["sample_uid"]) for row in read_jsonl(rescue_path)}
 
+    exclude_uids: set[str] = set()
+    exclude_manifest_path = None
+    if spec.exclude_manifest:
+        exclude_manifest_path = Path(spec.exclude_manifest).expanduser().resolve()
+        exclude_uids = {
+            str(row["sample_uid"]) for row in read_jsonl(exclude_manifest_path)
+        }
+
     quotas = {
         "rare_success": None,
         "no_correct_observed": spec.no_correct_count,
@@ -80,6 +89,7 @@ def freeze_manifest(spec: ManifestSpec) -> dict[str, Any]:
     for stratum in STRATUM_ORDER:
         rows = by_stratum.get(stratum, [])
         rows = [row for row in rows if str(row["sample_uid"]) not in rescue_uids]
+        rows = [row for row in rows if str(row["sample_uid"]) not in exclude_uids]
         rows.sort(key=lambda row: _selection_key(str(row["sample_uid"])))
         quota = quotas[stratum]
         chosen = rows if quota is None else rows[:quota]
@@ -89,6 +99,11 @@ def freeze_manifest(spec: ManifestSpec) -> dict[str, Any]:
             "selected": len(chosen),
             "excluded_rescue_prompts": sum(
                 1 for row in by_stratum.get(stratum, []) if str(row["sample_uid"]) in rescue_uids
+            ),
+            "excluded_previous_prompts": sum(
+                1
+                for row in by_stratum.get(stratum, [])
+                if str(row["sample_uid"]) in exclude_uids
             ),
         }
         for row in chosen:
@@ -118,6 +133,8 @@ def freeze_manifest(spec: ManifestSpec) -> dict[str, Any]:
         "per_stratum": per_stratum,
         "total_prompts": len(selected),
         "excluded_rescue_prompt_count": len(rescue_uids),
+        "excluded_previous_prompt_count": len(exclude_uids),
+        "excluded_manifest": str(exclude_manifest_path) if exclude_manifest_path else None,
         "manifest": manifest_name,
         "manifest_sha256": sha256_file(manifest_path),
         "generated_at": "2026-08-15",
@@ -173,6 +190,7 @@ def build_parser() -> argparse.ArgumentParser:
     freeze.add_argument("--seed", type=int, default=20260815)
     freeze.add_argument("--no-correct-count", type=int, default=DEFAULT_NO_CORRECT_COUNT)
     freeze.add_argument("--mixed-control-count", type=int, default=DEFAULT_MIXED_CONTROL_COUNT)
+    freeze.add_argument("--exclude-manifest", default=None)
     verify = sub.add_parser("verify")
     verify.add_argument("--manifest", required=True)
     verify.add_argument("--pool256-dir", required=True)
@@ -190,6 +208,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 seed=args.seed,
                 no_correct_count=args.no_correct_count,
                 mixed_control_count=args.mixed_control_count,
+                exclude_manifest=args.exclude_manifest,
             )
         )
         print(json.dumps(report, indent=2, sort_keys=True))
