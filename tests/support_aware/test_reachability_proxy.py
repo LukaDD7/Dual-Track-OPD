@@ -355,7 +355,82 @@ def test_derive_salvaged_features_matches_hand_computation() -> None:
         - (sum(0.2 + 0.005 * t for t in range(16, 80)) / 64),
         rel_tol=1e-9,
     )
+    assert math.isclose(
+        row["delta_handoff_32"],
+        (sum(0.2 + 0.005 * t for t in range(0, 16)) / 16)
+        - (sum(0.2 + 0.005 * t for t in range(16, 48)) / 32),
+        rel_tol=1e-9,
+    )
     assert row["D_endpoint_fkl"] == 0.2 + 0.005 * 15
+
+
+def test_derive_c_h_o_h_k_slicing_and_endpoint_alignment() -> None:
+    trace_length = 64
+    token_rows = []
+    for t in range(trace_length):
+        # Student Top-100 ids: even ids; teacher Top-100 ids: 0..15 overlap.
+        student_ids = list(range(0, 200, 2))
+        teacher_ids = list(range(0, 100))
+        # Teacher logps at student ids: increasing with position.
+        teacher_at_student = [math.log(0.01 + 0.001 * t) for _ in student_ids]
+        teacher_at_student[0] = math.log(0.2 + 0.001 * t)
+        token_rows.append(
+            {
+                "prompt_id": "p0",
+                "position_index": t,
+                "student_nll": 0.5,
+                "d_coarse_fkl": 0.2,
+                "student_p_logp_top100_at_teacher_ids": [math.log(0.02)] * 100,
+                "teacher_logp_at_student_top100_ids": teacher_at_student,
+                "student_top100_ids": student_ids[:100],
+                "teacher_top100_ids": teacher_ids,
+                "C_h_16": sum(math.exp(value) for value in teacher_at_student[:16]),
+                "O_h_16": len(set(student_ids[:16]) & set(teacher_ids[:16])) / 16,
+                "teacher_trace_id": "p0:proposal-1:abc",
+            }
+        )
+    study_rows = [
+        {
+            "prompt_id": "p0",
+            "horizon": 16,
+            "rescue_gold": True,
+            "position": 16 / trace_length,
+            "cum_student_nll": 0.0,
+            "cum_top100_fkl_tail": 0.0,
+        }
+    ]
+    enriched = derive_salvaged_features(token_rows, study_rows)
+    row = enriched[0]
+    # K=4: teacher mass on first 4 student ids (first one is 0.215 at t=15).
+    expected_c4 = math.exp(math.log(0.2 + 0.001 * 15)) + 3 * math.exp(
+        math.log(0.01 + 0.001 * 15)
+    )
+    assert math.isclose(row["C_h_4"], expected_c4, rel_tol=1e-9)
+    assert math.isclose(row["O_h_4"], 2 / 4, rel_tol=1e-9)
+    assert math.isclose(row["O_h_16"], 8 / 16, rel_tol=1e-9)
+    assert math.isclose(row["O_h_64"], 32 / 64, rel_tol=1e-9)
+    # Derived K=16 reproduces the cached endpoint fields when present.
+    assert math.isclose(row["C_h_16_derived"], row["C_h_16"], rel_tol=1e-9)
+    assert math.isclose(row["O_h_16_derived"], row["O_h_16"], rel_tol=1e-9)
+    # Endpoint alignment +1: state at position h (index 16).
+    assert math.isclose(row["C_h_4_next"], 3 * math.exp(math.log(0.01 + 0.001 * 16)) + math.exp(math.log(0.2 + 0.001 * 16)), rel_tol=1e-9)
+    assert math.isclose(row["O_h_16_next"], 8 / 16, rel_tol=1e-9)
+    # Out-of-range alignment (h == trace length) stays None.
+    enriched_end = derive_salvaged_features(
+        token_rows,
+        [
+            {
+                "prompt_id": "p0",
+                "horizon": 64,
+                "rescue_gold": True,
+                "position": 1.0,
+                "cum_student_nll": 0.0,
+                "cum_top100_fkl_tail": 0.0,
+            }
+        ],
+    )
+    assert enriched_end[0]["C_h_64_next"] is None
+    assert enriched_end[0]["O_h_64_next"] is None
 
 
 def test_symmetric_stats_pure_torch() -> None:

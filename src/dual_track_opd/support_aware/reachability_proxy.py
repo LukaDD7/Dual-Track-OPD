@@ -1754,10 +1754,11 @@ def derive_salvaged_features(
 ) -> list[dict[str, Any]]:
     """Enrich (prompt, horizon) rows with features from the existing cache.
 
-    Salvageable today: position, M_h^K (student mass on teacher Top-K support),
-    endpoint/window NLL and FKL, handoff contrasts, cumulative barriers.
-    Not cached yet: student Top-100 IDs/overlap O_h, teacher mass on student
-    support C_h, exact entropies, and margins.
+    From the symmetric v2 cache we derive: position, both directional support
+    masses M_h^K / C_h^K and overlap O_h^K for K in {4,16,64} (K slicing of the
+    cached Top-100 arrays), endpoint/window NLL and FKL, handoff contrasts,
+    and cumulative barriers.  Endpoint-alignment sensitivity variants
+    (``*_next``) read the state at position h instead of h-1.
     """
 
     by_prompt = _group_by_prompt(token_rows)
@@ -1777,6 +1778,21 @@ def derive_salvaged_features(
                 return None
             values = [float(tokens[index][key]) for index in range(low, high)]
             return sum(values) / len(values)
+
+        def support_compat(endpoint_index: int) -> tuple[list[float], list[int], list[int]]:
+            """Teacher logps at student Top-100, student ids, teacher ids."""
+
+            if endpoint_index < 0 or endpoint_index >= trace_length:
+                return [], [], []
+            token = tokens[endpoint_index]
+            teacher_ids = token.get("teacher_q_top100_ids")
+            if teacher_ids is None:
+                teacher_ids = token.get("teacher_top100_ids", [])
+            return (
+                [float(value) for value in token.get("teacher_logp_at_student_top100_ids", [])],
+                [int(value) for value in token.get("student_top100_ids", [])],
+                [int(value) for value in teacher_ids],
+            )
 
         student_at_teacher = (
             [
@@ -1806,6 +1822,41 @@ def derive_salvaged_features(
             if horizon - 1 >= 0 and "O_h_16" in endpoint_tokens
             else None
         )
+        teacher_at_student, student_ids, teacher_ids = support_compat(horizon - 1)
+        # K=16 keeps the cached endpoint fields; K in {4,64} are derived K slices.
+        for K in (4, 64):
+            feature_row[f"C_h_{K}"] = (
+                sum(math.exp(value) for value in teacher_at_student[:K])
+                if teacher_at_student
+                else None
+            )
+            feature_row[f"O_h_{K}"] = (
+                len(set(student_ids[:K]) & set(teacher_ids[:K])) / K
+                if student_ids and teacher_ids
+                else None
+            )
+        feature_row["C_h_16_derived"] = feature_row["C_h_16"]
+        feature_row["O_h_16_derived"] = feature_row["O_h_16"]
+        if teacher_at_student:
+            feature_row["C_h_16_derived"] = (
+                sum(math.exp(value) for value in teacher_at_student[:16])
+            )
+        if student_ids and teacher_ids:
+            feature_row["O_h_16_derived"] = (
+                len(set(student_ids[:16]) & set(teacher_ids[:16])) / 16
+            )
+        next_teacher_at_student, next_student_ids, next_teacher_ids = support_compat(horizon)
+        for K in (4, 16, 64):
+            feature_row[f"C_h_{K}_next"] = (
+                sum(math.exp(value) for value in next_teacher_at_student[:K])
+                if next_teacher_at_student
+                else None
+            )
+            feature_row[f"O_h_{K}_next"] = (
+                len(set(next_student_ids[:K]) & set(next_teacher_ids[:K])) / K
+                if next_student_ids and next_teacher_ids
+                else None
+            )
         for window in (32, 64):
             feature_row[f"fkl_takeoff_{window}"] = window_mean(
                 "d_coarse_fkl", horizon, window
@@ -1819,6 +1870,11 @@ def derive_salvaged_features(
             feature_row[f"nll_past_{window}"] = window_mean(
                 "student_nll", horizon - window, window
             )
+        past_32 = feature_row["fkl_past_32"]
+        takeoff_32 = feature_row["fkl_takeoff_32"]
+        feature_row["delta_handoff_32"] = (
+            past_32 - takeoff_32 if past_32 is not None and takeoff_32 is not None else None
+        )
         past_64 = feature_row["fkl_past_64"]
         takeoff_64 = feature_row["fkl_takeoff_64"]
         feature_row["delta_handoff_64"] = (
@@ -1831,16 +1887,27 @@ def derive_salvaged_features(
 SALVAGE_FEATURES: dict[str, str] = {
     "position": "position",
     "C_h_16": "C_h_16",
+    "C_h_4": "C_h_4",
+    "C_h_64": "C_h_64",
+    "C_h_4_next": "C_h_4_next",
+    "C_h_16_next": "C_h_16_next",
+    "C_h_64_next": "C_h_64_next",
     "M_h_4": "M_h_4",
     "M_h_16": "M_h_16",
     "M_h_64": "M_h_64",
     "M_h_100": "M_h_100",
     "O_h_16": "O_h_16",
+    "O_h_4": "O_h_4",
+    "O_h_64": "O_h_64",
+    "O_h_4_next": "O_h_4_next",
+    "O_h_16_next": "O_h_16_next",
+    "O_h_64_next": "O_h_64_next",
     "D_endpoint_fkl": "D_endpoint_fkl",
     "fkl_takeoff_32": "fkl_takeoff_32",
     "fkl_takeoff_64": "fkl_takeoff_64",
     "nll_takeoff_32": "nll_takeoff_32",
     "nll_takeoff_64": "nll_takeoff_64",
+    "delta_handoff_32": "delta_handoff_32",
     "delta_handoff_64": "delta_handoff_64",
     "cum_student_nll": "cum_student_nll",
     "cum_top100_fkl_tail": "cum_top100_fkl_tail",
@@ -1880,16 +1947,27 @@ def evaluate_prefix_study(
     direction: dict[str, int] = {
         "position": 1,
         "C_h_16": 1,
+        "C_h_4": 1,
+        "C_h_64": 1,
+        "C_h_4_next": 1,
+        "C_h_16_next": 1,
+        "C_h_64_next": 1,
         "M_h_4": 1,
         "M_h_16": 1,
         "M_h_64": 1,
         "M_h_100": 1,
         "O_h_16": 1,
+        "O_h_4": 1,
+        "O_h_64": 1,
+        "O_h_4_next": 1,
+        "O_h_16_next": 1,
+        "O_h_64_next": 1,
         "D_endpoint_fkl": -1,
         "fkl_takeoff_32": -1,
         "fkl_takeoff_64": -1,
         "nll_takeoff_32": -1,
         "nll_takeoff_64": -1,
+        "delta_handoff_32": 1,
         "delta_handoff_64": 1,
         "cum_student_nll": -1,
         "cum_top100_fkl_tail": -1,
