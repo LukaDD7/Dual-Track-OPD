@@ -1861,6 +1861,7 @@ def evaluate_prefix_study(
     seed: int = 20260815,
     n_folds: int = 5,
     repeats: int = 5,
+    strata: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """Prefix-level evaluation: every (prompt, horizon) row scored before labels."""
 
@@ -1874,6 +1875,24 @@ def evaluate_prefix_study(
         "n_positive_rows": sum(1 for value in labels if value),
         "single_features": {},
         "models": {},
+    }
+    # Registered single-feature direction: higher oriented score = more viable.
+    direction: dict[str, int] = {
+        "position": 1,
+        "C_h_16": 1,
+        "M_h_4": 1,
+        "M_h_16": 1,
+        "M_h_64": 1,
+        "M_h_100": 1,
+        "O_h_16": 1,
+        "D_endpoint_fkl": -1,
+        "fkl_takeoff_32": -1,
+        "fkl_takeoff_64": -1,
+        "nll_takeoff_32": -1,
+        "nll_takeoff_64": -1,
+        "delta_handoff_64": 1,
+        "cum_student_nll": -1,
+        "cum_top100_fkl_tail": -1,
     }
     for name, feature_key in SALVAGE_FEATURES.items():
         valid = [
@@ -1891,6 +1910,7 @@ def evaluate_prefix_study(
         evaluation["single_features"][name] = {
             "auroc": tie_correct_auroc(scores, row_labels),
             "auprc": _auprc(scores, row_labels),
+            "direction": direction.get(name, 1),
             "cluster_bootstrap": cluster_bootstrap_metrics(
                 row_uids, scores, row_labels, seed=seed
             ),
@@ -1899,6 +1919,10 @@ def evaluate_prefix_study(
                 n_folds=n_folds, repeats=repeats, seed=seed, fit_model=False,
             ),
             "n_rows": len(valid),
+            "within_prompt_hstar": _within_prompt_from_horizon_map(
+                _feature_horizon_rows(complete, feature_key, direction.get(name, 1)),
+                sorted({int(row["horizon"]) for row in complete}),
+            ),
         }
     for name, feature_keys in MODEL_SETS.items():
         available = [key for key in feature_keys if key in SALVAGE_FEATURES]
@@ -1924,6 +1948,46 @@ def evaluate_prefix_study(
             ),
             "n_rows": len(feature_rows),
         }
+    evaluation["models"].update(
+        registered_model_evaluation(
+            complete,
+            MODEL_SETS,
+            n_folds=n_folds,
+            repeats=repeats,
+            seed=seed,
+        )
+    )
+
+    if strata:
+        strata_metrics: dict[str, dict[str, dict[str, float | int | None]]] = defaultdict(dict)
+        for name, feature_key in SALVAGE_FEATURES.items():
+            for uid, row, label in zip(prompt_ids, complete, labels):
+                stratum = strata.get(str(uid))
+                if not stratum:
+                    continue
+                score = row.get(feature_key)
+                if score is None:
+                    continue
+                oriented = direction.get(name, 1) * float(score)
+                bucket = strata_metrics[stratum].setdefault(
+                    name, {"n_rows": 0, "n_positive": 0, "scores": [], "labels": []}
+                )
+                bucket["n_rows"] += 1
+                bucket["n_positive"] += 1 if label else 0
+                bucket["scores"].append(oriented)
+                bucket["labels"].append(bool(label))
+            for stratum, features in strata_metrics.items():
+                for feature_name, bucket in features.items():
+                    if bucket["n_rows"] >= 4 and 0 < bucket["n_positive"] < bucket["n_rows"]:
+                        bucket["auroc"] = tie_correct_auroc(
+                            bucket["scores"], bucket["labels"]
+                        )
+                    bucket.pop("scores", None)
+                    bucket.pop("labels", None)
+        evaluation["strata"] = {
+            stratum: dict(features) for stratum, features in strata_metrics.items()
+        }
+
     # Null-feature audit: a random feature must stay at chance.
     import random
 
@@ -1936,6 +2000,198 @@ def evaluate_prefix_study(
         ),
     }
     return evaluation
+
+
+def _feature_horizon_rows(
+    rows: Sequence[Mapping[str, Any]],
+    feature_key: str,
+    direction: int,
+) -> dict[str, dict[int, tuple[float, bool]]]:
+    """Per-(prompt, horizon) oriented feature scores with labels."""
+
+    by_prompt: dict[str, dict[int, tuple[float, bool]]] = defaultdict(dict)
+    for row in rows:
+        score = row.get(feature_key)
+        if score is None:
+            continue
+        by_prompt[str(row["prompt_id"])][int(row["horizon"])] = (
+            direction * float(score),
+            bool(row["rescue_gold"]),
+        )
+    return by_prompt
+
+
+def _within_prompt_from_horizon_map(
+    by_prompt_horizon: Mapping[str, Mapping[int, tuple[float, bool]]],
+    horizons: Sequence[int],
+) -> dict[str, float | int | None]:
+    metrics: dict[str, float | int | None] = {
+        "n_prompts": 0,
+        "recall_at_1": 0.0,
+        "plus_minus_one_bin": 0.0,
+        "mean_abs_bin_distance": 0.0,
+        "pairwise_agreement": 0.0,
+    }
+    for uid, horizon_rows in by_prompt_horizon.items():
+        gold_horizons = [
+            horizon for horizon, (_, label) in horizon_rows.items() if label
+        ]
+        if not gold_horizons:
+            continue
+        h_star = min(gold_horizons)
+        h_hat = max(horizon_rows, key=lambda horizon: horizon_rows[horizon][0])
+        bin_star = list(horizons).index(h_star)
+        bin_hat = list(horizons).index(h_hat)
+        distance = abs(bin_hat - bin_star)
+        metrics["recall_at_1"] = float(metrics["recall_at_1"]) + (1.0 if distance == 0 else 0.0)
+        metrics["plus_minus_one_bin"] = float(metrics["plus_minus_one_bin"]) + (
+            1.0 if distance <= 1 else 0.0
+        )
+        metrics["mean_abs_bin_distance"] = float(metrics["mean_abs_bin_distance"]) + distance
+        agreements = sum(
+            1.0
+            for horizon in horizon_rows
+            if horizon != h_star and horizon_rows[horizon][0] <= horizon_rows[h_star][0]
+        )
+        metrics["pairwise_agreement"] = float(metrics["pairwise_agreement"]) + agreements / max(
+            1, len(horizon_rows) - 1
+        )
+        metrics["n_prompts"] = int(metrics["n_prompts"]) + 1
+    count = int(metrics["n_prompts"])
+    if count:
+        for key in ("recall_at_1", "plus_minus_one_bin", "mean_abs_bin_distance", "pairwise_agreement"):
+            metrics[key] = float(metrics[key]) / count
+    return metrics
+
+
+def registered_model_evaluation(
+    rows: Sequence[Mapping[str, Any]],
+    model_sets: Mapping[str, Sequence[str]],
+    *,
+    n_folds: int = 5,
+    repeats: int = 5,
+    seed: int = 20260815,
+) -> dict[str, Any]:
+    """OOF grouped-CV model evaluation with paired deltas and h* prediction."""
+
+    import random
+
+    rng = random.Random(seed)
+    by_prompt: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
+    for row in rows:
+        by_prompt[str(row["prompt_id"])].append(row)
+    keys = sorted(by_prompt)
+    horizons = sorted({int(row["horizon"]) for row in rows})
+
+    def feature_rows(prompt_rows: Sequence[Mapping[str, Any]], feature_keys: Sequence[str]):
+        result: list[list[float]] = []
+        for row in prompt_rows:
+            values = [row.get(SALVAGE_FEATURES[key]) for key in feature_keys]
+            if any(value is None for value in values):
+                return None
+            result.append([float(value) for value in values])
+        return result
+
+    folds_by_repeat: list[list[set[str]]] = []
+    for _ in range(repeats):
+        shuffled = list(keys)
+        rng.shuffle(shuffled)
+        folds = [set() for _ in range(n_folds)]
+        for index, uid in enumerate(shuffled):
+            folds[index % n_folds].add(uid)
+        folds_by_repeat.append(folds)
+
+    result: dict[str, Any] = {}
+    label_by_key = {
+        (str(row["prompt_id"]), int(row["horizon"])): bool(row["rescue_gold"])
+        for row in rows
+    }
+    model_feature_keys = {
+        name: [key for key in feature_keys if key in SALVAGE_FEATURES]
+        for name, feature_keys in model_sets.items()
+    }
+    for name, feature_keys in model_feature_keys.items():
+        if not feature_keys:
+            continue
+        flat_rows = [row for uid in keys for row in by_prompt[uid]]
+        if feature_rows(flat_rows, feature_keys) is None:
+            # No row exposes every required feature (e.g., v1 cache lacking C_h).
+            continue
+        oof: dict[str, dict[int, list[float]]] = defaultdict(lambda: defaultdict(list))
+        fold_aurocs: list[float] = []
+        fold_auprcs: list[float] = []
+        for folds in folds_by_repeat:
+            for fold_index, test_uids in enumerate(folds):
+                train_uids = [uid for uid in keys if uid not in test_uids]
+                train_rows = [row for uid in train_uids for row in by_prompt[uid]]
+                train_features = feature_rows(train_rows, feature_keys)
+                if train_features is None or not any(
+                    bool(row["rescue_gold"]) for row in train_rows
+                ) or all(bool(row["rescue_gold"]) for row in train_rows):
+                    continue
+                weights, intercept = fit_l2_logistic(
+                    train_features, [bool(row["rescue_gold"]) for row in train_rows]
+                )
+                test_rows = [row for uid in sorted(test_uids) for row in by_prompt[uid]]
+                test_features = feature_rows(test_rows, feature_keys)
+                if test_features is None or not test_rows:
+                    continue
+                probabilities = logistic_predict_proba(
+                    test_features, weights, intercept
+                )
+                test_labels = [bool(row["rescue_gold"]) for row in test_rows]
+                fold_aurocs.append(tie_correct_auroc(probabilities, test_labels))
+                fold_auprcs.append(_auprc(probabilities, test_labels))
+                for row, probability in zip(test_rows, probabilities):
+                    oof[str(row["prompt_id"])][int(row["horizon"])].append(probability)
+        mean_probabilities: dict[str, dict[int, float]] = {}
+        for uid, horizon_probs in oof.items():
+            mean_probabilities[uid] = {
+                horizon: sum(values) / len(values)
+                for horizon, values in horizon_probs.items()
+            }
+        within = _within_prompt_from_horizon_map(
+            {
+                uid: {
+                    horizon: (prob, label_by_key[(uid, horizon)])
+                    for horizon, prob in horizons_map.items()
+                }
+                for uid, horizons_map in mean_probabilities.items()
+            },
+            horizons,
+        )
+        result[name] = {
+            "features": feature_keys,
+            "mean_heldout_auroc": (
+                float(sum(fold_aurocs) / len(fold_aurocs)) if fold_aurocs else None
+            ),
+            "mean_heldout_auprc": (
+                float(sum(fold_auprcs) / len(fold_auprcs)) if fold_auprcs else None
+            ),
+            "fold_aurocs": fold_aurocs,
+            "within_prompt_hstar": within,
+        }
+
+    baseline_folds = result.get("M0_position", {}).get("fold_aurocs")
+    if baseline_folds:
+        for name, model in result.items():
+            if name == "M0_position" or not model.get("fold_aurocs"):
+                continue
+            deltas = [
+                model_fold - baseline_fold
+                for model_fold, baseline_fold in zip(
+                    model["fold_aurocs"], baseline_folds
+                )
+            ]
+            model["paired_delta_vs_M0"] = {
+                "mean_delta_auroc": float(sum(deltas) / len(deltas)) if deltas else None,
+                "pct_folds_ge_M0": (
+                    float(sum(1 for value in deltas if value >= 0)) / len(deltas)
+                    if deltas
+                    else None
+                ),
+            }
+    return result
 
 
 def run_salvage_analysis(
@@ -1964,7 +2220,15 @@ def run_salvage_analysis(
             token_rows.append(row)
         seen_prompts.update(str(row["prompt_id"]) for row in token_rows)
     enriched = derive_salvaged_features(token_rows, study_rows)
-    evaluation = evaluate_prefix_study(enriched, seed=seed)
+    strata: dict[str, str] = {}
+    for proposal_dir in proposal_dirs:
+        for row in read_jsonl(Path(proposal_dir) / "retained_proposals.jsonl"):
+            stratum = str(row.get("observed_stratum") or row.get("support_state") or "")
+            if stratum:
+                strata.setdefault(str(row["sample_uid"]), stratum)
+    for row in enriched:
+        row["stratum"] = strata.get(str(row["prompt_id"]), "unknown")
+    evaluation = evaluate_prefix_study(enriched, seed=seed, strata=strata)
     analysis: dict[str, Any] = {
         "schema_version": "reachability-prefix-salvage-v1",
         "coverage": {
@@ -1978,15 +2242,21 @@ def run_salvage_analysis(
         },
         "evaluation": evaluation,
         "cache_limitations": [
-            "C_h (teacher mass on student Top-K support) not cached",
-            "O_h (Top-K overlap) not cached",
-            "exact student/teacher entropy and Top1-Top2 margins not cached",
-            "visual JS features not cached",
+            "visual JS features not yet included (M4 deferred)",
         ],
-        "label": "partial: compatibility features C_h/O_h pending symmetric cache rescore",
+        "label": "full registered features on symmetric v2 cache (Phase C)",
     }
     output = Path(output_dir).expanduser().resolve()
     output.mkdir(parents=True, exist_ok=True)
+    feature_table = output / "proxy_feature_table.jsonl"
+    with feature_table.open("w", encoding="utf-8") as handle:
+        for row in enriched:
+            handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
+    analysis["feature_table"] = {
+        "path": str(feature_table),
+        "rows": len(enriched),
+        "sha256": _sha256(feature_table),
+    }
     analysis_path = output / "proxy_prefix_salvage_analysis.json"
     _write_json_atomic(analysis_path, analysis)
     return analysis

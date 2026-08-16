@@ -26,6 +26,8 @@ from dual_track_opd.support_aware.reachability_proxy import (
     merge_token_shards,
     _per_token_symmetric_stats,
     _purge_scored_rows,
+    _within_prompt_from_horizon_map,
+    registered_model_evaluation,
     _selected_teacher_trace,
 )
 
@@ -440,6 +442,60 @@ def test_salvage_marks_missing_symmetric_fields() -> None:
     assert enriched[0]["O_h_16"] is None
     evaluation = evaluate_prefix_study(enriched)
     assert "M1_compat" not in evaluation["models"]
+
+
+def test_within_prompt_hstar_metrics() -> None:
+    by_prompt = {
+        "a": {
+            64: (0.9, False),
+            128: (0.5, True),
+            256: (0.3, True),
+            512: (0.1, True),
+        },
+        "b": {
+            64: (0.1, False),
+            128: (0.4, True),
+            256: (0.8, True),
+            512: (0.9, True),
+        },
+    }
+    metrics = _within_prompt_from_horizon_map(by_prompt, [64, 128, 256, 512])
+    assert metrics["n_prompts"] == 2
+    assert metrics["recall_at_1"] == 0.0
+    assert metrics["plus_minus_one_bin"] == 0.5
+    assert math.isclose(metrics["mean_abs_bin_distance"], 1.5)
+    assert math.isclose(metrics["pairwise_agreement"], 0.5)
+
+
+def test_registered_model_evaluation_structure() -> None:
+    rows = []
+    for index in range(12):
+        uid = f"p{index}"
+        base = index % 2
+        for horizon in (64, 128, 256, 512):
+            rows.append(
+                {
+                    "prompt_id": uid,
+                    "horizon": horizon,
+                    "rescue_gold": horizon >= (128 if base == 0 else 256),
+                    "position": horizon / 512,
+                    "C_h_16": 0.5 + 0.001 * horizon,
+                    "M_h_16": 0.4,
+                    "O_h_16": 0.6,
+                    "fkl_takeoff_32": 1.0 - 0.001 * horizon,
+                    "fkl_takeoff_64": 1.0 - 0.001 * horizon,
+                    "delta_handoff_64": 0.1,
+                    "cum_student_nll": 1.0,
+                    "cum_top100_fkl_tail": 1.0,
+                }
+            )
+    evaluation = registered_model_evaluation(
+        rows, {"M0_position": ("position",), "M3_mechanistic_lite": ("position", "M_h_16", "fkl_takeoff_64", "delta_handoff_64")}, n_folds=3, repeats=2, seed=5
+    )
+    assert "M0_position" in evaluation
+    assert evaluation["M0_position"]["mean_heldout_auroc"] is not None
+    assert "paired_delta_vs_M0" in evaluation["M3_mechanistic_lite"]
+    assert evaluation["M3_mechanistic_lite"]["within_prompt_hstar"]["n_prompts"] >= 0
 
 
 def test_merge_token_shards_is_deterministic_and_strict(tmp_path: Path) -> None:
