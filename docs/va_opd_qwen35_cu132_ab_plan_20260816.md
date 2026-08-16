@@ -29,9 +29,16 @@
 | 注意力实现 | 两侧相同：`flash_attention_2`（推荐，两边都装了 FA 2.8.3）或 `sdpa`（对齐旧正式记录） | 旧正式脚本历史用 sdpa；新 formal 脚本 `ATTENTION_IMPL` 可切 |
 | 随机性 | 两边各跑相同 seed 口径（verl 默认 seed=1） | |
 
-**唯一允许的差异**：新栈 `NCCL_NVLS_ENABLE=0`（本实例 NVLS multicast 不可用，
-否则起不来）；旧栈维持原设置。NVLS 只影响 multicast 归约，不影响 NVLink P2P
-带宽，预期对单机 all-gather 影响小——记录并在结论中注明。
+**唯一允许的差异**：无。两侧**都设置 `NCCL_NVLS_ENABLE=0`**——本实例 NVLS
+multicast 不可用（CUDA error 401，疑似 Fabric Manager/NVSwitch 配置）；旧栈
+NCCL 2.28.9 在 Hopper 上同样默认开 NVLS，搬到本实例大概率同样报 401，所以
+两侧统一关闭，保证对照只差环境栈。
+
+NVLS 关闭的影响（记录在案）：只禁用 NVSwitch 在网归约，NVLink P2P 带宽不变；
+对 FSDP2 all-gather 影响可忽略，对 reduce-scatter 大消息与 teacher 权重广播
+（`update_weights`，实测 ~3-4s/step）影响有限（该段即使慢 50% 也仅 ~2s/step）。
+smoke 实测 MFU 0.011-0.017，collectives 非瓶颈。可选量化：本机构建 nccl-tests，
+`all_reduce_perf` 在 `NCCL_NVLS_ENABLE=0/1` 下各跑一次记录带宽差（1 需 FM 修复后）。
 
 ## 3. 执行协议
 
