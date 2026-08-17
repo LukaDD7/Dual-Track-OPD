@@ -149,6 +149,7 @@ def run_region_acquisition(
     steps: int,
     lr: float,
     fkl_top_k: int,
+    clip_max_norm: float | None,
     rollout_k: int,
     max_continuation_tokens: int,
     seed: int,
@@ -330,6 +331,7 @@ def run_region_acquisition(
                 lr=lr,
                 device=student_device,
                 fkl_top_k=fkl_top_k,
+                clip_max_norm=clip_max_norm,
             )
             updated_path_logp = _suffix_token_logp(
                 model_i,
@@ -439,6 +441,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--steps", type=int, default=8)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--fkl-top-k", type=int, default=100)
+    parser.add_argument("--clip-max-norm", type=float, default=1.0)
     parser.add_argument("--rollout-k", type=int, default=8)
     parser.add_argument("--max-continuation-tokens", type=int, default=256)
     parser.add_argument("--seed", type=int, default=20260817)
@@ -471,6 +474,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         steps=args.steps,
         lr=args.lr,
         fkl_top_k=args.fkl_top_k,
+        clip_max_norm=args.clip_max_norm,
         rollout_k=args.rollout_k,
         max_continuation_tokens=args.max_continuation_tokens,
         seed=args.seed,

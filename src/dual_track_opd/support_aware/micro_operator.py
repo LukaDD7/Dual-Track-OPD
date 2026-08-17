@@ -176,6 +176,7 @@ def _micro_update(
     lr: float,
     device: str,
     fkl_top_k: int = 100,
+    clip_max_norm: float | None = 1.0,
 ) -> dict[str, Any]:
     """Run 1..steps optimizer updates; return loss/grad diagnostics."""
 
@@ -210,7 +211,12 @@ def _micro_update(
             )
         losses.append(float(loss.detach().float()))
         loss.backward()
-        grad_norms.append(float(torch.nn.utils.clip_grad_norm_(parameters, max_norm=1.0)))
+        if clip_max_norm is None:
+            grad_norms.append(
+                float(torch.nn.utils.clip_grad_norm_(parameters, max_norm=float("inf")))
+            )
+        else:
+            grad_norms.append(float(torch.nn.utils.clip_grad_norm_(parameters, max_norm=clip_max_norm)))
         optimizer.step()
         del student_logits
     nan_params = sum(1 for parameter in parameters if bool(torch.isnan(parameter).any().item()))
@@ -277,6 +283,7 @@ def run_micro_operator(
     steps: int,
     lr: float,
     fkl_top_k: int,
+    clip_max_norm: float | None,
     seed: int,
 ) -> dict[str, Any]:
     import pandas as pd
@@ -397,6 +404,7 @@ def run_micro_operator(
                 lr=lr,
                 device=student_device,
                 fkl_top_k=fkl_top_k,
+                clip_max_norm=clip_max_norm,
             )
             q_i = _native_pass_rate(
                 model_i,
@@ -534,6 +542,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--steps", type=int, default=2)
     parser.add_argument("--lr", type=float, default=2e-5)
     parser.add_argument("--fkl-top-k", type=int, default=100)
+    parser.add_argument("--clip-max-norm", type=float, default=1.0)
     parser.add_argument("--max-candidates", type=int, default=60)
     parser.add_argument("--seed", type=int, default=20260817)
     return parser
@@ -571,6 +580,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         steps=args.steps,
         lr=args.lr,
         fkl_top_k=args.fkl_top_k,
+        clip_max_norm=args.clip_max_norm,
         seed=args.seed,
     )
     print(json.dumps(report, indent=2, ensure_ascii=False))
