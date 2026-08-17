@@ -169,17 +169,19 @@ def _micro_update(
     steps: int,
     lr: float,
     device: str,
-) -> None:
-    """Run 1..steps optimizer updates, recomputing block logits each step."""
+) -> dict[str, Any]:
+    """Run 1..steps optimizer updates; return loss/grad diagnostics."""
 
     parameters = [parameter for parameter in student.parameters() if parameter.requires_grad]
-    optimizer = torch.optim.AdamW(parameters, lr=lr)
+    optimizer = torch.optim.AdamW(parameters, lr=lr, weight_decay=0.0)
     mask = torch.ones((1, block_ids.numel()), dtype=torch.bool, device=device)
+    losses: list[float] = []
+    grad_norms: list[float] = []
     for _ in range(steps):
         optimizer.zero_grad()
         student_logits = _train_block_logits(
             student, prompt_inputs, response_ids, start=start, end=end, device=device
-        )
+        ).float()
         if operator == "FKL":
             loss = prefix_fkl_ce(student_logits, block_ids, mask)
         else:
@@ -187,13 +189,23 @@ def _micro_update(
                 raise ValueError("RKL candidate requires teacher logits")
             loss = suffix_rkl_k1(
                 student_logits,
-                teacher_logits.to(student_logits.device),
+                teacher_logits.to(student_logits.device).float(),
                 mask,
             )
+        losses.append(float(loss.detach().float()))
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(parameters, max_norm=1.0)
+        grad_norms.append(float(torch.nn.utils.clip_grad_norm_(parameters, max_norm=1.0)))
         optimizer.step()
         del student_logits
+    nan_params = sum(1 for parameter in parameters if bool(torch.isnan(parameter).any().item()))
+    return {
+        "loss_first": losses[0] if losses else None,
+        "loss_last": losses[-1] if losses else None,
+        "loss_min": min(losses) if losses else None,
+        "loss_max": max(losses) if losses else None,
+        "max_grad_norm": max(grad_norms) if grad_norms else None,
+        "nan_params": nan_params,
+    }
 
 
 def _native_pass_rate(
@@ -351,10 +363,11 @@ def run_micro_operator(
             baseline_cache[uid] = q0
 
         gains: dict[str, float] = {}
+        diags: dict[str, dict[str, Any]] = {}
         for operator in ("FKL", "RKL"):
             model_i = copy.deepcopy(models.student_model)
             model_i.to(student_device)
-            _micro_update(
+            update_diag = _micro_update(
                 student=model_i,
                 prompt_inputs=prompt_inputs_s,
                 response_ids=response_ids,
@@ -391,6 +404,7 @@ def run_micro_operator(
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
             gains[operator] = q_i - q0
+            diags[operator] = update_diag
             results.append(
                 {
                     **dict(candidate),
@@ -400,13 +414,17 @@ def run_micro_operator(
                     "q_i": q_i,
                     "G_i": q_i - q0,
                     "block_logp_delta": updated_block_logp - frozen_block_logp,
+                    "update_diag": update_diag,
                 }
             )
         print(
             f"[{index + 1}/{len(candidate_blocks)}] {uid} block "
             f"{candidate['block_index']} role={candidate['operator']} "
             f"F={float(candidate['F_i']):+.2f} R={float(candidate['R_i']):+.2f} "
-            f"q0={q0:.2f} G_FKL={gains['FKL']:+.2f} G_RKL={gains['RKL']:+.2f}",
+            f"q0={q0:.2f} G_FKL={gains['FKL']:+.2f} G_RKL={gains['RKL']:+.2f} "
+            f"loss_FKL={diags['FKL']['loss_last']:.2f}->{diags['FKL']['loss_first']:.2f} "
+            f"loss_RKL={diags['RKL']['loss_last']:.2f}->{diags['RKL']['loss_first']:.2f} "
+            f"gn={diags['RKL']['max_grad_norm']:.2f} nan={diags['RKL']['nan_params']}",
             flush=True,
         )
 
