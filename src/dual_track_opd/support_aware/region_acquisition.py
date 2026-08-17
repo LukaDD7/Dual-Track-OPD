@@ -214,6 +214,12 @@ def run_region_acquisition(
     output.mkdir(parents=True, exist_ok=True)
 
     results: list[dict[str, Any]] = []
+    table_path = output / "region_acquisition_results.jsonl"
+    completed: set[tuple[str, str]] = set()
+    if table_path.is_file():
+        for row in _read_jsonl(table_path):
+            completed.add((str(row["prompt_id"]), str(row["operator"])))
+        print(f"resume: {len(completed)} completed (prompt, operator) pairs loaded", flush=True)
     for index, region in enumerate(regions):
         uid = str(region["prompt_id"])
         trace = selected_traces.get(uid)
@@ -291,6 +297,9 @@ def run_region_acquisition(
         )
         teacher_control_logits = teacher_control_logits.unsqueeze(0)
         for operator in operators:
+            if (uid, operator) in completed:
+                print(f"[{index + 1}/{len(regions)}] {uid} op={operator} already done, skip", flush=True)
+                continue
             if operator == "control":
                 op_start, op_end, op_ids, op_teacher_logits = (
                     control_start,
@@ -344,23 +353,24 @@ def run_region_acquisition(
             del model_i
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
-            results.append(
-                {
-                    "prompt_id": uid,
-                    "operator": operator,
-                    "region_start_token": region_start,
-                    "region_end_token": region_end,
-                    "region_token_count": region_end - region_start,
-                    "h_star": suffix_start,
-                    "path_logp_before": frozen_path_logp,
-                    "path_logp_after": updated_path_logp,
-                    "path_logp_delta": updated_path_logp - frozen_path_logp,
-                    "q_before": baseline_q,
-                    "q_after": q_i,
-                    "G_native": q_i - baseline_q,
-                    "update_diag": diag,
-                }
-            )
+            row = {
+                "prompt_id": uid,
+                "operator": operator,
+                "region_start_token": region_start,
+                "region_end_token": region_end,
+                "region_token_count": region_end - region_start,
+                "h_star": suffix_start,
+                "path_logp_before": frozen_path_logp,
+                "path_logp_after": updated_path_logp,
+                "path_logp_delta": updated_path_logp - frozen_path_logp,
+                "q_before": baseline_q,
+                "q_after": q_i,
+                "G_native": q_i - baseline_q,
+                "update_diag": diag,
+            }
+            results.append(row)
+            with table_path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(row, ensure_ascii=False) + "\n")
             print(
                 f"[{index + 1}/{len(regions)}] {uid} op={operator} "
                 f"region={region_start}-{region_end} ({region_end - region_start} tok) "
@@ -370,24 +380,27 @@ def run_region_acquisition(
                 flush=True,
             )
 
-    table_path = output / "region_acquisition_results.jsonl"
-    with table_path.open("w", encoding="utf-8") as handle:
-        for row in results:
-            handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+    all_rows = list(_read_jsonl(table_path))
+
+    def _mean_by_operator(key: str) -> dict[str, float | None]:
+        return {
+            op: (
+                float(np.mean([r[key] for r in all_rows if r["operator"] == op]))
+                if any(r["operator"] == op for r in all_rows)
+                else None
+            )
+            for op in operators
+        }
+
     summary = {
         "schema_version": SCHEMA_VERSION,
-        "n_regions": len(results) // max(1, len(operators)),
-        "n_results": len(results),
+        "n_regions": len({(str(r["prompt_id"]), str(r["operator"])) for r in all_rows})
+        // max(1, len(operators)),
+        "n_results": len(all_rows),
         "operators": list(operators),
         "region_mode": region_mode,
-        "mean_path_logp_delta": {
-            op: float(np.mean([r["path_logp_delta"] for r in results if r["operator"] == op]))
-            for op in operators
-        },
-        "mean_G_native": {
-            op: float(np.mean([r["G_native"] for r in results if r["operator"] == op]))
-            for op in operators
-        },
+        "mean_path_logp_delta": _mean_by_operator("path_logp_delta"),
+        "mean_G_native": _mean_by_operator("G_native"),
         "results_path": str(table_path),
     }
     report_path = output / "region_acquisition_report.json"
