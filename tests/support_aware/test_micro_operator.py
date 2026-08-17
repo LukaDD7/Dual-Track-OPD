@@ -69,15 +69,40 @@ def test_select_candidate_blocks_respects_cap() -> None:
 
 
 def test_summarize_correlation() -> None:
-    results = [
-        {"operator": "FKL", "F_i": 0.1 * i, "G_i": -0.1 + 0.1 * i}
-        for i in range(1, 6)
-    ] + [
-        {"operator": "RKL", "R_i": 0.1 * i, "G_i": 0.1 * i}
-        for i in range(1, 6)
-    ]
+    results = []
+    for i in range(1, 6):
+        f = 0.1 * i
+        r = 0.05 * i
+        g_fkl = -0.1 + 0.2 * i  # grows with F
+        g_rkl = 0.05 * i        # grows with R, smaller than g_fkl at high i
+        results.extend(
+            [
+                {
+                    "prompt_id": f"p{i}",
+                    "block_index": i,
+                    "role": "FKL",
+                    "operator": "FKL",
+                    "F_i": f,
+                    "R_i": r,
+                    "G_i": g_fkl,
+                },
+                {
+                    "prompt_id": f"p{i}",
+                    "block_index": i,
+                    "role": "FKL",
+                    "operator": "RKL",
+                    "F_i": f,
+                    "R_i": r,
+                    "G_i": g_rkl,
+                },
+            ]
+        )
     summary = _summarize(results)
+    assert summary["n_candidates"] == 5
+    assert summary["n_results"] == 10
     assert summary["n_fkl"] == 5
     assert summary["n_rkl"] == 5
     assert summary["corr_F_vs_G_fkl_minus_rkl"] is not None
     assert summary["corr_R_vs_G_rkl_minus_fkl"] is not None
+    assert summary["corr_F_vs_G_fkl_minus_rkl"] > 0.9
+    assert summary["corr_R_vs_G_rkl_minus_fkl"] < -0.9

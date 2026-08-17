@@ -292,18 +292,16 @@ def run_micro_operator(
             continue
 
         prompt_inputs_s = _prompt_inputs(models.student_processor, images.full, prompt_text)
-        teacher_logits = None
-        if candidate["operator"] == "RKL":
-            prompt_inputs_t = _prompt_inputs(models.teacher_processor, images.full, prompt_text)
-            teacher_logits, _ = response_chunk_logits(
-                teacher,
-                prompt_inputs_t,
-                response_ids,
-                start=int(candidate["start_token"]),
-                end=int(candidate["end_token"]),
-                device=teacher_device,
-            )
-            teacher_logits = teacher_logits.unsqueeze(0)
+        prompt_inputs_t = _prompt_inputs(models.teacher_processor, images.full, prompt_text)
+        teacher_logits, _ = response_chunk_logits(
+            teacher,
+            prompt_inputs_t,
+            response_ids,
+            start=int(candidate["start_token"]),
+            end=int(candidate["end_token"]),
+            device=teacher_device,
+        )
+        teacher_logits = teacher_logits.unsqueeze(0)
 
         q0 = baseline_cache.get(uid)
         if q0 is None:
@@ -320,48 +318,53 @@ def run_micro_operator(
             )
             baseline_cache[uid] = q0
 
-        model_i = copy.deepcopy(models.student_model)
-        model_i.to(student_device)
-        _micro_update(
-            student=model_i,
-            prompt_inputs=prompt_inputs_s,
-            response_ids=response_ids,
-            start=int(candidate["start_token"]),
-            end=int(candidate["end_token"]),
-            block_ids=block_ids,
-            teacher_logits=teacher_logits,
-            operator=str(candidate["operator"]),
-            steps=steps,
-            lr=lr,
-            device=student_device,
-        )
-        q_i = _native_pass_rate(
-            model_i,
-            models.student_processor,
-            image=images.full,
-            prompt_text=prompt_text,
-            gold_answer=gold_answer,
-            k=rollout_k,
-            max_continuation_tokens=max_continuation_tokens,
-            seed=seed + index + 10**6,
-            device=student_device,
-        )
-        del model_i
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-        results.append(
-            {
-                **dict(candidate),
-                "q0": q0,
-                "q_i": q_i,
-                "G_i": q_i - q0,
-            }
-        )
+        gains: dict[str, float] = {}
+        for operator in ("FKL", "RKL"):
+            model_i = copy.deepcopy(models.student_model)
+            model_i.to(student_device)
+            _micro_update(
+                student=model_i,
+                prompt_inputs=prompt_inputs_s,
+                response_ids=response_ids,
+                start=int(candidate["start_token"]),
+                end=int(candidate["end_token"]),
+                block_ids=block_ids,
+                teacher_logits=teacher_logits,
+                operator=operator,
+                steps=steps,
+                lr=lr,
+                device=student_device,
+            )
+            q_i = _native_pass_rate(
+                model_i,
+                models.student_processor,
+                image=images.full,
+                prompt_text=prompt_text,
+                gold_answer=gold_answer,
+                k=rollout_k,
+                max_continuation_tokens=max_continuation_tokens,
+                seed=seed + index + (10**6 if operator == "RKL" else 0),
+                device=student_device,
+            )
+            del model_i
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            gains[operator] = q_i - q0
+            results.append(
+                {
+                    **dict(candidate),
+                    "operator": operator,
+                    "role": str(candidate["operator"]),
+                    "q0": q0,
+                    "q_i": q_i,
+                    "G_i": q_i - q0,
+                }
+            )
         print(
             f"[{index + 1}/{len(candidate_blocks)}] {uid} block "
-            f"{candidate['block_index']} {candidate['operator']} "
+            f"{candidate['block_index']} role={candidate['operator']} "
             f"F={float(candidate['F_i']):+.2f} R={float(candidate['R_i']):+.2f} "
-            f"q0={q0:.2f} qi={q_i:.2f} G={q_i - q0:+.2f}",
+            f"q0={q0:.2f} G_FKL={gains['FKL']:+.2f} G_RKL={gains['RKL']:+.2f}",
             flush=True,
         )
 
@@ -379,8 +382,19 @@ def run_micro_operator(
 
 
 def _summarize(results: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
-    fkl = [row for row in results if row["operator"] == "FKL"]
-    rkl = [row for row in results if row["operator"] == "RKL"]
+    by_block: dict[tuple[str, int], dict[str, dict[str, Any]]] = defaultdict(dict)
+    for row in results:
+        by_block[(str(row["prompt_id"]), int(row["block_index"]))][str(row["operator"])] = row
+    blocks = list(by_block.values())
+    pairs_fkl_adv: list[tuple[float, float]] = []
+    pairs_rkl_adv: list[tuple[float, float]] = []
+    for operators in blocks:
+        if "FKL" not in operators or "RKL" not in operators:
+            continue
+        fkl = operators["FKL"]
+        rkl = operators["RKL"]
+        pairs_fkl_adv.append((float(fkl["F_i"]), float(fkl["G_i"]) - float(rkl["G_i"])))
+        pairs_rkl_adv.append((float(rkl["R_i"]), float(rkl["G_i"]) - float(fkl["G_i"])))
 
     def _corr(pairs: list[tuple[float, float]]) -> float | None:
         if len(pairs) < 4:
@@ -391,26 +405,21 @@ def _summarize(results: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
             return None
         return float(np.corrcoef(x, y)[0, 1])
 
+    fkl = [row for row in results if row["operator"] == "FKL"]
+    rkl = [row for row in results if row["operator"] == "RKL"]
     return {
-        "n_candidates": len(results),
+        "n_candidates": len(blocks),
+        "n_results": len(results),
         "n_fkl": len(fkl),
         "n_rkl": len(rkl),
         "mean_G_fkl": float(np.mean([row["G_i"] for row in fkl])) if fkl else None,
         "mean_G_rkl": float(np.mean([row["G_i"] for row in rkl])) if rkl else None,
-        "corr_F_vs_G_fkl_minus_rkl": _corr(
-            [
-                (float(row["F_i"]), float(row["G_i"]))
-                for row in results
-                if row["operator"] == "FKL"
-            ]
-        ),
-        "corr_R_vs_G_rkl_minus_fkl": _corr(
-            [
-                (float(row["R_i"]), float(row["G_i"]))
-                for row in results
-                if row["operator"] == "RKL"
-            ]
-        ),
+        "mean_G_fkl_by_role": {
+            role: float(np.mean([row["G_i"] for row in fkl if row.get("role") == role]))
+            for role in ("FKL", "RKL", "control")
+        },
+        "corr_F_vs_G_fkl_minus_rkl": _corr(pairs_fkl_adv),
+        "corr_R_vs_G_rkl_minus_fkl": _corr(pairs_rkl_adv),
     }
 
 
