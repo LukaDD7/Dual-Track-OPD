@@ -133,6 +133,29 @@ def _train_block_logits(
     return selected
 
 
+def _block_token_logp(
+    model: Any,
+    prompt_inputs: Mapping[str, torch.Tensor],
+    response_ids: Sequence[int],
+    start: int,
+    end: int,
+    block_ids: torch.Tensor,
+    device: str,
+) -> float:
+    """Mean log P(block tokens) under the current model (dose sanity check)."""
+
+    with torch.no_grad():
+        logits = _train_block_logits(
+            model, prompt_inputs, response_ids, start=start, end=end, device=device
+        )
+        logp = (
+            torch.log_softmax(logits.float(), dim=-1)
+            .gather(-1, block_ids.unsqueeze(-1))
+            .squeeze(-1)
+        )
+        return float(logp.mean())
+
+
 def _micro_update(
     *,
     student: Any,
@@ -302,6 +325,15 @@ def run_micro_operator(
             device=teacher_device,
         )
         teacher_logits = teacher_logits.unsqueeze(0)
+        frozen_block_logp = _block_token_logp(
+            models.student_model,
+            prompt_inputs_s,
+            response_ids,
+            start=int(candidate["start_token"]),
+            end=int(candidate["end_token"]),
+            block_ids=block_ids,
+            device=student_device,
+        )
 
         q0 = baseline_cache.get(uid)
         if q0 is None:
@@ -346,6 +378,15 @@ def run_micro_operator(
                 seed=seed + index + (10**6 if operator == "RKL" else 0),
                 device=student_device,
             )
+            updated_block_logp = _block_token_logp(
+                model_i,
+                prompt_inputs_s,
+                response_ids,
+                start=int(candidate["start_token"]),
+                end=int(candidate["end_token"]),
+                block_ids=block_ids,
+                device=student_device,
+            )
             del model_i
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
@@ -358,6 +399,7 @@ def run_micro_operator(
                     "q0": q0,
                     "q_i": q_i,
                     "G_i": q_i - q0,
+                    "block_logp_delta": updated_block_logp - frozen_block_logp,
                 }
             )
         print(
@@ -417,6 +459,10 @@ def _summarize(results: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         "mean_G_fkl_by_role": {
             role: float(np.mean([row["G_i"] for row in fkl if row.get("role") == role]))
             for role in ("FKL", "RKL", "control")
+        },
+        "mean_block_logp_delta": {
+            "FKL": float(np.mean([row.get("block_logp_delta", 0.0) for row in fkl])),
+            "RKL": float(np.mean([row.get("block_logp_delta", 0.0) for row in rkl])),
         },
         "corr_F_vs_G_fkl_minus_rkl": _corr(pairs_fkl_adv),
         "corr_R_vs_G_rkl_minus_fkl": _corr(pairs_rkl_adv),
