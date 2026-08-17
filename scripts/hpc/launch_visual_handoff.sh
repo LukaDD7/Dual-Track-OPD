@@ -49,10 +49,12 @@ PIDS=()
 for (( i=0; i<NUM_SHARDS; i++ )); do
     pair="${GPU_PAIRS[i]}"
     [[ "${pair}" =~ ^[0-9]+:[0-9]+$ ]] || { echo "FATAL: invalid pair ${pair}" >&2; exit 1; }
+    student_gpu="${pair%%:*}"
+    teacher_gpu="${pair##*:}"
     log="${LOG_DIR}/visual_handoff_s${i}.log"
     max_prompt_args=()
     if [[ -n "${MAX_PROMPTS}" ]]; then max_prompt_args=(--max-prompts "${MAX_PROMPTS}"); fi
-    CUDA_VISIBLE_DEVICES="${pair}" \
+    CUDA_VISIBLE_DEVICES="${student_gpu},${teacher_gpu}" \
     "${PYTHON_BIN}" -m dual_track_opd.support_aware.visual_handoff run \
         --student-model "${STUDENT_MODEL}" \
         --teacher-model "${TEACHER_MODEL}" \
