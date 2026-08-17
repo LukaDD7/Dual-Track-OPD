@@ -162,7 +162,11 @@ def _micro_update(
         else:
             if teacher_logits is None:
                 raise ValueError("RKL candidate requires teacher logits")
-            loss = suffix_rkl_k1(student_logits, teacher_logits, mask)
+            loss = suffix_rkl_k1(
+                student_logits,
+                teacher_logits.to(student_logits.device),
+                mask,
+            )
         loss.backward()
         torch.nn.utils.clip_grad_norm_(parameters, max_norm=1.0)
         optimizer.step()
