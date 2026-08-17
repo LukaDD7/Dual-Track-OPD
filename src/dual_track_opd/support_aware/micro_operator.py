@@ -43,7 +43,7 @@ from .causal_runtime import (
 from .diagnostic import build_prompt, extract_image
 from .prefix_intervention import generate_continuation
 from .reasoning_blocks import blocks_with_token_spans
-from .support_transition_loss import suffix_rkl_k1, topk_tail_fkl
+from .support_transition_loss import prefix_fkl_ce, suffix_rkl_k1, topk_tail_fkl
 from .verifier import verify_answer
 
 
@@ -198,6 +198,8 @@ def _micro_update(
                 mask,
                 top_k=fkl_top_k,
             )
+        elif operator == "HARD_CE":
+            loss = prefix_fkl_ce(student_logits, block_ids, mask)
         else:
             if teacher_logits is None:
                 raise ValueError("RKL candidate requires teacher logits")
