@@ -39,7 +39,7 @@ from .reasoning_blocks import blocks_with_token_spans
 from .verifier import verify_answer
 
 
-SCHEMA_VERSION = "support-aware-visual-handoff-v1"
+SCHEMA_VERSION = "support-aware-visual-handoff-v2"
 
 
 def _read_jsonl(path: Path):
@@ -139,14 +139,18 @@ def _reference_logps(
     response_ids: Sequence[int],
     device: str,
     chunk_size: int,
-) -> tuple[list[float], list[float]]:
-    """Per-token log P(y_t^T | condition) for full and degraded conditions."""
+    null_control: bool,
+) -> dict[str, list[float]]:
+    """Per-token log P(y_t^T | condition) for full/degraded(+null) conditions."""
 
     reference = torch.tensor(
         [int(value) for value in response_ids], dtype=torch.long, device=device
     )
-    logps: list[list[float]] = []
-    for name, image in (("full", images.full), ("degraded", images.degraded)):
+    conditions = [("full", images.full), ("degraded", images.degraded)]
+    if null_control:
+        conditions.append(("null", images.null))
+    logps: dict[str, list[float]] = {}
+    for name, image in conditions:
         prompt_inputs = _prompt_inputs(processor, image, prompt_text)
         logits, _ = response_chunk_logits(
             model,
@@ -157,41 +161,53 @@ def _reference_logps(
             device=device,
         )
         logp = torch.log_softmax(logits, dim=-1).gather(1, reference.unsqueeze(1)).squeeze(1)
-        logps.append([float(value) for value in logp.cpu().tolist()])
+        logps[name] = [float(value) for value in logp.cpu().tolist()]
         del logits, logp
         if torch.cuda.is_available() and str(device).startswith("cuda"):
             torch.cuda.empty_cache()
-    return logps[0], logps[1]
+    return logps
 
 
 def _block_signals(
     *,
     response_ids: Sequence[int],
     blocks: Sequence[Any],
-    teacher_full: Sequence[float],
-    teacher_degraded: Sequence[float],
-    student_full: Sequence[float],
-    student_degraded: Sequence[float],
+    teacher_logps: Mapping[str, Sequence[float]],
+    student_logps: Mapping[str, Sequence[float]],
+    null_control: bool,
 ) -> list[dict[str, Any]]:
     signals: list[dict[str, Any]] = []
     for index, block in enumerate(blocks):
         start, end = block.start_token, block.end_token
         if end <= start:
             continue
-        v_t = float(np.mean(teacher_full[start:end])) - float(np.mean(teacher_degraded[start:end]))
-        v_s = float(np.mean(student_full[start:end])) - float(np.mean(student_degraded[start:end]))
-        signals.append(
-            {
-                "block_index": index,
-                "block_type": block.block_type,
-                "start_token": start,
-                "end_token": end,
-                "V_T_i": v_t,
-                "V_S_i": v_s,
-                "DeltaV_i": v_t - v_s,
-                "text_excerpt": block.text[:120],
-            }
+        v_t = float(np.mean(teacher_logps["full"][start:end])) - float(
+            np.mean(teacher_logps["degraded"][start:end])
         )
+        v_s = float(np.mean(student_logps["full"][start:end])) - float(
+            np.mean(student_logps["degraded"][start:end])
+        )
+        row: dict[str, Any] = {
+            "block_index": index,
+            "block_type": block.block_type,
+            "start_token": start,
+            "end_token": end,
+            "V_T_i": v_t,
+            "V_S_i": v_s,
+            "DeltaV_i": v_t - v_s,
+            "text_excerpt": block.text[:120],
+        }
+        if null_control:
+            v_t_null = float(np.mean(teacher_logps["full"][start:end])) - float(
+                np.mean(teacher_logps["null"][start:end])
+            )
+            v_s_null = float(np.mean(student_logps["full"][start:end])) - float(
+                np.mean(student_logps["null"][start:end])
+            )
+            row["V_T_null_i"] = v_t_null
+            row["V_S_null_i"] = v_s_null
+            row["DeltaV_null_i"] = v_t_null - v_s_null
+        signals.append(row)
     return signals
 
 
@@ -278,7 +294,11 @@ def _judge_continuation(
             seed=seed + index,
             device=device,
         )
-        verdict = verify_answer(str(generation.get("text") or ""), gold_answer)
+        record = generation["generation"]
+        response_text = getattr(record, "response_text_display", None)
+        if response_text is None and isinstance(record, dict):
+            response_text = record.get("response_text_display")
+        verdict = verify_answer(str(response_text or ""), gold_answer)
         if verdict.get("correct"):
             correct += 1
     return {"k": k, "correct": correct, "pass_rate": correct / k}
@@ -305,6 +325,7 @@ def run_visual_handoff(
     output_dir: str,
     response_format: str,
     degraded_mode: str,
+    null_control: bool,
     chunk_size: int,
     continuation_k: int,
     continuation_k_ambiguous: int,
@@ -353,26 +374,32 @@ def run_visual_handoff(
             tokenizer = models.student_processor.tokenizer
             _, blocks = blocks_with_token_spans(tokenizer, response_ids)
 
-            t_full, t_deg = _reference_logps(
+            teacher_logps = _reference_logps(
                 teacher, models.teacher_processor,
                 prompt_text=prompt_text, images=images,
                 response_ids=response_ids, device=teacher_device, chunk_size=chunk_size,
+                null_control=null_control,
             )
-            s_full, s_deg = _reference_logps(
+            student_logps = _reference_logps(
                 student, models.student_processor,
                 prompt_text=prompt_text, images=images,
                 response_ids=response_ids, device=student_device, chunk_size=chunk_size,
+                null_control=null_control,
             )
             block_signals = _block_signals(
                 response_ids=response_ids,
                 blocks=blocks,
-                teacher_full=t_full,
-                teacher_degraded=t_deg,
-                student_full=s_full,
-                student_degraded=s_deg,
+                teacher_logps=teacher_logps,
+                student_logps=student_logps,
+                null_control=null_control,
             )
             delta_v = [float(row["DeltaV_i"]) for row in block_signals]
             change = _visual_change_point(delta_v)
+            change_null = (
+                _visual_change_point([float(row["DeltaV_null_i"]) for row in block_signals])
+                if null_control
+                else None
+            )
             h_star = minimal_horizon.get(uid)
             h_star_block = _block_containing_token(blocks, h_star) if h_star is not None else None
             record: dict[str, Any] = {
@@ -384,6 +411,13 @@ def run_visual_handoff(
                 "h_V": None,
                 "h_V_block": change["tau_block"],
                 "change_point": change,
+                "change_point_null": change_null,
+                "h_V_null": (
+                    blocks[change_null["tau_block"]].end_token
+                    if change_null is not None and change_null["tau_block"] is not None
+                    else None
+                ),
+                "h_V_null_block": change_null["tau_block"] if change_null else None,
                 "block_signals": block_signals,
                 "continuation": {},
                 "verdict": None,
@@ -484,15 +518,24 @@ def run_visual_handoff_merge(*, shard_dir: str, output_dir: str) -> dict[str, An
     with_gold = [record for record in with_hv if record.get("h_star") is not None]
     verdict_true = [record for record in with_gold if record.get("verdict") is True]
     pass_rates: list[float] = []
+    pass_rates_at_tau: list[float] = []
     degraded_rates: list[float] = []
     for record in with_hv:
         continuation = record.get("continuation") or {}
         full_image = continuation.get("full_image") or {}
         for key, value in full_image.items():
             pass_rates.append(float(value["outcome"]["pass_rate"]))
+            if record.get("h_V_block") is not None and key == str(record["h_V_block"]):
+                pass_rates_at_tau.append(float(value["outcome"]["pass_rate"]))
         degraded = continuation.get("degraded_at_hV")
         if degraded:
             degraded_rates.append(float(degraded["pass_rate"]))
+    with_null = [record for record in with_hv if record.get("h_V_null_block") is not None]
+    with_null_gold = [record for record in with_gold if record.get("h_V_null_block") is not None]
+    verdict_null_true = [
+        record for record in with_null_gold
+        if abs(record["h_V_null_block"] - record["h_star_block"]) <= 1
+    ]
     report = {
         "schema_version": SCHEMA_VERSION + "-report",
         "coverage": {
@@ -512,9 +555,19 @@ def run_visual_handoff_merge(*, shard_dir: str, output_dir: str) -> dict[str, An
                 else None
             ),
         },
+        "change_point_null": {
+            "count": len(with_null),
+            "hV_null_within_1_block_of_hstar": len(verdict_null_true),
+            "enrichment": (
+                len(verdict_null_true) / len(with_null_gold) if with_null_gold else None
+            ),
+        },
         "continuation": {
             "full_image_at_hV_mean_pass_rate": (
                 float(np.mean(pass_rates)) if pass_rates else None
+            ),
+            "full_image_at_hV_tau_mean_pass_rate": (
+                float(np.mean(pass_rates_at_tau)) if pass_rates_at_tau else None
             ),
             "degraded_at_hV_mean_pass_rate": (
                 float(np.mean(degraded_rates)) if degraded_rates else None
@@ -544,7 +597,8 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--proposal-dirs", nargs="+", required=True)
     run.add_argument("--rescue-dirs", nargs="+", required=True)
     run.add_argument("--response-format", default="legacy_answer")
-    run.add_argument("--degraded-mode", default="blur_sigma_2")
+    run.add_argument("--degraded-mode", default="lowres_20_bilinear_nearest")
+    run.add_argument("--no-null-control", action="store_true", help="skip blank-image null condition")
     run.add_argument("--chunk-size", type=int, default=64)
     run.add_argument("--continuation-k", type=int, default=4)
     run.add_argument("--continuation-k-ambiguous", type=int, default=8)
@@ -579,6 +633,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         output_dir=args.output_dir,
         response_format=args.response_format,
         degraded_mode=args.degraded_mode,
+        null_control=not args.no_null_control,
         chunk_size=args.chunk_size,
         continuation_k=args.continuation_k,
         continuation_k_ambiguous=args.continuation_k_ambiguous,

@@ -45,15 +45,24 @@ def test_block_signals_delta_v() -> None:
     signals = _block_signals(
         response_ids=[0, 1, 2, 3, 4, 5, 6, 7],
         blocks=blocks,
-        teacher_full=[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-        teacher_degraded=[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-        student_full=[1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0],
-        student_degraded=[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        teacher_logps={
+            "full": [0.0] * 8,
+            "degraded": [0.0] * 8,
+            "null": [0.0] * 8,
+        },
+        student_logps={
+            "full": [1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0],
+            "degraded": [0.0] * 8,
+            "null": [0.0] * 8,
+        },
+        null_control=True,
     )
     assert signals[0]["V_T_i"] == 0.0
     assert signals[0]["V_S_i"] == 1.0
     assert signals[0]["DeltaV_i"] == -1.0
     assert signals[1]["DeltaV_i"] == 0.0
+    assert signals[0]["V_T_null_i"] == 0.0
+    assert signals[0]["DeltaV_null_i"] == -1.0
 
 
 def test_block_containing_token() -> None:
