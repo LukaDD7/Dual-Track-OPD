@@ -3,8 +3,8 @@
 For each selected teacher trace:
 
 1. forced-forward the *same* teacher response tokens under full and degraded
-   images for teacher and student -> per-token visual attribution
-   ``V_t^T`` / ``V_t^S`` and ``DeltaV_t = V_t^T - V_t^S``;
+   images for teacher and student -> full-vocabulary Jensen-Shannon visual
+   attribution ``V_t^T`` / ``V_t^S`` and ``DeltaV_t = V_t^T - V_t^S``;
 2. aggregate to reasoning blocks -> ``DeltaV_i``;
 3. find the one-downward BIC change point on the block sequence -> candidate
    ``h_V`` (cheap localization only, never a claim ``h_V == h*``);
@@ -39,7 +39,7 @@ from .reasoning_blocks import blocks_with_token_spans
 from .verifier import verify_answer
 
 
-SCHEMA_VERSION = "support-aware-visual-handoff-v2"
+SCHEMA_VERSION = "support-aware-visual-handoff-v3"
 
 
 def _read_jsonl(path: Path):
@@ -129,8 +129,33 @@ def _load_inputs(
     return inputs, minimal_horizon
 
 
+def _jensen_shannon_from_logits(
+    first_logits: torch.Tensor,
+    second_logits: torch.Tensor,
+) -> torch.Tensor:
+    """Exact per-position JS over the full vocabulary.
+
+    The old diagnostic only compared the log-probability of the realized
+    teacher token.  That scalar can miss a large counterfactual redistribution
+    elsewhere in the vocabulary.  Chunking is handled by ``_condition_js`` so
+    this full-distribution calculation stays bounded in memory.
+    """
+
+    if first_logits.shape != second_logits.shape:
+        raise ValueError(
+            f"JS logits must have identical shapes: {tuple(first_logits.shape)} "
+            f"!= {tuple(second_logits.shape)}"
+        )
+    first_logp = torch.log_softmax(first_logits.float(), dim=-1)
+    second_logp = torch.log_softmax(second_logits.float(), dim=-1)
+    mixture_logp = torch.logaddexp(first_logp, second_logp) - math.log(2.0)
+    first_kl = torch.sum(first_logp.exp() * (first_logp - mixture_logp), dim=-1)
+    second_kl = torch.sum(second_logp.exp() * (second_logp - mixture_logp), dim=-1)
+    return 0.5 * (first_kl + second_kl)
+
+
 @torch.inference_mode()
-def _reference_logps(
+def _condition_js(
     model: Any,
     processor: Any,
     *,
@@ -141,39 +166,59 @@ def _reference_logps(
     chunk_size: int,
     null_control: bool,
 ) -> dict[str, list[float]]:
-    """Per-token log P(y_t^T | condition) for full/degraded(+null) conditions."""
+    """Per-token full-vocabulary JS(full || counterfactual), chunked."""
 
-    reference = torch.tensor(
-        [int(value) for value in response_ids], dtype=torch.long, device=device
-    )
-    conditions = [("full", images.full), ("degraded", images.degraded)]
+    if chunk_size <= 0:
+        raise ValueError("chunk_size must be positive")
+    conditions = [("degraded", images.degraded)]
     if null_control:
         conditions.append(("null", images.null))
-    logps: dict[str, list[float]] = {}
-    for name, image in conditions:
-        prompt_inputs = _prompt_inputs(processor, image, prompt_text)
-        logits, _ = response_chunk_logits(
+    prompt_inputs = {
+        "full": _prompt_inputs(processor, images.full, prompt_text),
+        **{
+            name: _prompt_inputs(processor, image, prompt_text)
+            for name, image in conditions
+        },
+    }
+    scores: dict[str, list[float]] = {name: [] for name, _ in conditions}
+    full_logits, _ = response_chunk_logits(
+        model,
+        prompt_inputs["full"],
+        response_ids,
+        start=0,
+        end=len(response_ids),
+        device=device,
+    )
+    for name, _ in conditions:
+        counterfactual_logits, _ = response_chunk_logits(
             model,
-            prompt_inputs,
+            prompt_inputs[name],
             response_ids,
             start=0,
             end=len(response_ids),
             device=device,
         )
-        logp = torch.log_softmax(logits, dim=-1).gather(1, reference.unsqueeze(1)).squeeze(1)
-        logps[name] = [float(value) for value in logp.cpu().tolist()]
-        del logits, logp
+        for start in range(0, len(response_ids), chunk_size):
+            end = min(len(response_ids), start + chunk_size)
+            js = _jensen_shannon_from_logits(
+                full_logits[start:end],
+                counterfactual_logits[start:end],
+            )
+            scores[name].extend(float(value) for value in js.cpu().tolist())
+            del js
+        del counterfactual_logits
         if torch.cuda.is_available() and str(device).startswith("cuda"):
             torch.cuda.empty_cache()
-    return logps
+    del full_logits
+    return scores
 
 
 def _block_signals(
     *,
     response_ids: Sequence[int],
     blocks: Sequence[Any],
-    teacher_logps: Mapping[str, Sequence[float]],
-    student_logps: Mapping[str, Sequence[float]],
+    teacher_js: Mapping[str, Sequence[float]],
+    student_js: Mapping[str, Sequence[float]],
     null_control: bool,
 ) -> list[dict[str, Any]]:
     signals: list[dict[str, Any]] = []
@@ -181,12 +226,8 @@ def _block_signals(
         start, end = block.start_token, block.end_token
         if end <= start:
             continue
-        v_t = float(np.mean(teacher_logps["full"][start:end])) - float(
-            np.mean(teacher_logps["degraded"][start:end])
-        )
-        v_s = float(np.mean(student_logps["full"][start:end])) - float(
-            np.mean(student_logps["degraded"][start:end])
-        )
+        v_t = float(np.mean(teacher_js["degraded"][start:end]))
+        v_s = float(np.mean(student_js["degraded"][start:end]))
         row: dict[str, Any] = {
             "block_index": index,
             "block_type": block.block_type,
@@ -195,15 +236,12 @@ def _block_signals(
             "V_T_i": v_t,
             "V_S_i": v_s,
             "DeltaV_i": v_t - v_s,
+            "score_type": "full_vocab_jensen_shannon",
             "text_excerpt": block.text[:120],
         }
         if null_control:
-            v_t_null = float(np.mean(teacher_logps["full"][start:end])) - float(
-                np.mean(teacher_logps["null"][start:end])
-            )
-            v_s_null = float(np.mean(student_logps["full"][start:end])) - float(
-                np.mean(student_logps["null"][start:end])
-            )
+            v_t_null = float(np.mean(teacher_js["null"][start:end]))
+            v_s_null = float(np.mean(student_js["null"][start:end]))
             row["V_T_null_i"] = v_t_null
             row["V_S_null_i"] = v_s_null
             row["DeltaV_null_i"] = v_t_null - v_s_null
@@ -240,7 +278,7 @@ def _visual_change_point(values: Sequence[float]) -> dict[str, Any]:
     bic0 = n * math.log(rss0 / n) + 1 * math.log(n)
     best_tau: int | None = None
     best_bic1 = math.inf
-    for tau in range(3, n - 3):
+    for tau in range(3, n - 2):
         pre = array[:tau]
         post = array[tau:]
         mu_pre = float(pre.mean())
@@ -250,21 +288,35 @@ def _visual_change_point(values: Sequence[float]) -> dict[str, Any]:
         rss1 = float(np.sum((pre - mu_pre) ** 2) + np.sum((post - mu_post) ** 2))
         if mu_pre - mu_post < 0.5 * max(float(array.std()), 1e-6):
             continue
-        bic1 = n * math.log(rss1 / n) + 3 * math.log(n)
+        bic1 = n * math.log(max(rss1 / n, 1e-12)) + 3 * math.log(n)
         if bic1 < best_bic1:
             best_bic1 = bic1
             best_tau = tau
     if best_tau is None:
         return result
+    significant = best_bic1 < bic0
     result.update(
         {
-            "tau_block": best_tau,
+            # tau is the first post-change block.  It is deliberately absent
+            # when BIC does not support the extra regime.
+            "tau_block": best_tau if significant else None,
+            "candidate_tau_block": best_tau,
             "bic0": bic0,
             "bic1": best_bic1,
-            "significant": best_bic1 < bic0,
+            "significant": significant,
         }
     )
     return result
+
+
+def _handoff_block_index(change: Mapping[str, Any]) -> int | None:
+    """Return the last pre-change block for a significant boundary."""
+
+    tau = change.get("tau_block")
+    if change.get("significant") is not True or tau is None:
+        return None
+    tau = int(tau)
+    return tau - 1 if tau > 0 else None
 
 
 def _judge_continuation(
@@ -374,13 +426,13 @@ def run_visual_handoff(
             tokenizer = models.student_processor.tokenizer
             _, blocks = blocks_with_token_spans(tokenizer, response_ids)
 
-            teacher_logps = _reference_logps(
+            teacher_js = _condition_js(
                 teacher, models.teacher_processor,
                 prompt_text=prompt_text, images=images,
                 response_ids=response_ids, device=teacher_device, chunk_size=chunk_size,
                 null_control=null_control,
             )
-            student_logps = _reference_logps(
+            student_js = _condition_js(
                 student, models.student_processor,
                 prompt_text=prompt_text, images=images,
                 response_ids=response_ids, device=student_device, chunk_size=chunk_size,
@@ -389,8 +441,8 @@ def run_visual_handoff(
             block_signals = _block_signals(
                 response_ids=response_ids,
                 blocks=blocks,
-                teacher_logps=teacher_logps,
-                student_logps=student_logps,
+                teacher_js=teacher_js,
+                student_js=student_js,
                 null_control=null_control,
             )
             delta_v = [float(row["DeltaV_i"]) for row in block_signals]
@@ -402,6 +454,10 @@ def run_visual_handoff(
             )
             h_star = minimal_horizon.get(uid)
             h_star_block = _block_containing_token(blocks, h_star) if h_star is not None else None
+            handoff_block = _handoff_block_index(change)
+            handoff_null_block = (
+                _handoff_block_index(change_null) if change_null is not None else None
+            )
             record: dict[str, Any] = {
                 "schema_version": SCHEMA_VERSION,
                 "prompt_id": uid,
@@ -409,23 +465,27 @@ def run_visual_handoff(
                 "h_star": h_star,
                 "h_star_block": h_star_block,
                 "h_V": None,
-                "h_V_block": change["tau_block"],
+                "h_V_block": handoff_block,
                 "change_point": change,
                 "change_point_null": change_null,
                 "h_V_null": (
-                    blocks[change_null["tau_block"]].end_token
-                    if change_null is not None and change_null["tau_block"] is not None
+                    blocks[handoff_null_block].end_token
+                    if handoff_null_block is not None
                     else None
                 ),
-                "h_V_null_block": change_null["tau_block"] if change_null else None,
+                "h_V_null_block": handoff_null_block,
                 "block_signals": block_signals,
                 "continuation": {},
                 "verdict": None,
                 "degraded_mode": degraded_mode,
+                "visual_score": "full_vocab_jensen_shannon",
             }
-            tau = change["tau_block"]
-            if tau is not None and tau - 1 >= 0 and tau + 1 < len(blocks):
-                candidates = [tau - 1, tau, tau + 1]
+            if (
+                handoff_block is not None
+                and handoff_block - 1 >= 0
+                and handoff_block + 1 < len(blocks)
+            ):
+                candidates = [handoff_block - 1, handoff_block, handoff_block + 1]
                 continuations: dict[str, Any] = {}
                 for block_index in candidates:
                     prefix_pos = blocks[block_index].end_token
@@ -464,20 +524,20 @@ def run_visual_handoff(
                     student, models.student_processor,
                     image=images.degraded,
                     prompt_text=prompt_text,
-                    prefix_ids=response_ids[: blocks[tau].end_token],
+                    prefix_ids=response_ids[: blocks[handoff_block].end_token],
                     gold_answer=gold_answer,
                     k=continuation_k,
                     seed=seed + hash(uid) % 10**6 + 2000,
                     max_continuation_tokens=max_continuation_tokens,
                     device=student_device,
                 )
-                record["h_V"] = blocks[tau].end_token
+                record["h_V"] = blocks[handoff_block].end_token
                 record["continuation"] = {
                     "full_image": continuations,
                     "degraded_at_hV": degraded_outcome,
                 }
                 if h_star_block is not None:
-                    record["verdict"] = abs(tau - h_star_block) <= 1
+                    record["verdict"] = abs(handoff_block - h_star_block) <= 1
             records.append(record)
         except Exception as exc:  # keep the shard alive; audit failures
             records.append(

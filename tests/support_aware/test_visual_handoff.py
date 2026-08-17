@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import torch
+
 from dual_track_opd.support_aware.reasoning_blocks import ReasoningBlock
 from dual_track_opd.support_aware.visual_handoff import (
     _block_containing_token,
     _block_signals,
+    _handoff_block_index,
+    _jensen_shannon_from_logits,
     _visual_change_point,
 )
 
@@ -37,6 +41,21 @@ def test_change_point_requires_downward_direction() -> None:
     assert result["significant"] is False
 
 
+def test_handoff_is_last_pre_change_block_and_requires_significance() -> None:
+    assert _handoff_block_index({"significant": True, "tau_block": 3}) == 2
+    assert _handoff_block_index({"significant": False, "tau_block": 3}) is None
+    assert _handoff_block_index({"significant": True, "tau_block": None}) is None
+
+
+def test_full_vocab_js_is_zero_only_for_identical_distributions() -> None:
+    first = torch.tensor([[8.0, -8.0, -8.0], [0.0, 0.0, 0.0]])
+    second = torch.tensor([[-8.0, 8.0, -8.0], [0.0, 0.0, 0.0]])
+    js = _jensen_shannon_from_logits(first, second)
+    assert js.shape == (2,)
+    assert js[0] > 0.6
+    assert torch.allclose(js[1], torch.tensor(0.0), atol=1e-7)
+
+
 def test_block_signals_delta_v() -> None:
     blocks = [
         ReasoningBlock(0, 4, 0, 4, "sentence", "abcd"),
@@ -45,15 +64,13 @@ def test_block_signals_delta_v() -> None:
     signals = _block_signals(
         response_ids=[0, 1, 2, 3, 4, 5, 6, 7],
         blocks=blocks,
-        teacher_logps={
-            "full": [0.0] * 8,
+        teacher_js={
             "degraded": [0.0] * 8,
             "null": [0.0] * 8,
         },
-        student_logps={
-            "full": [1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0],
-            "degraded": [0.0] * 8,
-            "null": [0.0] * 8,
+        student_js={
+            "degraded": [1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0],
+            "null": [1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0],
         },
         null_control=True,
     )

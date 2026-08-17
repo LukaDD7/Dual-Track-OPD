@@ -9,6 +9,7 @@ from dual_track_opd.support_aware.support_transition_loss import (
     suffix_rkl_k1,
     suffix_rkl_k1_sampled,
     suffix_task_grpo,
+    topk_tail_fkl,
 )
 
 
@@ -44,6 +45,38 @@ def test_prefix_fkl_ce_is_differentiable_and_region_normalized():
     assert tensors["student_logits"].grad is not None
     assert torch.isfinite(tensors["student_logits"].grad).all()
     assert bool((tensors["student_logits"].grad != 0).any())
+
+
+def test_topk_tail_fkl_uses_soft_teacher_distribution() -> None:
+    tensors = _tensors(vocab=7)
+    loss = topk_tail_fkl(
+        tensors["student_logits"],
+        tensors["teacher_logits"],
+        tensors["prefix_mask"],
+        top_k=3,
+    )
+    assert loss.requires_grad and torch.isfinite(loss)
+    loss.backward()
+    assert tensors["student_logits"].grad is not None
+    assert torch.isfinite(tensors["student_logits"].grad).all()
+
+
+def test_topk_tail_fkl_matches_exact_fkl_when_k_covers_vocab() -> None:
+    tensors = _tensors(vocab=5)
+    actual = topk_tail_fkl(
+        tensors["student_logits"],
+        tensors["teacher_logits"],
+        tensors["prefix_mask"],
+        top_k=100,
+    )
+    teacher_logp = torch.log_softmax(tensors["teacher_logits"].float(), dim=-1)
+    student_logp = torch.log_softmax(tensors["student_logits"].float(), dim=-1)
+    exact_tokens = torch.sum(
+        teacher_logp.exp() * (teacher_logp - student_logp),
+        dim=-1,
+    )
+    expected = exact_tokens[tensors["prefix_mask"]].mean()
+    assert torch.allclose(actual, expected, atol=1e-6)
 
 
 def test_suffix_rkl_k1_is_differentiable():

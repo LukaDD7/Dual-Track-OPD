@@ -9,6 +9,10 @@ Derives per-token local support quantities from the symmetric Top-100 cache
     R_t = Dtilde_t * Ctilde_t                              (RKL need, TA-OPD)
     F_t = Dtilde_t * (1 - Ctilde_t) * Q_t                  (FKL need hypothesis)
 
+``Ctilde`` and ``Dtilde`` use TA-OPD's bounded 5th/95th-percentile
+normalization over the diagnostic token bank.  They are never unbounded
+z-scores, so ``1 - Ctilde`` remains a valid incompatibility factor.
+
 Then aggregates tokens to reasoning blocks (via ``reasoning_blocks``) and
 writes the Operator-Need Report plus a block feature table.  No model forward,
 no training.  K=16 primary; K=8/32/64 sensitivity derived from the cache.
@@ -32,7 +36,7 @@ from .reachability_proxy import teacher_trace_id
 from .reasoning_blocks import blocks_with_token_spans
 
 
-SCHEMA_VERSION = "support-aware-operator-need-v1"
+SCHEMA_VERSION = "support-aware-operator-need-v2"
 DEFAULT_KS = (16,)
 SENSITIVITY_KS = (8, 32, 64)
 EPS = 1e-9
@@ -189,13 +193,29 @@ def _token_scalars(
     return c_t, d_t, q_t, len(off_ids), off_ids, off_logp
 
 
-def _trajectory_normalize(values: Sequence[float]) -> list[float]:
+def _robust_unit_normalize(
+    values: Sequence[float],
+    *,
+    q_low: float = 0.05,
+    q_high: float = 0.95,
+) -> list[float]:
+    """TA-OPD-style quantile normalization clipped to ``[0, 1]``."""
+
     array = np.asarray(values, dtype=np.float64)
-    mean = float(array.mean())
-    std = float(array.std())
-    if std <= EPS:
+    if array.size == 0:
+        return []
+    if not 0.0 <= q_low < q_high <= 1.0:
+        raise ValueError("normalization quantiles must satisfy 0 <= q_low < q_high <= 1")
+    finite = array[np.isfinite(array)]
+    if finite.size == 0:
         return [0.0] * len(values)
-    return [float((value - mean) / std) for value in values]
+    lower, upper = np.quantile(finite, [q_low, q_high])
+    denominator = float(upper - lower)
+    if abs(denominator) <= EPS:
+        return [0.0] * len(values)
+    normalized = np.clip((array - lower) / denominator, 0.0, 1.0)
+    normalized[~np.isfinite(array)] = 0.0
+    return [float(value) for value in normalized]
 
 
 def _load_tokenizer(model_path: str):
@@ -255,26 +275,12 @@ def run_operator_need(
                 if 0 <= token_index < len(block_by_token):
                     block_by_token[token_index] = index
 
-        trace_scalars: list[tuple[float, float, float, float, float]] = []
-        raw_c: list[float] = []
-        raw_d: list[float] = []
         for row in rows:
             c_t, d_t, q_t, _, _, _ = _token_scalars(row, primary_k)
-            raw_c.append(c_t)
-            raw_d.append(d_t)
             primary_c.append(c_t)
             for k in SENSITIVITY_KS:
                 c_k, _, _, _, _, _ = _token_scalars(row, k)
                 sensitivity[k].append(c_k)
-            trace_scalars.append((c_t, d_t, q_t, 0.0, 0.0))
-        c_norm = _trajectory_normalize(raw_c)
-        d_norm = _trajectory_normalize(raw_d)
-        for index, row in enumerate(rows):
-            c_t, d_t, q_t = trace_scalars[index][0], trace_scalars[index][1], trace_scalars[index][2]
-            c_tilde = c_norm[index]
-            d_tilde = d_norm[index]
-            r_t = d_tilde * c_tilde
-            f_t = d_tilde * (1.0 - c_tilde) * q_t
             per_token.append(
                 {
                     "prompt_id": uid,
@@ -285,14 +291,21 @@ def run_operator_need(
                     "C_t": c_t,
                     "D_t": d_t,
                     "Q_t": q_t,
-                    "R_t": r_t,
-                    "F_t": f_t,
-                    "C_tilde": c_tilde,
-                    "D_tilde": d_tilde,
                 }
             )
-            per_trace[uid].append(f_t)
         covered_tokens += len(rows)
+
+    # TA-OPD normalizes a token batch with robust quantiles before composing
+    # learnable/incompatible disagreement.  The offline token bank is the
+    # corresponding comparison batch for this diagnostic.
+    c_norm = _robust_unit_normalize([record["C_t"] for record in per_token])
+    d_norm = _robust_unit_normalize([record["D_t"] for record in per_token])
+    for record, c_tilde, d_tilde in zip(per_token, c_norm, d_norm, strict=True):
+        record["C_tilde"] = c_tilde
+        record["D_tilde"] = d_tilde
+        record["R_t"] = d_tilde * c_tilde
+        record["F_t"] = d_tilde * (1.0 - c_tilde) * float(record["Q_t"])
+        per_trace[str(record["prompt_id"])].append(float(record["F_t"]))
 
     # Block aggregation.
     block_rows: list[dict[str, Any]] = []
@@ -367,7 +380,12 @@ def run_operator_need(
             "missing_traces": missing_traces,
             "span_mismatch": span_mismatch,
         },
-        "settings": {"primary_k": primary_k, "sensitivity_ks": list(SENSITIVITY_KS), "seed": seed},
+        "settings": {
+            "primary_k": primary_k,
+            "sensitivity_ks": list(SENSITIVITY_KS),
+            "seed": seed,
+            "normalization": "token_bank_quantile_05_95_clipped_0_1",
+        },
         "block_stats": {
             "F_i": {
                 "mean": float(f_values.mean()) if len(f_values) else None,

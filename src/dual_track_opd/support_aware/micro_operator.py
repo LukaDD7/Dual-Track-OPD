@@ -1,8 +1,9 @@
 """Micro-operator causal experiment (frozen plan B7).
 
-From a frozen student checkpoint ``theta_0``, for each candidate reasoning
-block (high-F, high-R, low-F/low-R control) run a very short FKL or RKL
-update on that block only (1-4 optimizer steps), then measure the fresh
+From a frozen student checkpoint ``theta_0``, for each confirmed pre-h* candidate
+reasoning block (high-F, high-R, low-F/low-R control) run a very short soft
+Top-K+tail FKL or full-vocabulary RKL update on that block only (1-4 optimizer
+steps), then measure the fresh
 no-prefix native rollout improvement:
 
     theta_i^FKL = theta_0 - eta * grad L_FKL(B_i)
@@ -42,11 +43,11 @@ from .causal_runtime import (
 from .diagnostic import build_prompt, extract_image
 from .prefix_intervention import generate_continuation
 from .reasoning_blocks import blocks_with_token_spans
-from .support_transition_loss import prefix_fkl_ce, suffix_rkl_k1
+from .support_transition_loss import suffix_rkl_k1, topk_tail_fkl
 from .verifier import verify_answer
 
 
-SCHEMA_VERSION = "support-aware-micro-operator-v1"
+SCHEMA_VERSION = "support-aware-micro-operator-v2"
 
 
 def _read_jsonl(path: Path):
@@ -71,7 +72,11 @@ def select_candidate_blocks(
     rescue_set = set(rescue_uids)
     by_uid: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in _read_jsonl(Path(block_table_path)):
-        if row.get("prompt_id") in rescue_set and int(row.get("token_count") or 0) >= min_tokens:
+        if (
+            row.get("prompt_id") in rescue_set
+            and row.get("pre_hstar") is True
+            and int(row.get("token_count") or 0) >= min_tokens
+        ):
             by_uid[row["prompt_id"]].append(row)
     candidates: list[dict[str, Any]] = []
     uids = sorted(by_uid)
@@ -98,6 +103,7 @@ def select_candidate_blocks(
                     "R_i": row["R_i"],
                     "C_i": row.get("C_i"),
                     "Q_i": row.get("Q_i"),
+                    "pre_hstar": True,
                 }
             )
             if len(candidates) >= max_candidates:
@@ -169,6 +175,7 @@ def _micro_update(
     steps: int,
     lr: float,
     device: str,
+    fkl_top_k: int = 100,
 ) -> dict[str, Any]:
     """Run 1..steps optimizer updates; return loss/grad diagnostics."""
 
@@ -183,7 +190,14 @@ def _micro_update(
             student, prompt_inputs, response_ids, start=start, end=end, device=device
         ).float()
         if operator == "FKL":
-            loss = prefix_fkl_ce(student_logits, block_ids, mask)
+            if teacher_logits is None:
+                raise ValueError("soft FKL candidate requires teacher logits")
+            loss = topk_tail_fkl(
+                student_logits,
+                teacher_logits.to(student_logits.device).float(),
+                mask,
+                top_k=fkl_top_k,
+            )
         else:
             if teacher_logits is None:
                 raise ValueError("RKL candidate requires teacher logits")
@@ -260,6 +274,7 @@ def run_micro_operator(
     rollout_k: int,
     steps: int,
     lr: float,
+    fkl_top_k: int,
     seed: int,
 ) -> dict[str, Any]:
     import pandas as pd
@@ -379,6 +394,7 @@ def run_micro_operator(
                 steps=steps,
                 lr=lr,
                 device=student_device,
+                fkl_top_k=fkl_top_k,
             )
             q_i = _native_pass_rate(
                 model_i,
@@ -435,6 +451,11 @@ def run_micro_operator(
 
     report = _summarize(results)
     report["schema_version"] = SCHEMA_VERSION
+    report["operator_definitions"] = {
+        "FKL": f"teacher_top_{fkl_top_k}_plus_tail_forward_kl",
+        "RKL": "full_vocabulary_reverse_kl",
+        "candidate_scope": "confirmed_pre_hstar_blocks_only",
+    }
     report["results_path"] = str(table_path)
     report_path = output / "micro_operator_report.json"
     report_path.write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
@@ -510,6 +531,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--rollout-k", type=int, default=8)
     parser.add_argument("--steps", type=int, default=2)
     parser.add_argument("--lr", type=float, default=2e-5)
+    parser.add_argument("--fkl-top-k", type=int, default=100)
     parser.add_argument("--max-candidates", type=int, default=60)
     parser.add_argument("--seed", type=int, default=20260817)
     return parser
@@ -546,6 +568,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         rollout_k=args.rollout_k,
         steps=args.steps,
         lr=args.lr,
+        fkl_top_k=args.fkl_top_k,
         seed=args.seed,
     )
     print(json.dumps(report, indent=2, ensure_ascii=False))

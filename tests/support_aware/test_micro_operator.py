@@ -28,6 +28,7 @@ def _write_blocks(path: Path) -> None:
                     "R_i": [0.0, 0.2, 0.8, 0.3, 0.1][index] if uid == "p1" else 0.0,
                     "C_i": 0.99,
                     "Q_i": 0.5,
+                    "pre_hstar": index < 4,
                 }
             )
     with path.open("w", encoding="utf-8") as handle:
@@ -49,7 +50,7 @@ def test_select_candidate_blocks_picks_extremes() -> None:
             by_uid.setdefault(candidate["prompt_id"], {})[candidate["operator"]] = candidate[
                 "block_index"
             ]
-        assert by_uid["p1"]["FKL"] == 4  # highest F_i
+        assert by_uid["p1"]["FKL"] == 3  # post-h* block 4 is ineligible
         assert by_uid["p1"]["RKL"] == 2  # highest R_i
         assert by_uid["p1"]["control"] == 0  # lowest |F|+|R|
         assert by_uid["p2"]["FKL"] == 0  # ties resolve to lowest block index

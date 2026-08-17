@@ -4,7 +4,23 @@ from __future__ import annotations
 
 import math
 
-from dual_track_opd.support_aware.operator_need import _token_scalars
+from dual_track_opd.support_aware.operator_need import (
+    _robust_unit_normalize,
+    _token_scalars,
+)
+
+
+def test_robust_normalization_is_bounded_and_clips_outliers() -> None:
+    values = [-100.0, 0.0, 1.0, 2.0, 3.0, 100.0]
+    normalized = _robust_unit_normalize(values)
+    assert normalized[0] == 0.0
+    assert normalized[-1] == 1.0
+    assert all(0.0 <= value <= 1.0 for value in normalized)
+    assert normalized == sorted(normalized)
+
+
+def test_robust_normalization_constant_input_is_zero() -> None:
+    assert _robust_unit_normalize([0.9, 0.9, 0.9]) == [0.0, 0.0, 0.0]
 
 
 def _row(

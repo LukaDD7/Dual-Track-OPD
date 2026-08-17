@@ -46,6 +46,59 @@ def prefix_fkl_ce(
     return masked_mean(token_nll, prefix_mask)
 
 
+def topk_tail_fkl(
+    student_logits: torch.Tensor,
+    teacher_logits: torch.Tensor,
+    mask: torch.Tensor,
+    *,
+    top_k: int = 100,
+) -> torch.Tensor:
+    """Soft forward KL on teacher Top-K plus one complement-tail bucket.
+
+    Unlike ``prefix_fkl_ce``, this consumes the teacher distribution rather
+    than one sampled teacher token.  The complement vocabulary is aggregated
+    into a single probability bucket, which keeps the intended forward-KL
+    acquisition direction while avoiding a misleading hard-token/SFT label.
+    """
+
+    if student_logits.shape != teacher_logits.shape:
+        raise ValueError(
+            f"student {tuple(student_logits.shape)} != teacher {tuple(teacher_logits.shape)}"
+        )
+    if student_logits.ndim != 3:
+        raise ValueError(
+            f"logits must be [batch, seq, vocab]; got {tuple(student_logits.shape)}"
+        )
+    if top_k <= 0:
+        raise ValueError("top_k must be positive")
+    teacher_logp = _log_probs(teacher_logits.float())
+    student_logp = _log_probs(student_logits.float())
+    vocab_size = int(student_logits.shape[-1])
+    k = min(top_k, vocab_size)
+    if k == vocab_size:
+        token_fkl = torch.sum(
+            teacher_logp.exp() * (teacher_logp - student_logp),
+            dim=-1,
+        )
+        return masked_mean(token_fkl, mask)
+
+    teacher_top_logp, teacher_top_ids = torch.topk(teacher_logp, k=k, dim=-1)
+    student_top_logp = student_logp.gather(-1, teacher_top_ids)
+    teacher_top_prob = teacher_top_logp.exp()
+    top_term = torch.sum(
+        teacher_top_prob * (teacher_top_logp - student_top_logp),
+        dim=-1,
+    )
+
+    epsilon = torch.finfo(teacher_logp.dtype).eps
+    teacher_tail = (1.0 - teacher_top_prob.sum(dim=-1)).clamp_min(epsilon)
+    student_tail = (
+        1.0 - student_top_logp.exp().sum(dim=-1)
+    ).clamp_min(epsilon)
+    tail_term = teacher_tail * (teacher_tail.log() - student_tail.log())
+    return masked_mean(top_term + tail_term, mask)
+
+
 def suffix_rkl_k1(
     student_logits: torch.Tensor,
     teacher_logits: torch.Tensor,
