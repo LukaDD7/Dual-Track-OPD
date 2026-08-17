@@ -506,6 +506,12 @@ def run_visual_handoff_merge(*, shard_dir: str, output_dir: str) -> dict[str, An
     records: list[dict[str, Any]] = []
     for path in sorted(shard_root.glob("visual_handoff_records.s*.jsonl")):
         records.extend(_read_jsonl(path))
+    schemas = {record.get("schema_version") for record in records}
+    if len(schemas) > 1:
+        raise ValueError(
+            f"mixed schema versions across shards: {sorted(schemas)}; "
+            "stale v1 records must be cleared before merging"
+        )
     output = Path(output_dir).expanduser().resolve()
     output.mkdir(parents=True, exist_ok=True)
     merged_path = output / "visual_handoff_records.jsonl"
@@ -543,6 +549,10 @@ def run_visual_handoff_merge(*, shard_dir: str, output_dir: str) -> dict[str, An
             "errors": len(records) - len(ok),
             "with_change_point": len(with_hv),
             "with_gold_and_change_point": len(with_gold),
+            "schema_version": sorted(schemas)[0] if schemas else None,
+            "degraded_modes": sorted(
+                {record.get("degraded_mode") for record in ok if record.get("degraded_mode")}
+            ),
         },
         "change_point": {
             "significant_count": sum(
