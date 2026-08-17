@@ -22,9 +22,7 @@ import argparse
 import json
 import math
 import os
-import random
 from collections import defaultdict
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -33,7 +31,7 @@ import torch
 from PIL import Image
 
 from .causal_image import build_image_conditions
-from .causal_runtime import load_runtime_models, response_chunk_logits
+from .causal_runtime import _prompt_inputs, load_runtime_models, response_chunk_logits
 from .diagnostic import build_prompt, extract_image
 from .prefix_intervention import generate_continuation
 from .reachability_proxy import teacher_trace_id
@@ -149,8 +147,6 @@ def _reference_logps(
     )
     logps: list[list[float]] = []
     for name, image in (("full", images.full), ("degraded", images.degraded)):
-        from .causal_runtime import _prompt_inputs
-
         prompt_inputs = _prompt_inputs(processor, image, prompt_text)
         logits, _ = response_chunk_logits(
             model,
