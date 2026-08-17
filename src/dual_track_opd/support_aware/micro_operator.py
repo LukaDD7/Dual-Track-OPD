@@ -475,7 +475,11 @@ def _summarize(results: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         "mean_G_fkl": float(np.mean([row["G_i"] for row in fkl])) if fkl else None,
         "mean_G_rkl": float(np.mean([row["G_i"] for row in rkl])) if rkl else None,
         "mean_G_fkl_by_role": {
-            role: float(np.mean([row["G_i"] for row in fkl if row.get("role") == role]))
+            role: (
+                float(np.mean([row["G_i"] for row in fkl if row.get("role") == role]))
+                if any(row.get("role") == role for row in fkl)
+                else None
+            )
             for role in ("FKL", "RKL", "control")
         },
         "mean_block_logp_delta": {
