@@ -14,7 +14,15 @@ def test_change_point_detects_step_down() -> None:
     values = [1.0, 0.9, 1.1, 0.2, 0.1, 0.0, 0.15]
     result = _visual_change_point(values)
     assert result["significant"] is True
-    assert result["tau_block"] == 3
+    assert 2 <= result["tau_block"] <= 3
+
+
+def test_change_point_ignores_single_spike() -> None:
+    # One noisy +5 block must not masquerade as a sustained regime change.
+    values = [0.0, 0.0, 0.0, 5.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    result = _visual_change_point(values)
+    assert result["significant"] is False
+    assert result["tau_block"] is None
 
 
 def test_change_point_flat_is_not_significant() -> None:

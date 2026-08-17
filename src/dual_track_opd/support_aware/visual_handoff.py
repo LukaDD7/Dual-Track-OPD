@@ -196,13 +196,27 @@ def _block_signals(
 
 
 def _visual_change_point(values: Sequence[float]) -> dict[str, Any]:
-    """One-downward BIC change point (Prefix Teach, Suffix Fade style)."""
+    """Robust one-downward BIC change point (Prefix Teach, Suffix Fade style).
+
+    Guards against single-block noisy spikes: winsorize the block series to
+    the 5th/95th percentiles, median-filter with window 3, and require at
+    least 3 blocks per regime.  Only a *sustained* high -> low visual-gap
+    transition qualifies as ``h_V``.
+    """
 
     n = len(values)
     result: dict[str, Any] = {"tau_block": None, "bic0": None, "bic1": None, "significant": False}
-    if n < 4:
+    if n < 6:
         return result
     array = np.asarray(values, dtype=np.float64)
+    lower, upper = np.percentile(array, [5.0, 95.0])
+    if upper - lower <= 1e-12:
+        return result
+    array = np.clip(array, lower, upper)
+    array = np.asarray(
+        [float(np.median(array[max(0, index - 1) : index + 2])) for index in range(n)],
+        dtype=np.float64,
+    )
     total_mean = float(array.mean())
     rss0 = float(np.sum((array - total_mean) ** 2))
     if rss0 <= 1e-12:
@@ -210,8 +224,7 @@ def _visual_change_point(values: Sequence[float]) -> dict[str, Any]:
     bic0 = n * math.log(rss0 / n) + 1 * math.log(n)
     best_tau: int | None = None
     best_bic1 = math.inf
-    best_rss1 = math.inf
-    for tau in range(1, n - 1):
+    for tau in range(3, n - 3):
         pre = array[:tau]
         post = array[tau:]
         mu_pre = float(pre.mean())
@@ -219,11 +232,12 @@ def _visual_change_point(values: Sequence[float]) -> dict[str, Any]:
         if mu_pre <= mu_post:
             continue
         rss1 = float(np.sum((pre - mu_pre) ** 2) + np.sum((post - mu_post) ** 2))
+        if mu_pre - mu_post < 0.5 * max(float(array.std()), 1e-6):
+            continue
         bic1 = n * math.log(rss1 / n) + 3 * math.log(n)
         if bic1 < best_bic1:
             best_bic1 = bic1
             best_tau = tau
-            best_rss1 = rss1
     if best_tau is None:
         return result
     result.update(
