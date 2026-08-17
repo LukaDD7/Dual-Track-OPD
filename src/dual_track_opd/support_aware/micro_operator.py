@@ -126,10 +126,10 @@ def _train_block_logits(
     outputs = model(**model_inputs, **kwargs)
     logits = outputs.logits
     if used_keep and int(logits.shape[1]) == end - start + 1:
-        selected = logits[0, :-1, :]
+        selected = logits[:, :-1, :]
     else:
         prompt_length = int(prompt_inputs["input_ids"].shape[1])
-        selected = logits[0, prompt_length - 1 + start : prompt_length - 1 + end, :]
+        selected = logits[:, prompt_length - 1 + start : prompt_length - 1 + end, :]
     return selected
 
 
@@ -280,7 +280,7 @@ def run_micro_operator(
         image = extract_image(cohort_row).convert("RGB")
         images = build_image_conditions(image, degraded_mode=degraded_mode)
         block_ids = torch.tensor(
-            response_ids[int(candidate["start_token"]) : int(candidate["end_token"])],
+            [response_ids[int(candidate["start_token"]) : int(candidate["end_token"])]],
             dtype=torch.long,
             device=student_device,
         )
@@ -299,6 +299,7 @@ def run_micro_operator(
                 end=int(candidate["end_token"]),
                 device=teacher_device,
             )
+            teacher_logits = teacher_logits.unsqueeze(0)
 
         q0 = baseline_cache.get(uid)
         if q0 is None:
