@@ -3,14 +3,11 @@
 日期：2026-08-19
 目的：为 SFT / RL-only / SFT-then-RL / OPD-FKL 四路对比准备统一训练集。
 
-## 当前状态
+## 当前状态（2026-08-19 已全部完成）
 
-- MMFineReason-SFT-123K：下载中（并行 Range 下载，约 2.5–3.7 MB/s）
-- the_cauldron：下载中（ModelScope 镜像，16 并发，断点续传）
-- 监控：
-  - PID 文件：`$DTOPD_ROOT/logs/download_mmfinereason.pid`、`$DTOPD_ROOT/logs/download_cauldron.pid`
-  - 日志：`$DTOPD_ROOT/logs/download_mmfinereason.log`、`$DTOPD_ROOT/logs/download_cauldron.log`
-  - 进度：`du -sh $DTOPD_ROOT/dataset/MMFineReason-SFT-123K-Qwen3-VL-235B-Thinking $DTOPD_ROOT/dataset/the_cauldron`
+- MMFineReason-SFT-123K：✅ 完成。18/18 个 parquet 分片、122,603 行、7.19 GB（`data/` 目录，文件名与 HF 完全一致），parquet 可读校验通过。
+- the_cauldron：✅ 完成。50 个子集、938 个 parquet、约 158 GB，无残留 `.incomplete` 文件，抽查 ai2d/chartqa/clevr_math/okvqa/scienceqa/tabmwp 均可读。
+- 两个任务均从 ModelScope 下载（setsid 后台），进程已正常退出；日志见 `$DTOPD_ROOT/logs/download_*.log`。
 
 ## 数据集信息
 
@@ -28,9 +25,9 @@
 
 ## 磁盘
 
-- `/inspire/hdd/...`（10 T，已用 9.3 T，可用约 730 G，93% 满；inode 61%）
-- `$DTOPD_ROOT/dataset/` 原有约 96 G；两个数据集合计新增约 176 G，落盘后可用空间约 550 G
-- 不要下载到 `/tmp`：overlay 临时盘，重启即丢
+- `/inspire/hdd/...` 为多用户共享 GPFS（10 T）：下载前可用约 730 G（93% 满），下载完成时约 462 G（96% 满）。期间约 140 G 额外占用来自其他用户/进程，非本任务造成。
+- 本任务新增：the_cauldron ~158 G + MMFineReason ~7.2 G ≈ 165 G。
+- 不要下载到 `/tmp`：overlay 临时盘，重启即丢。
 
 ## 下载方式与加速（实测）
 
@@ -45,11 +42,12 @@
 已知坑：
 
 1. `huggingface_hub` >= 1.26 已弃用 `hf_transfer`，默认走 Xet CDN；本集群到 Xet 的 `s3::get_range` 反复重试不可用。因此 MMFineReason 使用仓库脚本并行 Range 下载：
-   `setsid python scripts/hpc/download_mmfinereason_parquet.py > $DTOPD_ROOT/logs/download_mmfinereason.log 2>&1 &`
+   （备用方案；实测 hf.co 直连约 0.65 MB/s、8 路并行约 3.7 MB/s，但长连接频繁挂起，不推荐主用）
 2. 后台任务必须用 `setsid` 启动：本环境 `nohup` 起的子进程会随 exec 会话结束被清理（首次启动两个任务都因此中断过）。
-3. Cauldron 走 ModelScope 镜像（文件与 HF 完全一致，已按大小核对）：
-   `setsid $DTOPD_ROOT/envs/va-opd-qwen35-cu128/bin/modelscope download --repo-type dataset AI-ModelScope/the_cauldron --local-dir $DTOPD_ROOT/dataset/the_cauldron --max-workers 16 > $DTOPD_ROOT/logs/download_cauldron.log 2>&1 &`
-4. ModelScope 上只有 MMFineReason 原始 1.8M 组织镜像（BMMR/MMR1/Euclid30K 等），没有 123K SFT 子集，不要下错。
+3. **两个数据集的首选下载源都是 ModelScope**（文件与 HF 完全一致，已按大小核对）：
+   - Cauldron：`modelscope download --repo-type dataset AI-ModelScope/the_cauldron --local-dir $DTOPD_ROOT/dataset/the_cauldron --max-workers 16`
+   - MMFineReason-123K：`modelscope download --repo-type dataset OpenDataArena/MMFineReason-SFT-123K-Qwen3-VL-235B-Thinking --local-dir $DTOPD_ROOT/dataset/MMFineReason-SFT-123K-Qwen3-VL-235B-Thinking --include 'data/*.parquet' --max-workers 16`
+4. 实测速度：ModelScope 单流 ~9.2 MB/s、16 并发可达 ~90 MB/s；hf-mirror 反而最慢（~0.29 MB/s）。MMFineReason 在 ModelScope 上有官方镜像（之前误判只有 1.8M 原始组织镜像，实际 123K SFT 子集也在）。
 
 下载环境：`$DTOPD_ROOT/envs/va-opd-qwen35-cu128`（已装 `hf_transfer`（弃用）与 `modelscope 1.39.1`）；`HF_HOME=$DTOPD_ROOT/.conda_cache/huggingface`。
 
@@ -68,7 +66,7 @@
 
 ## 后续步骤
 
-1. MMFineReason 下载完成后生成 manifest（`data/manifests/`）并记录 SHA256 清单
+1. 生成 manifest（`data/manifests/`）并记录 SHA256 清单（尚未计算）
 2. 写 MMFineReason → 仓库 parquet schema 的 adapter（question/choices/answer/condition_inputs + 图片 bytes）
 3. 按 source 实现 verifier，先跑 dataset signal audit 再进真训练
-4. Cauldron 按需保留子集（可删除未选中的 config 释放 ~169 GB 中大部分空间）
+4. Cauldron 按需保留子集（可删除未选中的 config 释放 ~158 GB 中大部分空间）
