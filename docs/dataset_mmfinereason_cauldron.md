@@ -23,6 +23,52 @@
 
 选择 `lzy/dataset` 而非仓库内：仓库只放 manifest 与代码（AGENTS git 卫生要求），数据、权重、原始输出一律不入库；同一文件系统下两个位置无 IO 差异。
 
+## 目录结构
+
+### MMFineReason-SFT-123K（`$DTOPD_ROOT/dataset/MMFineReason-SFT-123K-Qwen3-VL-235B-Thinking/`）
+
+```text
+.
+├── README.md / .gitattributes        # 随数据集附带
+├── .cache/huggingface/               # HF 元数据缓存（可忽略，勿入库）
+└── data/
+    ├── train-00000-of-00018.parquet  # 18 个分片，共 122,603 行，7.19 GB
+    └── train-00001-of-00018.parquet  # ... train-00017-of-00018.parquet
+```
+
+- 文件名与 HF 原始布局完全一致（`data/train-%05d-of-00018.parquet`），无 hash 后缀。
+- parquet 列：`question`, `answer`, `ori_question`, `original_answer`, `image`(PIL bytes), `caption`, `qwen3vl_235b_thinking_response`, `pass_rate`, `is_consistent`, `consistency_analysis`, `source`, `id`。
+- 读取示例：
+  ```python
+  import glob
+  from datasets import load_dataset
+  ds = load_dataset("parquet", data_files=sorted(glob.glob(
+      "/inspire/hdd/global_user/mengweicheng-240108120092/lzy/dataset/"
+      "MMFineReason-SFT-123K-Qwen3-VL-235B-Thinking/data/*.parquet"))
+  )
+  ```
+
+### the_cauldron（`$DTOPD_ROOT/dataset/the_cauldron/`）
+
+```text
+.
+├── README.md / .gitattributes
+├── ai2d/train-00000-of-00001-<sha>.parquet            # 50 个 config 子目录
+├── chartqa/train-00000-of-00002-<sha>.parquet         # 每个 config 独立分片编号
+├── okvqa/train-00000-of-00563-<sha>.parquet           # okvqa 有 563 个小文件
+├── clevr_math/train-00000-of-00027-<sha>.parquet      # clevr_math 27 个文件
+└── ... 共 938 个 parquet，约 158 GB
+```
+
+- 文件名为 ModelScope 风格：`train-%05d-of-%05d-<sha256 前缀>.parquet`（带 hash 后缀，与 HF 的 `data/` 布局不同，读取时按目录 glob 即可，不要硬编码 hash）。
+- 每个 config 的分片编号互相独立（ai2d 是 `of-00001`，chartqa 是 `of-00002`，okvqa 是 `of-00563`）；文件数≠数据量（okvqa 563 个小文件每文件仅十几行）。
+- parquet 列统一为：`images`（PIL 图片序列，可多张）、`texts`（每轮 `{user, assistant, source}`，可多轮）。
+- 读取示例：
+  ```python
+  from datasets import load_dataset
+  ds = load_dataset("parquet", data_files="/inspire/hdd/global_user/mengweicheng-240108120092/lzy/dataset/the_cauldron/chartqa/*.parquet")
+  ```
+
 ## 磁盘
 
 - `/inspire/hdd/...` 为多用户共享 GPFS（10 T）：下载前可用约 730 G（93% 满），下载完成时约 462 G（96% 满）。期间约 140 G 额外占用来自其他用户/进程，非本任务造成。
