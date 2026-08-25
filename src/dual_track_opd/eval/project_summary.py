@@ -10,7 +10,7 @@ from statistics import fmean
 from typing import Any
 
 from .benchmark_suite import BenchmarkSpec, load_suite
-from .score_open import normalize_answer
+from .score_open import extract_normalized_answer, normalize_answer
 
 
 def _latest_result_json(directory: Path) -> Path | None:
@@ -69,15 +69,19 @@ def _summarize_replay(run_dir: Path, spec: BenchmarkSpec) -> tuple[float | None,
             item = json.loads(line)
             if item.get("error"):
                 continue
-            prediction = normalize_answer(str(item.get("prediction", "")))
+            prediction = extract_normalized_answer(str(item.get("prediction", "")))
             truth_value = item.get("ground_truth")
             truths = truth_value if isinstance(truth_value, list) else [truth_value]
             normalized_truths = {
                 normalize_answer(str(truth)) for truth in truths if truth not in (None, "")
             }
+            if prediction is None:
+                full_prediction = normalize_answer(str(item.get("prediction", "")))
+                if full_prediction in normalized_truths:
+                    prediction = full_prediction
             if prediction and normalized_truths:
                 total += 1
-                correct += int(prediction in normalized_truths)
+                correct += int(prediction is not None and prediction in normalized_truths)
     return (correct / total if total else None), str(path)
 
 

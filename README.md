@@ -60,6 +60,12 @@ VA-OPD path.
 For the contract benchmark baseline using the reproduced Vision-OPD checkpoint,
 see [docs/project_benchmark_vision_opd.md](docs/project_benchmark_vision_opd.md).
 
+For the canonical six-benchmark evaluation of any trained HF-format checkpoint
+(GQA, DynaMath, ViewSpatial-Bench, MMMU-Pro, ReMI, and MMBench), use
+[scripts/eval/run_target_benchmarks.sh](scripts/eval/run_target_benchmarks.sh)
+and follow
+[docs/target_benchmark_eval_runbook_20260825.md](docs/target_benchmark_eval_runbook_20260825.md).
+
 ## First Milestones
 
 1. Toy OPD loss: keep CPU tests green and validate weighted KL behavior.

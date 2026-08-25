@@ -26,6 +26,13 @@ defaults:
   workers: 8
 
 profiles:
+  target_benchmarks:
+    - gqa
+    - mmbench
+    - remi
+    - dynamath
+    - viewspatial
+    - mmmu_pro
   smoke:
     - viewspatial
     - dynamath

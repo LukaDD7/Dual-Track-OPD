@@ -243,6 +243,7 @@ def build_command(
             str(spec.max_new_tokens),
             "--workers",
             str(defaults.get("workers", 8)),
+            "--resume",
         ]
         if limit is not None:
             command.extend(["--limit", str(int(limit))])

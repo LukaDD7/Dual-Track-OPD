@@ -33,6 +33,12 @@ def test_acceptance_core_has_two_items_per_category() -> None:
     assert categories.count("comprehensive") == 2
 
 
+def test_target_profile_covers_requested_six_benchmarks() -> None:
+    suite = load_suite(CONFIG)
+    selected = {spec.benchmark_id for spec in select_benchmarks(suite, "target_benchmarks")}
+    assert selected == {"gqa", "mmbench", "remi", "dynamath", "viewspatial", "mmmu_pro"}
+
+
 def test_judge_is_deferred_or_predict_only() -> None:
     suite = load_suite(CONFIG)
     spec = suite.benchmarks["mathvista"]
@@ -72,6 +78,7 @@ def test_replay_requires_openai_endpoint_backend() -> None:
         value.endswith("qwen3vl8b_MV_MATH_len65536_maxtok1024_raw.jsonl")
         for value in command
     )
+    assert "--resume" in command
 
 
 def test_lmms_command_records_generation_and_raw_outputs() -> None:

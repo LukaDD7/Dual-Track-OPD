@@ -16,7 +16,7 @@ import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Sequence
 
 
 QUESTION_KEYS = ("question", "query", "prompt", "problem", "instruction", "input", "user_prompt")
@@ -210,8 +210,12 @@ def _request(
         headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
         method="POST",
     )
+    # Replay endpoints are normally local vLLM servers.  Some HPC login shells
+    # export HTTP(S)_PROXY globally; urllib would otherwise route 127.0.0.1
+    # through that proxy and fail with an unrelated connection error.
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with opener.open(request, timeout=timeout) as response:
             return json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")
@@ -221,6 +225,7 @@ def _request(
 def replay_rows(
     rows: list[dict[str, Any]],
     *,
+    row_indices: Sequence[int] | None = None,
     dataset: str,
     dataset_root: Path,
     api_base: str,
@@ -231,16 +236,21 @@ def replay_rows(
     timeout: float,
 ) -> list[dict[str, Any]]:
     resolver = DatasetImageResolver(dataset, dataset_root)
+    indices = list(row_indices) if row_indices is not None else list(range(1, len(rows) + 1))
+    if len(indices) != len(rows):
+        raise ValueError("row_indices must have the same length as rows")
+    indexed_rows = list(zip(indices, rows))
+    source_items = dict(indexed_rows)
 
-    def process(index_and_item: tuple[int, dict[str, Any]]) -> dict[str, Any]:
-        index, item = index_and_item
+    def process(source_index: int) -> dict[str, Any]:
+        item = source_items[source_index]
         question = _stringify(_first(item, QUESTION_KEYS))
         if not question:
-            raise ValueError(f"row {index} has no recognized question field")
-        sample_id = _stringify(_first(item, ID_KEYS)) or str(index)
-        images = resolver.resolve(item, index)
+            raise ValueError(f"row {source_index} has no recognized question field")
+        sample_id = _stringify(_first(item, ID_KEYS)) or str(source_index)
+        images = resolver.resolve(item, source_index)
         if not images:
-            raise ValueError(f"row {index} ({sample_id}) resolved zero images")
+            raise ValueError(f"row {source_index} ({sample_id}) resolved zero images")
         response = _request(
             api_base=api_base,
             api_key=api_key,
@@ -255,7 +265,7 @@ def replay_rows(
         return {
             "dataset": dataset,
             "sample_id": sample_id,
-            "source_row_index": index,
+            "source_row_index": source_index,
             "question": question,
             "ground_truth": _first(item, GROUND_TRUTH_KEYS),
             "prediction": message.get("content") or "",
@@ -269,7 +279,8 @@ def replay_rows(
     results: list[dict[str, Any]] = []
     with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
         future_map = {
-            pool.submit(process, pair): pair[0] for pair in enumerate(rows, start=1)
+            pool.submit(process, source_index): source_index
+            for source_index, _item in indexed_rows
         }
         indexed_results: dict[int, dict[str, Any]] = {}
         for future in as_completed(future_map):
@@ -277,7 +288,7 @@ def replay_rows(
             try:
                 indexed_results[index] = future.result()
             except Exception as exc:  # Keep a complete, auditable raw output.
-                item = rows[index - 1]
+                item = source_items[index]
                 indexed_results[index] = {
                     "dataset": dataset,
                     "sample_id": _stringify(_first(item, ID_KEYS)) or str(index),
@@ -297,9 +308,36 @@ def replay_rows(
 
 def write_jsonl(path: Path, rows: Iterable[dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as handle:
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    with temporary.open("w", encoding="utf-8") as handle:
         for row in rows:
             handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
+    temporary.replace(path)
+
+
+def _completed_by_sample_id(
+    path: Path, *, dataset: str, model: str, expected_ids: Sequence[str]
+) -> dict[str, dict[str, Any]]:
+    if not path.exists():
+        return {}
+    completed: dict[str, dict[str, Any]] = {}
+    with path.open("r", encoding="utf-8") as handle:
+        for line_number, line in enumerate(handle, start=1):
+            if not line.strip():
+                continue
+            item = json.loads(line)
+            sample_id = str(item.get("sample_id", ""))
+            if item.get("error"):
+                continue
+            if item.get("dataset") != dataset or item.get("model") != model:
+                raise ValueError(
+                    f"{path}:{line_number}: output belongs to a different dataset/model; "
+                    "use a new output path or remove the old run"
+                )
+            if sample_id in completed:
+                raise ValueError(f"{path}:{line_number}: duplicate successful sample {sample_id!r}")
+            completed[sample_id] = item
+    return {sample_id: completed[sample_id] for sample_id in expected_ids if sample_id in completed}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -315,6 +353,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--timeout", type=float, default=600)
     parser.add_argument("--limit", type=int)
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Keep successful output rows and retry only missing/failed rows.",
+    )
     return parser
 
 
@@ -322,8 +365,30 @@ def main() -> None:
     args = build_parser().parse_args()
     input_path = Path(args.input_jsonl).expanduser()
     rows = _read_jsonl(input_path, args.limit)
-    results = replay_rows(
-        rows,
+    output_path = Path(args.output_jsonl).expanduser()
+    sample_ids = [
+        _stringify(_first(item, ID_KEYS)) or str(index)
+        for index, item in enumerate(rows, start=1)
+    ]
+    if len(set(sample_ids)) != len(sample_ids):
+        raise ValueError("input JSONL contains duplicate sample ids")
+    completed = (
+        _completed_by_sample_id(
+            output_path,
+            dataset=args.dataset,
+            model=args.model,
+            expected_ids=sample_ids,
+        )
+        if args.resume
+        else {}
+    )
+    pending_positions = [
+        index - 1 for index, sample_id in enumerate(sample_ids, start=1)
+        if sample_id not in completed
+    ]
+    retried = replay_rows(
+        [rows[position] for position in pending_positions],
+        row_indices=[position + 1 for position in pending_positions],
         dataset=args.dataset,
         dataset_root=Path(args.dataset_root).expanduser(),
         api_base=args.api_base,
@@ -333,9 +398,24 @@ def main() -> None:
         workers=args.workers,
         timeout=args.timeout,
     )
-    write_jsonl(Path(args.output_jsonl).expanduser(), results)
-    errors = sum(bool(row["error"]) for row in results)
-    print(json.dumps({"rows": len(results), "errors": errors, "output": args.output_jsonl}))
+    results_by_id = {str(row["sample_id"]): row for row in retried}
+    merged = [
+        results_by_id.get(sample_id) or completed.get(sample_id)
+        for sample_id in sample_ids
+    ]
+    write_jsonl(output_path, merged)
+    errors = sum(bool(row["error"]) for row in merged)
+    print(
+        json.dumps(
+            {
+                "rows": len(merged),
+                "errors": errors,
+                "resumed_successful": len(completed),
+                "retried": len(retried),
+                "output": args.output_jsonl,
+            }
+        )
+    )
     raise SystemExit(1 if errors else 0)
 
 
