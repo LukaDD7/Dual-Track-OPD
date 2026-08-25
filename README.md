@@ -66,6 +66,9 @@ For the canonical six-benchmark evaluation of any trained HF-format checkpoint
 and follow
 [docs/target_benchmark_eval_runbook_20260825.md](docs/target_benchmark_eval_runbook_20260825.md).
 
+The interrupted Vision-OPD gs65 evaluation and its resume command are recorded
+in [docs/target_benchmark_eval_pending_20260825.md](docs/target_benchmark_eval_pending_20260825.md).
+
 ## First Milestones
 
 1. Toy OPD loss: keep CPU tests green and validate weighted KL behavior.
