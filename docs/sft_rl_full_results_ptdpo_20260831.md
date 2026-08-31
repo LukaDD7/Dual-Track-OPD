@@ -53,8 +53,7 @@
 
 - GQA / DynaMath / ViewSpatial / MMMU-Pro / ReMI 为规则判分（`*_nojudge/summary.json`），
   MMBench 用 Qwen3-VL-32B-Instruct-FP8 judge（`*_judged/summary.json`）。
-- **ptd_grpo 的 B 段截至 2026-08-31 仍在跑**（GPU 实例中途被自动回收，续跑中；
-  已完成 GQA，DynaMath 进行中，其余排队）。
+- 六项已全部完成（2026-08-31 收束；GPU 实例中途曾自动回收，经 `manuscript-sft-rl-gpu` 续跑补齐）。
 
 | 臂 | GQA | DynaMath | ViewSpatial | MMMU-Pro | ReMI(见§4) | MMBench |
 |---|---|---|---|---|---|---|
@@ -62,14 +61,17 @@
 | sft_6939 | 0.5541 | 0.6343 | 0.2435 | 0.2526 | 0.3469 | 72.938 |
 | junior_617 | 0.6107 | 0.5333 | 0.3953 | 0.4006 | 0.1954 | 85.052 |
 | grpo50 | 0.5483 | 0.6345 | 0.3046 | 0.2526 | 0.3415 | 71.907 |
-| ptd_grpo | 进行中 | — | — | — | — | — |
+| ptd_grpo | 0.5542 | 0.6275 | 0.2272 | 0.2445 | 0.3623 | 73.024 |
 
 要点：
-- DynaMath 四个已完臂都落在 0.53–0.63，sft_6939/grpo50(≈0.634) 略高于 base(0.6297)。
-- ViewSpatial 与 MMMU-Pro 上 **base 与 junior_617 明显领先**训练 arm，sft_6939/grpo50 掉得较多
-  （如 viewspatial sft_6939=0.2435 vs base 0.4231）——长 CoT 的 SFT 在这些 MCQ 短答案
-  综合题上出现格式/判卷口径倒退。
-- MMBench（judge）：base 85.1 ≈ junior_617 85.1 > sft_6939 72.9 ≈ grpo50 71.9。
+- DynaMath 五臂都落在 0.53–0.63，sft_6939/grpo50/ptd_grpo(≈0.63) 略高于 base(0.6297)、junior(0.5333)。
+- ViewSpatial 与 MMMU-Pro 上 **base 与 junior_617 明显领先**训练 arm，sft_6939/grpo50/ptd_grpo 掉得较多
+  （如 viewspatial ptd_grpo=0.2272、sft_6939=0.2435 vs base 0.4231）——长 CoT 的 SFT 在这些 MCQ 短答案
+  综合题上出现格式/判卷口径倒退，ptd_grpo 在 ViewSpatial 上四臂最低。
+- MMBench（judge）：base 85.1 ≈ junior_617 85.1 > sft_6939 72.9 ≈ grpo50 71.9 ≈ ptd 73.0。
+- **ptd_grpo 画像**：ReMI 诚实口径 **0.3623 四臂第一**（> sft_6939 0.3469、grpo50 0.3415）；
+  DynaMath 0.6275 与 sft/grpo50 同档；但 ViewSpatial/MMMU-Pro 与 MMBench 均与 sft/grpo50 同档下滑——
+  PTD-PO 在长 CoT 密集推理上最强，MCQ 短答案综合题上未跑赢 vanilla GRPO。
 
 ---
 
@@ -164,9 +166,13 @@ answer-only 格式发散（例如模型明明要求只答答案却吐 CoT）。
 | sft_6939 | 902 | 2596 | 0.9985 | **0.3469** | 0.4974 |
 | junior_617 | 508 | 2337 | 0.8988 | **0.1954** | 0.5023 |
 | grpo50 | 888 | 2598 | 0.9992 | **0.3415** | 0.4809 |
+| ptd_grpo | 942 | 2596 | 0.9985 | **0.3623** | 0.5028 |
 
 结论：
-- 诚实口径下顺序完全反转：**sft_6939(0.3469) ≈ grpo50(0.3415) > base(0.2785) > junior_617(0.1954)**。
+- 诚实口径下顺序完全反转：**ptd_grpo(0.3623) > sft_6939(0.3469) ≈ grpo50(0.3415) > base(0.2785) > junior_617(0.1954)**。
+- ptd_grpo 抽取率 0.9985 与 sft_6939 持平、correct=942 四臂最高，说明 PTD-PO 在 ReMI 上**未出现
+  answer-only 格式发散**。此前 0.5242「低抽取率」是漏传 `--label-jsonl` 的口径错误（task 判定退化、
+  只抓 boxed/answer 标记，且 per_task 塌缩为单一 unknown），非模型真实行为；补传 sidecar 后与其它臂同口径。
 - grpo50 与 sft_6939 抽取率都 ≈0.999（几乎全部可抽取），说明 RL 后 answer-only 格式收敛；
   junior_617 抽取率最低(0.8988)——其 answer-only 格式发散的样本最多（ReMI 上短板）。
 - 后续所有对表必须用 `remi_reeval.py --mode exact` 的全分母数值，禁止引用 summary.json 的
@@ -214,8 +220,8 @@ FineVision-visualwebinstruct 272 / BMMR 216 …
 
 ## 6. 复现与续跑状态（2026-08-31）
 
-- A 段四臂 + 参考全部跑完；ptd_grpo 的 B 段因 GPU 实例被自动回收而中断后**续跑中**，
-  续跑命令在 `manuscript-sft-rl-gpu`，监控 `fc-opd-storage/logs/bonly_monitor.sh`。
-- ptd_grpo B 段完成后，把四臂 B 段表（§2）+ ReMI exact（§4）补齐，即可收表。
+- A 段 + B 段四臂（+ 参考）全部跑完，2026-08-31 收表：§2 B 段表与 §4 ReMI exact 已补齐。
+  ptd_grpo B 段历经 GPU 实例自动回收、由 `manuscript-sft-rl-gpu` 续跑完成（监控
+  `fc-opd-storage/logs/bonly_monitor.sh` 现报 `DONE=1`）。
 - 已知后续项：ReMI summary.json 的虚高分母尚未在 `project_summary.py` 内修复（用
   `remi_reeval.py` 旁路），可在对表前决定是否回修主链路。
