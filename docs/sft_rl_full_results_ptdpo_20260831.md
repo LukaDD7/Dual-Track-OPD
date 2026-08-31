@@ -14,7 +14,8 @@
 |---|---|---|
 | **base** | `$R/models/Qwen3-VL-8B-Instruct` | 未训练的基座（下界参考） |
 | **sft_6939** | `.../qwen3vl_sft_warmup_20260826_1324/global_step_6939/huggingface` | SFT warmup 主臂 |
-| **junior_617** | `$R/models/qwen3vl8b_mixed_sft_groupbalanced_617` | 师弟的 mixed-SFT 模型 |
+| **junior_617** | `$R/models/qwen3vl8b_mixed_sft_groupbalanced_617` | 师弟的 mixed-SFT 模型（raw SFT 下界参考） |
+| **junior617_grpo50** | `.../qwen3vl_grpo_mmf_junior617_lr5e6_steps50/global_step_50/huggingface` | vanilla GRPO，从 junior_617 出发，50 step |
 | **grpo50** | `.../qwen3vl_grpo_mmf_sft6939_lr5e6_steps50/global_step_50/huggingface` | vanilla GRPO，从 sft_6939 出发，50 step |
 | **ptd_grpo** | `.../qwen3vl_grpo_mmf95k_ptd_sft6939_coef5e4_steps50/global_step_50/huggingface` | PTD-PO，从 sft_6939 出发，coef 5e-4→5e-2，50 step |
 
@@ -37,6 +38,7 @@
 | sft_1086 | 0.3195 | 0.6323 | 0.3827 | 0.2000 | 0.4560 | 0.3640 |
 | sft_6939 | 0.3794 | 0.6889 | 0.4393 | 0.2980 | 0.5240 | 0.4940 |
 | junior_617 | 0.3894 | 0.7238 | 0.5358 | 0.1680 | 0.4100 | 0.3020 |
+| junior617_grpo50 | 0.2047 | 0.5458 | 0.2562 | 0.1700 | 0.3780 | 0.1980 |
 | grpo50 | **0.4210** | **0.6955** | 0.4359 | **0.3400** | **0.5480** | **0.5120** |
 | ptd_grpo | 0.3661 | 0.6689 | 0.4210 | 0.3080 | 0.5200 | 0.4580 |
 
@@ -46,6 +48,10 @@
 - geo3k 上 base 的 p@1(0.5391) 反而是最高——基座在几何上有强先验，SFT/RL 后波动，
   grpo50(0.4210) 在训练臂里最高。
 - 格式合格率：grpo50 在 mmf 上最高(0.5120)；junior_617 在 geo3k 上最高(0.5358)。
+- **junior617_grpo50（负结果）**：从师弟 mixed-SFT 出发的 vanilla GRPO 全面退化——geo3k p@1
+  0.3894→0.2047（六臂最低）、格式合格率塌方（geo3k 0.5358→0.2562、mmf 0.3020→0.1980）。
+  对照 grpo50（从 sft_6939 出发为正向）说明：GRPO 会放大起点的 answer-only 格式发散，
+  junior_617 抽取率最低(0.8988，见 §4) 正是被 RL 反向放大的根因。
 
 ---
 
@@ -60,11 +66,16 @@
 | base | 0.6163 | 0.6297 | 0.4231 | 0.3960 | 0.2785 | 85.137 |
 | sft_6939 | 0.5541 | 0.6343 | 0.2435 | 0.2526 | 0.3469 | 72.938 |
 | junior_617 | 0.6107 | 0.5333 | 0.3953 | 0.4006 | 0.1954 | 85.052 |
+| junior617_grpo50 | 0.6101 | 0.5120 | 0.3937 | 0.4058 | 0.2458 | 86.082 |
 | grpo50 | 0.5483 | 0.6345 | 0.3046 | 0.2526 | 0.3415 | 71.907 |
 | ptd_grpo | 0.5542 | 0.6275 | 0.2272 | 0.2445 | 0.3623 | 73.024 |
 
 要点：
-- DynaMath 五臂都落在 0.53–0.63，sft_6939/grpo50/ptd_grpo(≈0.63) 略高于 base(0.6297)、junior(0.5333)。
+- DynaMath 六臂都落在 0.51–0.63，sft_6939/grpo50/ptd_grpo(≈0.63) 略高于 base(0.6297)、junior(0.5333)、
+  junior617_grpo50(0.5120)。
+- **junior617_grpo50**：B 段六项与 junior_617 起点几乎持平（GQA 0.6101 vs 0.6107、ViewSpatial
+  0.3937 vs 0.3953、MMMU-Pro 0.4058 vs 0.4006），50 步 GRPO 未带来 B 段增益；ReMI exact 0.2458
+  （vs raw-SFT 0.1954）略有回升但仍六臂第二低。塌方集中在 A 段（geo3k/格式，见 §1）而非 B 段。
 - ViewSpatial 与 MMMU-Pro 上 **base 与 junior_617 明显领先**训练 arm，sft_6939/grpo50/ptd_grpo 掉得较多
   （如 viewspatial ptd_grpo=0.2272、sft_6939=0.2435 vs base 0.4231）——长 CoT 的 SFT 在这些 MCQ 短答案
   综合题上出现格式/判卷口径倒退，ptd_grpo 在 ViewSpatial 上四臂最低。
@@ -165,6 +176,7 @@ answer-only 格式发散（例如模型明明要求只答答案却吐 CoT）。
 | base | 724 | 2492 | 0.9585 | **0.2785** | 0.9688 |
 | sft_6939 | 902 | 2596 | 0.9985 | **0.3469** | 0.4974 |
 | junior_617 | 508 | 2337 | 0.8988 | **0.1954** | 0.5023 |
+| junior617_grpo50 | 639 | 2525 | 0.9712 | **0.2458** | 0.5224 |
 | grpo50 | 888 | 2598 | 0.9992 | **0.3415** | 0.4809 |
 | ptd_grpo | 942 | 2596 | 0.9985 | **0.3623** | 0.5028 |
 
@@ -220,7 +232,9 @@ FineVision-visualwebinstruct 272 / BMMR 216 …
 
 ## 6. 复现与续跑状态（2026-08-31）
 
-- A 段 + B 段四臂（+ 参考）全部跑完，2026-08-31 收表：§2 B 段表与 §4 ReMI exact 已补齐。
+- A 段 + B 段四臂（+ 参考，含 **junior617_grpo50**）全部跑完，2026-08-31 收表：§2 B 段表与 §4 ReMI
+  exact 已补齐。junior617_grpo50 用同一 4 卡阶梯（`run_sft_eval_ladder_4gpu.sh`）跑完并已并入 §1/§2/§4
+  （ReMI 用 `--mode exact` 全分母 **0.2458**，非 summary.json 虚高 0.5224）。
   ptd_grpo B 段历经 GPU 实例自动回收、由 `manuscript-sft-rl-gpu` 续跑完成（监控
   `fc-opd-storage/logs/bonly_monitor.sh` 现报 `DONE=1`）。
 - 已知后续项：ReMI summary.json 的虚高分母尚未在 `project_summary.py` 内修复（用
