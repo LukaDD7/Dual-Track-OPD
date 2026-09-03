@@ -1,4 +1,4 @@
-# SFT-then-RL 四臂全面评测结果 + PTD-PO 训练配置详情（2026-08-31）
+# SFT-then-RL 四臂全面评测结果 + 单源 SFT 消融 + PTD-PO 训练配置详情（2026-08-31）
 
 > 本文记录 FC-OPD「SFT-then-RL」track（`codex/va-opd` 分支）最新一轮的完整评测结果、
 > ReMI 评测 Bug 的定位与诚实重算、以及 GRPO / PTD-PO 各训练配置与数据使用详情。
@@ -18,6 +18,8 @@
 | **junior617_grpo50** | `.../qwen3vl_grpo_mmf_junior617_lr5e6_steps50/global_step_50/huggingface` | vanilla GRPO，从 junior_617 出发，50 step |
 | **grpo50** | `.../qwen3vl_grpo_mmf_sft6939_lr5e6_steps50/global_step_50/huggingface` | vanilla GRPO，从 sft_6939 出发，50 step |
 | **ptd_grpo** | `.../qwen3vl_grpo_mmf95k_ptd_sft6939_coef5e4_steps50/global_step_50/huggingface` | PTD-PO，从 sft_6939 出发，coef 5e-4→5e-2，50 step |
+| **mmf_only_1ep** | `.../qwen3vl_sft_mmf122k_1ep/global_step_1774/huggingface` | 单源消融：MMF-only 113,537 train，1 epoch |
+| **cauldron_only_1ep** | `.../qwen3vl_sft_cauldron16full_1ep/global_step_5934/huggingface` | 单源消融：Cauldron-16-only 379,787 train，1 epoch |
 
 补充参考（仅 A 段，绘制 SFT 训练曲线用）：**sft_1000**（`.../20260826_1324/global_step_1000`）、
 **sft_1086**（`.../20260820_0640/global_step_1086`，早期 SFT run）。
@@ -69,10 +71,25 @@
 | junior617_grpo50 | 0.6101 | 0.5120 | 0.3937 | 0.4058 | 0.2458 | 86.082 |
 | grpo50 | 0.5483 | 0.6345 | 0.3046 | 0.2526 | 0.3415 | 71.907 |
 | ptd_grpo | 0.5542 | 0.6275 | 0.2272 | 0.2445 | 0.3623 | 73.024 |
+| mmf_only_1ep | 0.3759 | 0.6253 | 0.0940 | 0.2312 | 0.3662 | 53.608 |
+| cauldron_only_1ep | 0.4008 | 0.0565 | 0.2598 | 0.1960 | 0.1296 | 42.440 |
+
+单源 1ep 消融要点（注意：这是「混合 3ep(sft_6939) vs 单源 1ep 全量」的数据层面归因，
+非严格同 epoch 数对照）：
+- **MMF 是长推理/ReMI 的主要贡献源**：mmf_only_1ep 的 DynaMath 0.6253 与
+  sft_6939/grpo50/ptd_grpo(≈0.63) 同档；ReMI exact 0.3662 为全部八臂最高
+  （> ptd_grpo 0.3623、sft_6939 0.3469）。
+- **Cauldron 相对保 GQA/ViewSpatial，但严重伤数学推理**：GQA 0.4008、ViewSpatial 0.2598
+  均高于 mmf_only，但 DynaMath 0.0565、ReMI exact 0.1296 大幅塌方。
+- 两个单源臂的 MMBench 都显著低于混合臂（53.6 / 42.4 vs sft 系 71.9–73.0），
+  说明 Cauldron 单独也不能解释混合 SFT 在 MMBench 上的下滑。
+- 与 base 相比，两个单源 SFT 臂在 GQA、ViewSpatial、MMMU-Pro、MMBench 全部明显退化；
+  其中 MMF 臂靠 DynaMath/ReMI 补回，Cauldron 臂则只剩 GQA/ViewSpatial 相对优势。
 
 要点：
-- DynaMath 六臂都落在 0.51–0.63，sft_6939/grpo50/ptd_grpo(≈0.63) 略高于 base(0.6297)、junior(0.5333)、
-  junior617_grpo50(0.5120)。
+- 原四臂与参考的 DynaMath 都落在 0.51–0.63，sft_6939/grpo50/ptd_grpo(≈0.63) 略高于
+  base(0.6297)、junior(0.5333)、junior617_grpo50(0.5120)；单源消融暴露出强分布效应：
+  mmf_only 0.6253 保持同档，cauldron_only 0.0565 大幅塌方。
 - **junior617_grpo50**：B 段六项与 junior_617 起点几乎持平（GQA 0.6101 vs 0.6107、ViewSpatial
   0.3937 vs 0.3953、MMMU-Pro 0.4058 vs 0.4006），50 步 GRPO 未带来 B 段增益；ReMI exact 0.2458
   （vs raw-SFT 0.1954）略有回升但仍六臂第二低。塌方集中在 A 段（geo3k/格式，见 §1）而非 B 段。
@@ -179,10 +196,13 @@ answer-only 格式发散（例如模型明明要求只答答案却吐 CoT）。
 | junior617_grpo50 | 639 | 2525 | 0.9712 | **0.2458** | 0.5224 |
 | grpo50 | 888 | 2598 | 0.9992 | **0.3415** | 0.4809 |
 | ptd_grpo | 942 | 2596 | 0.9985 | **0.3623** | 0.5028 |
+| mmf_only_1ep | 952 | 2594 | 0.9977 | **0.3662** | 0.5381 |
+| cauldron_only_1ep | 337 | 2492 | 0.9585 | **0.1296** | 1.0000 |
 
 结论：
-- 诚实口径下顺序完全反转：**ptd_grpo(0.3623) > sft_6939(0.3469) ≈ grpo50(0.3415) > base(0.2785) > junior_617(0.1954)**。
-- ptd_grpo 抽取率 0.9985 与 sft_6939 持平、correct=942 四臂最高，说明 PTD-PO 在 ReMI 上**未出现
+- 诚实口径下顺序完全反转：**mmf_only_1ep(0.3662) > ptd_grpo(0.3623) > sft_6939(0.3469) ≈
+  grpo50(0.3415) > base(0.2785) > junior_617(0.1954) > cauldron_only_1ep(0.1296)**。
+- ptd_grpo 抽取率 0.9985 与 sft_6939 持平、correct=942 为 RL 四臂最高，说明 PTD-PO 在 ReMI 上**未出现
   answer-only 格式发散**。此前 0.5242「低抽取率」是漏传 `--label-jsonl` 的口径错误（task 判定退化、
   只抓 boxed/answer 标记，且 per_task 塌缩为单一 unknown），非模型真实行为；补传 sidecar 后与其它臂同口径。
 - grpo50 与 sft_6939 抽取率都 ≈0.999（几乎全部可抽取），说明 RL 后 answer-only 格式收敛；
@@ -237,5 +257,8 @@ FineVision-visualwebinstruct 272 / BMMR 216 …
   （ReMI 用 `--mode exact` 全分母 **0.2458**，非 summary.json 虚高 0.5224）。
   ptd_grpo B 段历经 GPU 实例自动回收、由 `manuscript-sft-rl-gpu` 续跑完成（监控
   `fc-opd-storage/logs/bonly_monitor.sh` 现报 `DONE=1`）。
+- 2026-09-02 增补 **mmf_only_1ep** 与 **cauldron_only_1ep** 单源 SFT B 段消融：MMF final step
+  1774，Cauldron final step 5934；两者均按同一六项 benchmark + ReMI `--mode exact` 全分母
+  口径并入 §2/§4。Cauldron SFT 曾因 GPU 实例回收从 step 4000 续跑完成。
 - 已知后续项：ReMI summary.json 的虚高分母尚未在 `project_summary.py` 内修复（用
   `remi_reeval.py` 旁路），可在对表前决定是否回修主链路。
