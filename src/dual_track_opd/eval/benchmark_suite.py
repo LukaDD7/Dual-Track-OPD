@@ -213,6 +213,12 @@ def build_command(
         ]
         if limit is not None:
             command.extend(["--limit", str(limit)])
+        include_task_path = defaults.get("include_task_path")
+        if include_task_path:
+            # Extra task directories (e.g. eval_tasks/opd_v2 overrides) are
+            # indexed after the bundled lmms-eval tasks, so override tasks
+            # must use fresh task names to survive conflict resolution.
+            command.extend(["--include_path", str(include_task_path)])
         if spec.judge_required and judge_policy == "predict":
             command.append("--predict_only")
         return command
