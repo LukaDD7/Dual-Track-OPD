@@ -10,7 +10,7 @@ _HERE = Path(__file__).resolve().parent
 if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
 
-from _extraction import extract_answer_tag, short_answer  # noqa: E402,F401
+from _extraction import extract_answer_tag, normalize_word, short_answer  # noqa: E402,F401
 
 
 def gqa_v2_process_docs(dataset: datasets.Dataset) -> datasets.Dataset:
@@ -43,5 +43,11 @@ def gqa_v2_process_results(doc, results):
     # GQA gold answers are single words/phrases.  Model may answer directly
     # (short-response checkpoints) or finish chain-of-thought and emit an
     # <answer> tag (long-CoT checkpoints) — both are valid here.
+    # exact_match is aggregated with `mean`, which sums the per-doc values,
+    # so this must return the numeric 0/1 comparison (normalized exact match
+    # with ignore_case/ignore_punctuation semantics), not the prediction
+    # string — returning a string made `mean` raise TypeError after all
+    # docs were processed and the run die with rc=0 and no results.json.
     pred = short_answer(results[0])
-    return {"exact_match": pred}
+    gold = doc["answer"]
+    return {"exact_match": 1.0 if normalize_word(pred) == normalize_word(gold) else 0.0}

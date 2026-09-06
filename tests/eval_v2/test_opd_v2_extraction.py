@@ -11,6 +11,8 @@ import ast
 import sys
 from pathlib import Path
 
+import pytest
+
 HERE = Path(__file__).resolve().parent
 OPD_V2 = HERE.parents[1] / "eval_tasks" / "opd_v2"
 sys.path.insert(0, str(OPD_V2))
@@ -113,6 +115,53 @@ def test_gqa_truncated_cot_word_is_not_the_tag() -> None:
     resp = "The image shows a beach scene with people near the water and several umbrellas"
     assert short_answer(resp) == resp.strip()
     assert "<answer>" not in short_answer(resp)
+
+
+# ---------------------------------------------------------------------------
+# GQA v2 — process_results must emit numeric exact_match for mean aggregation
+# (regression: returning the prediction string made `mean` raise TypeError
+# after all docs were scored, and the run die rc=0 with no results.json)
+# ---------------------------------------------------------------------------
+
+
+def test_gqa_process_results_returns_numeric_exact_match() -> None:
+    import gqa_v2 as g
+
+    doc = {"question": "Is it raining?", "answer": "yes"}
+    out = g.gqa_v2_process_results(doc, ["Yes."])
+    assert out == {"exact_match": 1.0}
+    assert isinstance(out["exact_match"], (int, float))
+
+    out = g.gqa_v2_process_results(doc, ["No."])
+    assert out == {"exact_match": 0.0}
+
+
+def test_gqa_process_results_tag_priority_and_normalization() -> None:
+    import gqa_v2 as g
+
+    # ignore_case + ignore_punctuation semantics on both sides.
+    doc = {"question": "Who is behind the batter?", "answer": "catcher"}
+    resp = "The person crouching behind the batter is ready to swing.\n\nTherefore, the final answer is <answer>Catcher.</answer>."
+    assert g.gqa_v2_process_results(doc, [resp])["exact_match"] == 1.0
+
+    # Direct short response, case/punct handled.
+    assert g.gqa_v2_process_results({"answer": "right"}, ["Right."])["exact_match"] == 1.0
+
+    # Truncated CoT tail without a tag: raw text vs single-word gold -> 0.
+    assert g.gqa_v2_process_results({"answer": "umbrella"}, ["beach scene with people near water"])["exact_match"] == 0.0
+
+
+def test_gqa_mean_aggregation_over_numeric_scores() -> None:
+    # The exact failure mode of the v2 first run: mean() over strings raised
+    # TypeError.  With numeric per-doc values it must aggregate cleanly.
+    import gqa_v2 as g
+
+    items = [
+        g.gqa_v2_process_results({"answer": "yes"}, ["Yes."])["exact_match"],
+        g.gqa_v2_process_results({"answer": "no"}, ["Yes."])["exact_match"],
+        g.gqa_v2_process_results({"answer": "yes"}, ["Yes."])["exact_match"],
+    ]
+    assert sum(items) / len(items) == pytest.approx(2 / 3)
 
 
 # ---------------------------------------------------------------------------
