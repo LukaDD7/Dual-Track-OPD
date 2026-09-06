@@ -19,6 +19,8 @@
 #     SFT_RL_RUN_NAME / SFT_RL_MAX_LEN / SFT_RL_HF_CACHE
 #     SFT_RL_BENCHMARKS（规则判分列表，默认 gqa,dynamath,viewspatial,mmmu_pro,remi）
 #     SFT_RL_JUDGE_BENCHMARKS（judge 列表，默认 mmbench；mathverse 可显式追加，置空跳过）
+#     SFT_RL_LIMIT（可选：--limit 传给 benchmark_suite，例如 VQAv2 全量 214K 不可行时
+#     用 SFT_RL_LIMIT=5000 对齐 2026-07 基线 replay 口径）
 set -euo pipefail
 
 DTOPD_ROOT=/inspire/hdd/global_user/mengweicheng-240108120092/lzy
@@ -70,6 +72,9 @@ if [[ ! -d "${HF_HOME}/datasets" ]]; then
 fi
 
 LIMIT_ARGS=()
+if [[ -n "${SFT_RL_LIMIT:-}" ]]; then
+  LIMIT_ARGS=(--limit "${SFT_RL_LIMIT}")
+fi
 if [[ "${SFT_RL_SMOKE:-0}" == "1" ]]; then
   LIMIT_ARGS=(--limit 8)
   RUN_NAME="${RUN_NAME}_smoke"
