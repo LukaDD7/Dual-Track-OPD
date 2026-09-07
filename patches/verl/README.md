@@ -138,3 +138,99 @@ arm launch in the pinned verl env:
 - `stp_advantages` channel and `loss_coef` scaling verified;
 - resume/save/load preserves global step, optimizer, schedule, arm identity;
 - 4-step real-image canary passes independently for A0/A1/A2/A3.
+
+## TailSFT online filtering patch (2026-09-04, cu132 backend; refreshed 2026-09-05 for the 2x-loss aggregation + nested-metrics crashes)
+
+`tailsft_online_filtering.patch` — additive TailSFT (arXiv:2608.25756)
+sequence-level filtering for the **verl 0.9.0 cu132 SFT backend**
+(`fc-opd-storage/backends/verl-qwen35-v090-cu132`, NOT the third_party/verl
+0.7.1 tree above). Generated from the real backend `git diff` over exactly
+three files:
+
+1. `verl/trainer/config/sft_trainer_engine.yaml` — new `data.tailsft`
+   section (`enabled: False` default, `filter_fraction`, `schedule`,
+   `ramp_steps`). Stock behavior is byte-identical when disabled.
+2. `verl/trainer/sft_trainer.py` — when `data.tailsft.enabled`, sets the
+   actor's loss fn to `tailsft_loss` and injects the γ_t schedule value
+   into each step's `meta_info` (computed by `tailsft_filter_fraction`).
+   Also reduces `tailsft/*` metrics to scalars before `tracking.log`
+   (LocalLogger's `concat_dict_to_str` only prints `numbers.Number`, so the
+   per-rank per-micro-batch LIST values were silently invisible on the
+   console — fixed 2026-09-05; counts sum, margin_mean averages). The
+   first reduction attempt assumed FLAT lists and crashed at the first
+   training step with `TypeError: unsupported operand type(s) for +:
+   'int' and 'list'`: `allgather_dict_into_dict` APPENDS each dp rank's
+   already-flat per-micro-batch list, so the collected value is NESTED
+   (`[[f, ...], [f, ...]]`) and `sum()` starts at int 0. The 2026-09-05
+   (v2) reduction flattens one level before sum/average and handles the
+   flat, nested, and empty shapes.
+3. `verl/workers/utils/losses.py` — `tailsft_loss` + helpers, purely
+   additive next to the untouched stock `sft_loss`:
+   - `tailsft_keep_mask` — rank-based (stable argsort) drop of exactly
+     `k = floor(n * γ)` smallest-margin sequences; ties broken
+     deterministically by position (threshold-based dropping kept ties and
+     under-dropped — found by unit test, fixed 2026-09-04);
+   - `_tailsft_per_example_ce` — length-normalized mean CE per sequence
+     from the jagged (no_padding) flatten, mask already rolled;
+   - `tailsft_loss` — falls back to stock `sft_loss` when `init_ce` is
+     missing/partial-None, γ ≤ 0, pad_mode ≠ no_padding, or everything is
+     dropped (safety net); otherwise gathers margins across the dp group
+     (all_gather_object), builds the global keep-mask, zeroes dropped
+     sequences' rolled mask, and divides by the STEP-LEVEL constant
+     `batch_num_tokens * (1 - γ)` (fix 2026-09-05): the engine calls the
+     loss once per micro-batch and SUMS the losses, which is only correct
+     when every micro-batch divides by the same step-global constant
+     (exactly how stock `sft_loss` works via its all-reduced
+     `batch_num_tokens`). The original version all-reduced each
+     micro-batch's own retained-token count, making each micro-batch loss
+     a complete mean → M× too-large loss AND gradient at dynamic-bsz M=2
+     steps (~4.5% of steps; observed as exact-2x `train/loss` + grad_norm
+     spikes in `qwen3vl_sft_tailsft_mmf122k_1ep`).
+
+Row-side plumbing lives in the repo (not the backend):
+`scripts/sft_rl/tailsft_dataset.py` (TailsFTDataset reads the `init_ce`
+parquet column AFTER super()._read_files_and_process so it stays aligned
+with the selected dataframe) and
+`scripts/sft_rl/annotate_tailsft_init_ce.py` (offline ℓ0 precompute under
+the base model; `init_ce_from_logits` mirrors the loss-side roll).
+
+Validated by `tests/sft_rl/test_tailsft_filtering.py` (23 tests, green in
+env `vaopd-gkd-qwen35`: keep-mask floor/tie/degenerate semantics, γ
+schedule, hand-computed per-example CE, ℓ0-vs-ℓt roll alignment, all
+fallback paths, filtering math + gradient isolation + dp scaling, γ/init_ce
+threading through index-select micro-batch slicing, and a
+multi-micro-batch aggregation regression test that pins the
+step-level-denominator invariant (sum of per-micro-batch losses == global
+retained-token mean; the old per-micro-batch denominator fails it at
+exactly 2x), and two metric-reduction regression tests pinning the
+nested-list flattening (the flat-list assumption raised TypeError at the
+first restart step).
+
+## PTD-PO patch (2026-08-21, cu132 backend; refreshed 2026-09-04 for the crash fix)
+
+`ptd_opd_20260821.patch` — Partial Trajectory Distillation + PPO
+(arXiv:2606.07000) for the **verl 0.9.0 cu132 backend**
+(`fc-opd-storage/backends/verl-qwen35-v090-cu132`, NOT the third_party/verl
+0.7.1 tree above). Generated from the real backend `git diff` over exactly
+13 files (excludes the three TailSFT files covered by
+`tailsft_online_filtering.patch`):
+
+`examples/on_policy_distillation_trainer/run_qwen3_5_4b_fsdp.sh`,
+`verl/experimental/agent_loop/agent_loop.py`,
+`verl/experimental/agent_loop/single_turn_agent_loop.py`,
+`verl/trainer/config/algorithm.py`, `verl/trainer/config/ppo_trainer.yaml`,
+`verl/trainer/distillation/fsdp/losses.py`,
+`verl/trainer/distillation/losses.py`, `verl/trainer/ppo/ray_trainer.py`,
+`verl/workers/config/__init__.py`, `verl/workers/config/distillation.py`,
+`verl/workers/config/ptd.py`, `verl/workers/engine_workers.py`,
+`verl/workers/rollout/vllm_rollout/vllm_async_server.py`.
+
+2026-09-04 refresh captures the over-width-hint crash fix (in
+`single_turn_agent_loop.py` + `agent_loop.py`): the hint is tokenized by the
+HF processor with a large image patch grid, so image-heavy rows can produce a
+hint wider than `rollout.prompt_length` even though the vLLM-tokenized student
+prompt is hard-capped at 2048; concatenating such a hint with the uniform
+2048-wide batch crashed `torch.cat`. Both sides now drop over-length hints
+(no truncation — that would corrupt image-token ↔ pixel_values alignment) so
+every surviving hint is exactly `prompt_length` wide; dropped hints are
+excluded from the distillation loss by the existing `has_hint` gate.

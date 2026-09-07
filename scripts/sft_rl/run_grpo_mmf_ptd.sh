@@ -44,7 +44,7 @@ conda activate "${ENV_PREFIX}"
 ray stop --force 2>/dev/null || true
 sleep 2
 
-SFT_RL_GPUS="${SFT_RL_GPUS:-0,1,2,3,4,5,6,7}"
+SFT_RL_GPUS="${SFT_RL_GPUS:-0,1,2,3}"
 SFT_RL_MODEL="${SFT_RL_MODEL:-}"
 export CUDA_VISIBLE_DEVICES="${SFT_RL_GPUS}"
 N_GPUS="$(echo "${SFT_RL_GPUS}" | tr ',' '\n' | wc -l)"
@@ -56,7 +56,8 @@ VAL_FILE="${SFT_RL_VAL:-${DEFAULT_VAL}}"
 
 [ -n "${SFT_RL_MODEL}" ] || { echo "FATAL: SFT_RL_MODEL required (point to SFT ckpt huggingface dir)"; exit 1; }
 [ -f "${SFT_RL_MODEL}/config.json" ] || { echo "FATAL: missing ${SFT_RL_MODEL}/config.json"; exit 1; }
-[ -f "${SFT_RL_MODEL}/model.safetensors" ] || { echo "FATAL: missing ${SFT_RL_MODEL}/model.safetensors"; exit 1; }
+{ [ -f "${SFT_RL_MODEL}/model.safetensors" ] || [ -f "${SFT_RL_MODEL}/model.safetensors.index.json" ]; } \
+  || { echo "FATAL: no model weights — need model.safetensors (SFT ckpt) or model.safetensors.index.json (sharded base) under ${SFT_RL_MODEL}"; exit 1; }
 ls ${TRAIN_FILE} >/dev/null 2>&1 || { echo "FATAL: no hint shards matching ${TRAIN_FILE} (run build_mmf_hints.py first)"; exit 1; }
 [ -f "${VAL_FILE}" ] || { echo "FATAL: missing val ${VAL_FILE}"; exit 1; }
 
@@ -155,6 +156,7 @@ python3 -m verl.trainer.main_ppo \
   trainer.n_gpus_per_node="${N_GPUS}" \
   trainer.nnodes=1 \
   trainer.save_freq="${TRAINER_SAVE_FREQ}" \
+  trainer.max_actor_ckpt_to_keep=2 \
   trainer.test_freq="${TRAINER_TEST_FREQ}" \
   trainer.total_epochs="${TOTAL_EPOCHS}" \
   trainer.total_training_steps="${TOTAL_TRAINING_STEPS}" \

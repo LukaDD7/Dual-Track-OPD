@@ -9,6 +9,14 @@
 #     MMMU/MMMU_Pro           (standard (10 options))
 #     CaraJ/MathVerse-lmmseval      (testmini_version_split / vision_intensive)
 #     lmms-lab/MMBench        (en / dev)
+#   2026-09-03 扩展（SFT-RL 遗忘评测新增 9 项中的 7 项，ReMI/MV-MATH 走本地 replay）:
+#     oscarqjh/MindCube_lmmseval   (mindcube_full)
+#     lmms-lab/VQAv2              (vqav2_val / validation)
+#     lmms-lab/ScienceQA          (ScienceQA-IMG / test)
+#     AI4Math/MathVista           (testmini)
+#     lmms-lab/MMVet              (mmvet)
+#     RunsenXu/MMSI-Bench         (mmsi_bench)
+#     BLINK-Benchmark/BLINK       (blink)
 #   ReMI 走本地 raw replay，无需下载。
 #   注意：snapshot_download 写入 $HF_HOME/hub；随后在线 load_dataset 一次，
 #   把 datasets 的解析/arrow 缓存写进 $HF_HOME/datasets（离线 load 必需）。
@@ -39,6 +47,13 @@ grab("oscarqjh/ViewSpatial_lmmseval")
 grab("MMMU/MMMU_Pro", ["standard (10 options)/*"])
 grab("CaraJ/MathVerse-lmmseval")
 grab("lmms-lab/MMBench", ["en/*"])
+grab("oscarqjh/MindCube_lmmseval")
+grab("lmms-lab/VQAv2")
+grab("lmms-lab/ScienceQA")
+grab("AI4Math/MathVista")
+grab("lmms-lab/MMVet")
+grab("RunsenXu/MMSI-Bench")
+grab("BLINK-Benchmark/BLINK")
 
 # 在线 load 一次：把 datasets 解析/arrow 缓存写入 $HF_HOME/datasets（离线 load 依赖）
 tests = [
@@ -49,6 +64,13 @@ tests = [
     ("MMMU/MMMU_Pro", "standard (10 options)", "test"),
     ("CaraJ/MathVerse-lmmseval", "testmini_version_split", "vision_intensive"),
     ("lmms-lab/MMBench", "en", "dev"),
+    ("oscarqjh/MindCube_lmmseval", None, "train"),
+    ("lmms-lab/VQAv2", "vqav2_val", "validation"),
+    ("lmms-lab/ScienceQA", "ScienceQA-IMG", "test"),
+    ("AI4Math/MathVista", None, "testmini"),
+    ("lmms-lab/MMVet", None, "test"),
+    ("RunsenXu/MMSI-Bench", None, "test"),
+    ("BLINK-Benchmark/BLINK", None, "val"),
 ]
 for repo, cfg, split in tests:
     print(f"== cache-resolve {repo} {cfg or ''} / {split}")
@@ -63,7 +85,14 @@ for d in \
   "datasets--oscarqjh--ViewSpatial_lmmseval" \
   "datasets--MMMU--MMMU_Pro" \
   "datasets--CaraJ--MathVerse-lmmseval" \
-  "datasets--lmms-lab--MMBench"; do
+  "datasets--lmms-lab--MMBench" \
+  "datasets--oscarqjh--MindCube_lmmseval" \
+  "datasets--lmms-lab--VQAv2" \
+  "datasets--lmms-lab--ScienceQA" \
+  "datasets--AI4Math--MathVista" \
+  "datasets--lmms-lab--MMVet" \
+  "datasets--RunsenXu--MMSI-Bench" \
+  "datasets--BLINK-Benchmark--BLINK"; do
   if [ -d "${HF_HOME}/hub/${d}" ]; then
     echo "$(du -sh "${HF_HOME}/hub/${d}" | cut -f1)  ${d}"
   else
