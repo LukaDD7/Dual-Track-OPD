@@ -52,7 +52,7 @@ echo "== launching judge on GPU ${GPU_ID} :${PORT} (first boot incl. JIT ~3-4 mi
 setsid nohup env \
     CUDA_VISIBLE_DEVICES="${GPU_ID}" \
     CUDA_HOME="${CUDA_HOME}" \
-    PATH="${CUDA_HOME}/bin:${PATH}" \
+    PATH="${ENV_PREFIX}/bin:${CUDA_HOME}/bin:${PATH}" \
     LIBRARY_PATH="${CUDA_HOME}/lib64:${CUDA_HOME}/lib64/stubs:${CUDA_HOME}/lib:${LIBRARY_PATH:-}" \
     LD_LIBRARY_PATH="${CUDA_HOME}/lib:${CUDA_HOME}/targets/x86_64-linux/lib:${ENV_PREFIX}/lib/python3.12/site-packages/torch/lib:/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH:-}" \
     no_proxy=127.0.0.1,localhost NO_PROXY=127.0.0.1,localhost \
