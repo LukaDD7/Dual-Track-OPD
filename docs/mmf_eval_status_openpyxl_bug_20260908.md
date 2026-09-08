@@ -4,13 +4,19 @@ Snapshot of the 7-A dual-arm VLMEvalKit run (`T20260907-152150`, judge
 Qwen3-VL-32B vLLM :8801 on GPU 3) plus the root-cause and fix for the
 scoring-stage crash observed on the base arm.
 
-## Live status (00:40 UTC)
+## Live status (01:25 UTC refresh)
 
 | Arm | GPU | Bench | Progress |
 |---|---|---|---|
-| base | 0 | MathVision (3rd bench) | 2481/3040 (82%), 10.2 it/s |
-| tailsft | 1 | MMMU (1st bench) | 679/1050 (65%), 13.4 s/it |
-| judge | 3 | — | alive, last served request 23:52 (200 OK) |
+| base | 0 | DynaMath (5th bench) | infer started 01:17 |
+| tailsft | 1 | MMMU (1st bench) | 747/1050 (71%), ~71-83 s/it |
+
+**GSPO run #3 (GPUs 4-7)**: relaunched by user ~00:42, filter fix
+(num_proc=16) verified working, engine init + Triton JIT at 00:53,
+step:0 validation ran, **step:3 at 01:20** — training is live. Reward
+trace: `critic/score/mean` 0.2578 (step 1) → 0.4844 (step 2);
+response_length/mean ~7.1-7.4K (max 16384, i.e. some rollouts hit
+the response cap — expected with 16K budget on MFR long-CoT).
 
 Both run.py processes alive; logs still growing; judge only logs when a
 judge-required bench is scoring, so its idle mtime is normal between
@@ -18,11 +24,20 @@ Math-bench scoring phases.
 
 ## Per-bench state (status.json)
 
-**base** — MMMU_DEV_VAL: infer complete, **scoring FAILED** (openpyxl);
-MathVista_MINI: infer complete, **scoring FAILED** (openpyxl); MathVision:
-infer in progress.
+**base** (4 of 14 attempted, 2 fully scored):
 
-**tailsft** — MMMU_DEV_VAL: infer in progress (65%), untouched by the bug.
+| Bench | State | Score |
+|---|---|---|
+| MMMU_DEV_VAL | infer done, **score missing (openpyxl bug)** | re-derive later |
+| MathVista_MINI | infer done, **score missing (openpyxl bug)** | re-derive later |
+| MathVision | done ✅ | Overall acc **25.13** (764/3040) |
+| MathVerse_MINI | done ✅ (01:17) | Text Dominant Overall **37.56** (primary); Vision Only 26.65 / Text Lite 36.17 / Vision Intensive 34.14 |
+| DynaMath | infer in progress | — |
+
+MathVerse scoring went through the judge (Qwen3-VL-32B) and openpyxl —
+both healthy post-fix.
+
+**tailsft** — MMMU_DEV_VAL: infer in progress (71%), untouched by the bug.
 
 ## The openpyxl scoring bug
 
