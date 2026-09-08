@@ -204,3 +204,108 @@ save_freq=25 会写 ~96 份 ≈ 9.2TB，必然撑爆盘。原路线 2 的
 | hint 数据 | `.../sft_rl/virl39k_hint/virl39k_rl_train_hint__part_*.parquet`（26 分片） |
 | val 数据 | `.../sft_rl/virl39k_mmk12_test/virl39k_rl_val__part_0000.parquet`（2,000 行） |
 | GPU 命令清单 | `$DTOPD/manuscript`（13:2x 版 = 根因结论 + 修订路线 2 重启块 5–10）；`$DTOPD/manuscript-sft-rl-gpu`（三步走原始版） |
+
+## 2026-09-08 r4 实际进度与恢复点
+
+### 终态审计
+
+| 项目 | 结果 |
+|---|---|
+| 当前活跃进程 | 无（Ray/vLLM/main_ppo 均不在跑） |
+| 最后观察到的训练 step | **399**（`training/global_step:399`；step 400/val 未完成） |
+| 最新完整 checkpoint | **`global_step_390`**（`latest_checkpointed_iteration.txt=390`） |
+| checkpoint 体积 | `global_step_390` ≈ **98G**（4×8.77G model 分片 + 4×17.54G optimizer 分片 + 元数据） |
+| 训练冻结时间 | 2026-09-07 **17:32:51**；watchdog/canary 末条 17:32:41 |
+| 日志尾部形态 | Ray event-stats / autoscaler 输出，无正常完成、Traceback、SIGTERM 或 OOM 栈 |
+| 最近 val | step 390 `val-core/MMK12_test/reward/mean@1=0.6776316` |
+| 本段最好 val | step 190 `0.7231781`（step 250–390 在 0.676–0.699 区间波动） |
+| 预期总步数 | ~2397（38,348 rows / batch 16，1 epoch；`TOTAL_TRAINING_STEPS=null`） |
+| 完成度 | 观察到 399/2397 ≈ **16.6%**；可恢复训练从 390/2397 ≈ **16.3%** |
+
+r4 lineage 不是从 1 连续跑到 399：现有 dead log 显示 2026-09-06 23:56 进程从
+`global_step_25` 恢复；2026-09-07 01:59 进程从 `global_step_170` 恢复，随后
+继续到 step 399。checkpoint 管理器在保存 390 后删除了 370 的 actor 权重
+（目录仅剩 ~129K 元数据），当前可用恢复点只有 390。该行为与
+`max_actor_ckpt_to_keep=2` 的清理逻辑及“目录保留标记/旧目录清理不同步”的后端
+实现一致；恢复时必须读 tracker，不要按目录名猜。
+
+### r4 训练 recipe（已提交入口）
+
+执行入口为 `scripts/sft_rl/run_grpo_mmf_ptd.sh`。r4 的关键 resolved 配置：
+
+| 组件 | 值 |
+|---|---|
+| student | `$DTOPD/models/Qwen3-VL-8B-Instruct`（base，无 SFT warmup） |
+| GPUs | 4×（`SFT_RL_GPUS=0,1,2,3`；Ray 单机 4 卡） |
+| backend | `verl-qwen35-v090-cu132` @ `483b8a0`，工作区 dirty；diff SHA256 `542bdc28…` |
+| runtime | torch `2.13.0+cu132`，transformers `5.12.0`，Ray `2.55.1`，vLLM `0.27.1` |
+| train | `virl39k_hint/virl39k_rl_train_hint__part_0000..0025.parquet`（26 shard / 38,348 rows / hint ratio 0.8009） |
+| val | `virl39k_mmk12_test/virl39k_rl_val__part_0000.parquet`（2,000 rows，全 MCQ letter） |
+| batch | `TRAIN_BATCH_SIZE=16`，`PPO_MINI_BATCH_SIZE=8`，`ROLLOUT_N=8` |
+| length | prompt 2048，response 12288，actor token budget 24576 |
+| optimizer | actor lr `1e-6`；KL loss coef `0.01`，`low_var_kl` |
+| PTD | `enable=true`，`coef=5e-2`，`top_k=100`，`threshold=1.0`，`kl_direction=jsd_kl`，`all_trajectories=false`，`use_ref_teacher=true` |
+| rollout | vLLM TP=1，`gpu_memory_utilization=0.45`，free cache engine |
+| checkpoint | `save_freq=25`，`max_actor_ckpt_to_keep=2`，`test_freq=10`，`resume_mode=auto` |
+| fused kernels | `SFT_RL_FUSED_KERNELS=0`（PTD top-K 需要 eager logits 输出） |
+
+同名恢复命令（必须保持 experiment name 不变；改名会触发 “Training from
+scratch” resume 陷阱）：
+
+```bash
+SFT_RL_NAME=qwen3vl_virl39k_ptd_base_4gpu_20260906_r4 \
+SFT_RL_MODEL=/inspire/hdd/global_user/mengweicheng-240108120092/lzy/models/Qwen3-VL-8B-Instruct \
+SFT_RL_TRAIN=/inspire/hdd/global_user/mengweicheng-240108120092/lzy/fc-opd-storage/outputs/fc_opd/sft_rl/virl39k_hint/virl39k_rl_train_hint__part_*.parquet \
+SFT_RL_VAL=/inspire/hdd/global_user/mengweicheng-240108120092/lzy/fc-opd-storage/outputs/fc_opd/sft_rl/virl39k_mmk12_test/virl39k_rl_val__part_0000.parquet \
+SFT_RL_GPUS=0,1,2,3 \
+TRAIN_BATCH_SIZE=16 PPO_MINI_BATCH_SIZE=8 ROLLOUT_N=8 \
+MAX_PROMPT_LENGTH=2048 MAX_RESPONSE_LENGTH=12288 SFT_RL_ACTOR_TOKEN_BUDGET=24576 \
+TOTAL_EPOCHS=1 TRAINER_SAVE_FREQ=25 TRAINER_TEST_FREQ=10 \
+PTD_ENABLE=true PTD_COEF=5e-2 PTD_TOP_K=100 PTD_THRESHOLD=1.0 \
+PTD_KL_DIRECTION=jsd_kl PTD_ALL_TRAJECTORIES=0 PTD_USE_REF_TEACHER=1 \
+SFT_RL_FUSED_KERNELS=0 \
+bash scripts/sft_rl/run_grpo_mmf_ptd.sh
+```
+
+评测前必须先从 FSDP 分片导出 HF 权重：
+`scripts/sft_rl/export_hf_from_grpo_ckpt.sh`；RL ckpt 内的
+`huggingface/` 子目录只有 tokenizer/config，没有完整权重。
+
+### 数据与 hint 处理 recipe
+
+1. **ViRL39K train 转换**：`scripts/sft_rl/convert_virl39k.py`
+   - 输入：`$DTOPD/dataset/ViRL39K/39Krelease.parquet` + extracted `images/`
+     tree；
+   - 答案先去外层 `\boxed{...}`，再按 `letter / yesno / pure_number /
+     has_number / other` 分类，默认丢 `other`；
+   - 校验图片存在，读取图片 bytes，图片多于 `<image>` placeholder 时在
+     question 前补 placeholder；placeholder 多于图片则丢样本；
+   - 结果：38,870 → **38,348** kept rows，26 shard，`gt_other_dropped=522`，
+     `placeholder_injected=850`，`missing_image=0`；
+   - GT 分布：letter 12,389、pure_number 18,037、has_number 7,498、
+     yesno 424、other 522；source 最大项 MMK12 12,661、Processed 12,652。
+
+2. **MMK12 test val 转换**：`scripts/sft_rl/convert_mmk12_test.py`
+   - 输入：`PAPOGalaxy/PAPO_MMK12_test` 的 `train-00000-of-00001.parquet`
+     （HF split 名为 `train`，但语义是 test）；
+   - 图片已内联为 `{bytes,path}`；沿用与 train 完全相同的 GT 分类和 verl
+     RL schema；
+   - 结果：**2,000** rows，全 letter，0 dropped；train/val 构造性不重叠。
+
+3. **离线 hint 生成**：`scripts/sft_rl/serve_hint_gen.sh` +
+   `scripts/sft_rl/build_mmf_hints.py`
+   - teacher：本地 `qwen3.6-35B-A3B`，vLLM OpenAI-compatible server；
+   - system prompt 版本 `b35bd247dd00`：只给空间/推理方向、抑制 distractor，
+     严禁泄漏答案、选项字母、关键中间数字或 chain-of-thought；
+   - 生成参数：`max_new_tokens=768`，temperature 0.6，retry temperature 0.9，
+     `max_chars=2048`，`max_decisive_overlap=3`，seed 42；
+   - 硬 QC 会拒绝并重试：empty、too long、CoT degenerate、answer letter/
+     word/numeric/substring/component leak、degenerate output；
+   - 最终 hint ratio **0.8009**（约 30,713/38,348 rows 带可用 hint）；
+   - 输出 schema = 原 RL schema + `hint`、`prompt_with_hint`、
+     `hint_reason`；PTD 训练时学生仍用 question-only rollout，teacher/ref
+     在 hint-augmented context 下计算 top-K 目标。
+
+小体积可审计 manifest（仅路径/行数/SHA256，不含数据本体）：
+`data/manifests/ptdpo_virl39k_r4_20260908.jsonl`。原始 ViRL39K/MMK12、
+hint parquet、训练 log 和 98G checkpoint 均在 `fc-opd-storage`，不入 Git。
