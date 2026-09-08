@@ -122,6 +122,13 @@ TOTAL_EPOCHS="${TOTAL_EPOCHS:-1}"
 SAVE_FREQ="${SFT_RL_SAVE_FREQ:-75}"
 TEST_FREQ="${SFT_RL_TEST_FREQ:-50}"
 MAX_CKPT_KEEP="${SFT_RL_MAX_CKPT_KEEP:-2}"
+# 2026-09-07 二次挂死复盘: filter_overlong_prompts 单进程 tokenize 20K 样本
+# 在 15:58 重启中卡死 0/20000（bar 零进度, 8h 无 step）。verl 数据集过滤
+# worker 数走 data.filter_overlong_prompts_workers（verl/utils/dataset/
+# rl_dataset.py:148）, 默认 1 —— 20K 多模态样本单进程逐条 apply_chat_template
+# 既慢又依赖 tqdm 心跳, 平台低利用率收割器看 GPU=0 即回收。16 进程并行
+# 把该阶段压到分钟级且让 GPU 更早有动静。
+FILTER_WORKERS="${SFT_RL_FILTER_WORKERS:-16}"
 if [[ "${SFT_RL_ACTOR_OFFLOAD:-0}" == "1" ]]; then ACTOR_OFFLOAD="True"; else ACTOR_OFFLOAD="False"; fi
 if [[ "${SFT_RL_OPTIMIZER_OFFLOAD:-0}" == "1" ]]; then OPTIMIZER_OFFLOAD="True"; else OPTIMIZER_OFFLOAD="False"; fi
 PROJECT_NAME="verl_sftrl"
@@ -156,6 +163,7 @@ python3 -m verl.trainer.main_ppo \
   data.max_prompt_length="${MAX_PROMPT_LENGTH}" \
   data.max_response_length="${MAX_RESPONSE_LENGTH}" \
   data.filter_overlong_prompts=True \
+  data.filter_overlong_prompts_workers="${FILTER_WORKERS}" \
   data.truncation='error' \
   actor_rollout_ref.model.path="${SFT_RL_MODEL}" \
   actor_rollout_ref.model.use_remove_padding=True \
