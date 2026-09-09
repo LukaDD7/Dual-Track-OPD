@@ -55,11 +55,11 @@ launch_arm() {
   local eval_port="$((8000 + slot * 2))"
   local judge_port="$((8001 + slot * 2))"
   local model_path=""
-  local run_name=""
   local served_name=""
-  local arm_log="${LOG_DIR}/project15_${run_name}.log"
-  local arm_pid_file="${STATE_DIR}/${run_name}.pid"
-  local arm_status_file="${STATE_DIR}/${run_name}.status"
+  local run_name=""
+  local arm_log=""
+  local arm_pid_file=""
+  local arm_status_file=""
 
   case "${arm}" in
     base)
@@ -82,6 +82,9 @@ launch_arm() {
       exit 1
       ;;
   esac
+  arm_log="${LOG_DIR}/project15_${run_name}.log"
+  arm_pid_file="${STATE_DIR}/${run_name}.pid"
+  arm_status_file="${STATE_DIR}/${run_name}.status"
 
   echo "== launching project15 arm ${arm}: model GPU${model_gpu}, judge GPU${judge_gpu} =="
   echo "   log: ${arm_log}"
