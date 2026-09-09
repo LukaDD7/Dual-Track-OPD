@@ -92,6 +92,7 @@ For a full aligned v1 rerun:
 
 ```bash
 PROJECT15_CONFIG=/path/to/configs/eval/project_vision_opd_v1_aligned.yaml \
+PROJECT15_RUN_SUFFIX=_v1_aligned \
   bash scripts/eval/launch_project15_eval_pack.sh 0 base,tailsft,ptdpo 3
 ```
 

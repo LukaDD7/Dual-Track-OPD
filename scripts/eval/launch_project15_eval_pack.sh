@@ -20,6 +20,7 @@ REPO_ROOT="${DTOPD_ROOT}/projects/Dual-Track-OPD"
 LOG_DIR="${DTOPD_ROOT}/fc-opd-storage/logs"
 STATE_DIR="${LOG_DIR}/project15_state"
 PROJECT15_CONFIG="${PROJECT15_CONFIG:-${REPO_ROOT}/configs/eval/project_vision_opd.yaml}"
+PROJECT15_RUN_SUFFIX="${PROJECT15_RUN_SUFFIX:-}"
 
 GPU_BASE="${1:-0}"
 ARMS="${2:-base,tailsft,ptdpo}"
@@ -63,17 +64,17 @@ launch_arm() {
   case "${arm}" in
     base)
       model_path="${DTOPD_ROOT}/models/Qwen3-VL-8B-Instruct"
-      run_name="project15_base_qwen3vl8b"
+      run_name="project15_base_qwen3vl8b${PROJECT15_RUN_SUFFIX}"
       served_name="Qwen3-VL-8B-Base"
       ;;
     tailsft)
       model_path="${DTOPD_ROOT}/fc-opd-storage/outputs/fc_opd/sft_rl/ckpt/qwen3vl_sft_tailsft_mmf122k_1ep/global_step_1774/huggingface"
-      run_name="project15_tailsft_mmf122k_1ep"
+      run_name="project15_tailsft_mmf122k_1ep${PROJECT15_RUN_SUFFIX}"
       served_name="Qwen3-VL-8B-TailSFT"
       ;;
     ptdpo)
       model_path="${PTDPO_HF}"
-      run_name="project15_ptdpo_r4_step390"
+      run_name="project15_ptdpo_r4_step390${PROJECT15_RUN_SUFFIX}"
       served_name="Qwen3-VL-8B-PTDPO-R4"
       ;;
     *)
@@ -119,9 +120,9 @@ launch_arm_sync() {
   local slot="$2"
   local run_name
   case "${arm}" in
-    base) run_name="project15_base_qwen3vl8b" ;;
-    tailsft) run_name="project15_tailsft_mmf122k_1ep" ;;
-    ptdpo) run_name="project15_ptdpo_r4_step390" ;;
+    base) run_name="project15_base_qwen3vl8b${PROJECT15_RUN_SUFFIX}" ;;
+    tailsft) run_name="project15_tailsft_mmf122k_1ep${PROJECT15_RUN_SUFFIX}" ;;
+    ptdpo) run_name="project15_ptdpo_r4_step390${PROJECT15_RUN_SUFFIX}" ;;
     *) echo "FATAL: unknown arm ${arm}" >&2; exit 1 ;;
   esac
 
@@ -159,9 +160,9 @@ for arm in "${ARM_LIST[@]}"; do
       local_arm="${batch[$i]}"
       launch_arm "${local_arm}" "${i}"
       case "${local_arm}" in
-        base) run_name="project15_base_qwen3vl8b" ;;
-        tailsft) run_name="project15_tailsft_mmf122k_1ep" ;;
-        ptdpo) run_name="project15_ptdpo_r4_step390" ;;
+        base) run_name="project15_base_qwen3vl8b${PROJECT15_RUN_SUFFIX}" ;;
+        tailsft) run_name="project15_tailsft_mmf122k_1ep${PROJECT15_RUN_SUFFIX}" ;;
+        ptdpo) run_name="project15_ptdpo_r4_step390${PROJECT15_RUN_SUFFIX}" ;;
       esac
       pids+=("$(cat "${STATE_DIR}/${run_name}.pid")")
       run_names+=("${run_name}")
@@ -188,9 +189,9 @@ if [[ "${#batch[@]}" -gt 0 ]]; then
     local_arm="${batch[$i]}"
     launch_arm "${local_arm}" "${i}"
     case "${local_arm}" in
-      base) run_name="project15_base_qwen3vl8b" ;;
-      tailsft) run_name="project15_tailsft_mmf122k_1ep" ;;
-      ptdpo) run_name="project15_ptdpo_r4_step390" ;;
+      base) run_name="project15_base_qwen3vl8b${PROJECT15_RUN_SUFFIX}" ;;
+      tailsft) run_name="project15_tailsft_mmf122k_1ep${PROJECT15_RUN_SUFFIX}" ;;
+      ptdpo) run_name="project15_ptdpo_r4_step390${PROJECT15_RUN_SUFFIX}" ;;
     esac
     pids+=("$(cat "${STATE_DIR}/${run_name}.pid")")
     run_names+=("${run_name}")
