@@ -50,6 +50,7 @@ export HF_DATASETS_CACHE="${HF_HOME}/datasets"
 export LMMS_EVAL_DATASETS_CACHE="${HF_HOME}/datasets"
 
 SFT_RL_MODEL_HF="${SFT_RL_MODEL_HF:-${DTOPD_ROOT}/fc-opd-storage/outputs/fc_opd/sft_rl/hf/qwen3vl_grpo_mmf_184}"
+SFT_RL_EVAL_CONFIG="${SFT_RL_EVAL_CONFIG:-${REPO_ROOT}/configs/eval/project_vision_opd.yaml}"
 SFT_RL_JUDGE_HF="${SFT_RL_JUDGE_HF:-${DTOPD_ROOT}/models/Qwen3-VL-32B-Instruct-FP8}"
 SERVED_NAME="${SFT_RL_SERVED_MODEL:-Qwen3-VL-8B-SFTRL}"
 JUDGE_NAME="Qwen3-VL-32B-Instruct"
@@ -137,6 +138,10 @@ export PYTHONPATH="${REPO_ROOT}/src:${PYTHONPATH:-}"
 
 BENCH1="${SFT_RL_BENCHMARKS-gqa,dynamath,viewspatial,mmmu_pro,remi}"
 BENCH2="${SFT_RL_JUDGE_BENCHMARKS-mmbench}"
+KEEP_GOING_ARGS=()
+if [[ "${SFT_RL_KEEP_GOING:-0}" == "1" ]]; then
+  KEEP_GOING_ARGS=(--keep-going)
+fi
 
 # 自动续跑：同 run name 已有输出目录时用 --resume-from 跳过已完成 benchmark
 # （进行中的 benchmark 由 lmms-eval response cache 逐条回放，不会白跑）
@@ -154,13 +159,14 @@ fi
 echo "== [1/2] rule-based benchmarks (no judge) =="
 if [[ -n "${BENCH1}" ]]; then
   "${PY}" -m dual_track_opd.eval.benchmark_suite \
-    --config "${REPO_ROOT}/configs/eval/project_vision_opd.yaml" \
+    --config "${SFT_RL_EVAL_CONFIG}" \
     --benchmarks "${BENCH1}" \
     --judge-policy defer \
     --run-name "${RUN_NAME}_nojudge" \
     "${LIMIT_ARGS[@]}" \
     "${RESUME1[@]}" \
-    --execute
+    --execute \
+    "${KEEP_GOING_ARGS[@]}"
 fi
 
 echo "== [2/2] judge benchmarks (${BENCH2}) =="
@@ -169,13 +175,14 @@ if [[ -n "${BENCH2}" ]]; then
   export JUDGE_API_URL="${JUDGE_API_URL}"
   export JUDGE_MODEL="${JUDGE_NAME}"
   "${PY}" -m dual_track_opd.eval.benchmark_suite \
-    --config "${REPO_ROOT}/configs/eval/project_vision_opd.yaml" \
+    --config "${SFT_RL_EVAL_CONFIG}" \
     --benchmarks "${BENCH2}" \
     --judge-policy score \
     --run-name "${RUN_NAME}_judged" \
     "${LIMIT_ARGS[@]}" \
     "${RESUME2[@]}" \
-    --execute
+    --execute \
+    "${KEEP_GOING_ARGS[@]}"
 fi
 
 echo "== summaries =="

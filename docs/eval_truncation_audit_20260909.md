@@ -59,6 +59,9 @@ MMU, the observed 32k-character response share is approximately 12.6% for base,
 - v1 remains the immutable contract baseline.
 - v2 four-task diagnostic remains mandatory for TailSFT and recommended for all
   arms: GQA, DynaMath, ViewSpatial, MMMU-Pro.
+- For a full 15-task aligned run, use
+  `configs/eval/project_vision_opd_v1_aligned.yaml`. It keeps the v1 task and
+  scoring semantics but raises every task to a uniform 4096-token budget.
 - Use 4096 tokens as the aligned upper bound for this lmms-eval OpenAI backend.
 - Keep separate output roots (`vision_opd_project_baseline` and
   `vision_opd_project_v2`) so v1 and v2 results remain independently auditable.
@@ -78,3 +81,19 @@ samples whose previous response reached `max_new_tokens`. The safe equivalent is
 The new audit tool reads the sample JSONL files and reports cap counts by
 benchmark, without modifying raw outputs.
 
+## Launcher hardening
+
+`scripts/eval/launch_project15_eval_pack.sh` now records one stdout/stderr log,
+PID, and status file per arm under `fc-opd-storage/logs/project15_state/`.
+It also passes `--keep-going` to `benchmark_suite`, so one failed benchmark no
+longer stops the remaining tasks in that arm.
+
+For a full aligned v1 rerun:
+
+```bash
+PROJECT15_CONFIG=/path/to/configs/eval/project_vision_opd_v1_aligned.yaml \
+  bash scripts/eval/launch_project15_eval_pack.sh 0 base,tailsft,ptdpo 3
+```
+
+Use new run names for the aligned protocol; do not resume an old low-cap v1 run
+and mix completed low-cap results with new 4096-token results.
