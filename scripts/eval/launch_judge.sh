@@ -65,8 +65,12 @@ setsid nohup env \
     > "${LOG_FILE}" 2>&1 &
 echo "started (bg pid $!), log: ${LOG_FILE}"
 
-# 4) readiness probe: up to 5 min; fail fast if the server process dies
-for i in $(seq 1 20); do
+# 4) readiness probe: default 15 min (JUDGE_WAIT_MINUTES). 2026-09-09: the
+# 62-GiB BF16 checkpoint can take >5 min on a contended GPFS node before the
+# OpenAI endpoint answers, even while the process is healthy and loading.
+JUDGE_WAIT_MINUTES="${JUDGE_WAIT_MINUTES:-15}"
+JUDGE_WAIT_TICKS="$((JUDGE_WAIT_MINUTES * 4))"
+for i in $(seq 1 "${JUDGE_WAIT_TICKS}"); do
     sleep 15
     if curl -s "http://127.0.0.1:${PORT}/v1/chat/completions" \
         -H 'Content-Type: application/json' -H "Authorization: Bearer ${JUDGE_API_KEY}" \
@@ -81,7 +85,7 @@ for i in $(seq 1 20); do
         tail -30 "${LOG_FILE}" >&2
         exit 1
     fi
-    echo "waiting for judge (${i}/20)..."
+    echo "waiting for judge (${i}/${JUDGE_WAIT_TICKS})..."
 done
-echo "FATAL: judge not ready after 5 min; tail ${LOG_FILE}" >&2
+echo "FATAL: judge not ready after ${JUDGE_WAIT_MINUTES} min; tail ${LOG_FILE}" >&2
 exit 1
