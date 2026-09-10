@@ -53,7 +53,7 @@ For the no-judge missing benchmarks:
 
 ```bash
 EVAL_CKPT=/inspire/hdd/global_user/mengweicheng-240108120092/lzy/fc-opd-storage/outputs/fc_opd/sft_rl/hf/qwen3vl_ptdpo_r4_step390 \
-EVAL_RUN_NAME=project15_ptdpo_r4_step390_offline_nojudge \
+EVAL_RUN_NAME=project15_ptdpo_r4_step390_offline \
 EVAL_SERVED_MODEL=Qwen3-VL-8B-PTDPO-R4 \
 EVAL_GPU=2 \
 EVAL_JUDGE_GPU=3 \
@@ -70,7 +70,7 @@ For the judged missing benchmarks, use a separate run name:
 
 ```bash
 EVAL_CKPT=/inspire/hdd/global_user/mengweicheng-240108120092/lzy/fc-opd-storage/outputs/fc_opd/sft_rl/hf/qwen3vl_ptdpo_r4_step390 \
-EVAL_RUN_NAME=project15_ptdpo_r4_step390_offline_judged \
+EVAL_RUN_NAME=project15_ptdpo_r4_step390_offline \
 EVAL_SERVED_MODEL=Qwen3-VL-8B-PTDPO-R4 \
 EVAL_GPU=2 \
 EVAL_JUDGE_GPU=3 \
