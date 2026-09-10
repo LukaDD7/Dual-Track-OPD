@@ -134,8 +134,8 @@ Current completed scores:
 | base | DynaMath | done | 0.6291 |
 | base | ViewSpatial | done | 0.4090 |
 | base | MMMU-Pro | running | — |
-| TailSFT | GQA | running (42%) | — |
-| TailSFT | DynaMath | pending | — |
+| TailSFT | GQA | done, not capability-comparable | 0.3209 |
+| TailSFT | DynaMath | done | 0.5762 |
 | TailSFT | ViewSpatial | pending | — |
 | TailSFT | MMMU-Pro | pending | — |
 | PTD-PO | GQA | done | 0.6152 |
@@ -150,6 +150,39 @@ v2 result root:
 The literal trailing `}` is a historical environment-variable issue in the v2
 runner's default output-root expansion. The files under it are valid; a clean
 run should set `DTOPD_EVAL_ROOT` explicitly.
+
+### GQA v2 TailSFT truncation audit — 2026-09-10
+
+The TailSFT GQA v2 score of 0.3209 is not a valid capability comparison.
+Although the v2 protocol increased GQA's output budget from v1's 128 tokens to
+4096 tokens, TailSFT still hit the generation ceiling on many long-CoT samples:
+
+| Audit | Value |
+|---|---:|
+| GQA samples | 12,578 |
+| Responses at the 4096-token ceiling | 5,229 |
+| Ceiling-hit share | 41.6% |
+| Accuracy on ceiling-hit samples | 0.000 |
+| Accuracy on non-ceiling samples | 0.5492 |
+| Accuracy with an explicit `<answer>` tag | 0.5887 |
+| Accuracy without an explicit `<answer>` tag | 0.2020 |
+
+The prompt matches lmms-eval's official GQA prompt
+(`Answer the question using a single word or phrase.`), but TailSFT frequently
+does not follow it and continues reasoning until the ceiling. Manual samples
+end mid-sentence without a final answer. The scorer then compares the full
+unfinished response against the one-word gold answer, which explains the large
+drop.
+
+Base and PTD-PO are not affected: their median output length is 4 tokens and
+their GQA scores are 0.6163 and 0.6152. The earlier v1 TailSFT GQA score of
+13.85 under a 128-token cap was almost certainly caused by the same mechanism.
+
+Do not use TailSFT GQA v1/v2 as a capability conclusion. If needed, rerun GQA
+with a new short-answer protocol (for example, a new `gqa_v3_short` task,
+stronger one-word-only instruction, and a 16–32 token cap) or a separate
+answer-tag-forced long-CoT protocol. Use a new run name so the completed GQA
+manifest entry and response cache do not skip the rerun.
 
 ## HF and source assets
 

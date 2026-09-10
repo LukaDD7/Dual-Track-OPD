@@ -37,7 +37,8 @@ Project15-v2,base,GQA,done,0.6163,
 Project15-v2,base,DynaMath,done,0.6291,
 Project15-v2,base,ViewSpatial,done,0.4090,
 Project15-v2,base,MMMU-Pro,running,,
-Project15-v2,tailsft,GQA,running,,42_percent_complete
+Project15-v2,tailsft,GQA,done,0.3209,4096_token_ceiling_hit_on_41.6_percent_not_capability_comparable
+Project15-v2,tailsft,DynaMath,done,0.5762,
 Project15-v2,ptdpo_r4_step390,GQA,done,0.6152,
 Project15-v2,ptdpo_r4_step390,DynaMath,done,0.6218,
 Project15-v2,ptdpo_r4_step390,ViewSpatial,running,,
