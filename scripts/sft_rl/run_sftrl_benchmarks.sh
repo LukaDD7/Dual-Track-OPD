@@ -62,6 +62,9 @@ MAX_LEN="${SFT_RL_MAX_LEN:-65536}"
 RUN_NAME="${SFT_RL_RUN_NAME:-sftrl_grpo184}"
 OUT_ROOT="${DTOPD_EVAL_ROOT:-${DTOPD_ROOT}/eval_runs/vision_opd_project_baseline}"
 JUDGE_API_URL="http://127.0.0.1:${JUDGE_PORT}/v1"
+JUDGE_BENCHMARKS_RAW="${SFT_RL_JUDGE_BENCHMARKS-mmbench}"
+JUDGE_ENABLED=0
+[[ -n "${JUDGE_BENCHMARKS_RAW//,/}" ]] && JUDGE_ENABLED=1
 
 [ -f "${SFT_RL_MODEL_HF}/model.safetensors" ] || compgen -G "${SFT_RL_MODEL_HF}/model-*.safetensors" >/dev/null || { echo "FATAL: no model.safetensors/model-*.safetensors in ${SFT_RL_MODEL_HF}"; exit 1; }
 [ -x "${PY}" ] && [ -x "${VLLM_BIN}" ] || { echo "FATAL: eval env missing: ${EVAL_ENV}"; exit 1; }
@@ -92,7 +95,11 @@ cleanup() {
 trap cleanup EXIT
 
 echo "== SFT-RL benchmarks: model=${SFT_RL_MODEL_HF} =="
-echo "== eval: GPU${EVAL_GPU}:${EVAL_PORT}  judge: GPU${JUDGE_GPU}:${JUDGE_PORT} (${JUDGE_NAME}) =="
+if [[ "${JUDGE_ENABLED}" == "1" ]]; then
+  echo "== eval: GPU${EVAL_GPU}:${EVAL_PORT}  judge: GPU${JUDGE_GPU}:${JUDGE_PORT} (${JUDGE_NAME}) =="
+else
+  echo "== eval: GPU${EVAL_GPU}:${EVAL_PORT}  judge: disabled (no judged benchmarks) =="
+fi
 echo "== run_name=${RUN_NAME}  out_root=${OUT_ROOT} =="
 
 CUDA_VISIBLE_DEVICES="${EVAL_GPU}" \
@@ -105,31 +112,39 @@ CUDA_VISIBLE_DEVICES="${EVAL_GPU}" \
   --trust-remote-code > "${EVAL_LOG}" 2>&1 &
 EVAL_PID=$!
 
-CUDA_VISIBLE_DEVICES="${JUDGE_GPU}" \
-  "${VLLM_BIN}" serve "${SFT_RL_JUDGE_HF}" \
-  --host 127.0.0.1 --port "${JUDGE_PORT}" \
-  --served-model-name "${JUDGE_NAME}" \
-  --tensor-parallel-size 1 \
-  --gpu-memory-utilization 0.85 \
-  --max-model-len 32768 \
-  --trust-remote-code > "${JUDGE_LOG}" 2>&1 &
-JUDGE_PID=$!
+if [[ "${JUDGE_ENABLED}" == "1" ]]; then
+  CUDA_VISIBLE_DEVICES="${JUDGE_GPU}" \
+    "${VLLM_BIN}" serve "${SFT_RL_JUDGE_HF}" \
+    --host 127.0.0.1 --port "${JUDGE_PORT}" \
+    --served-model-name "${JUDGE_NAME}" \
+    --tensor-parallel-size 1 \
+    --gpu-memory-utilization 0.85 \
+    --max-model-len 32768 \
+    --trust-remote-code > "${JUDGE_LOG}" 2>&1 &
+  JUDGE_PID=$!
+fi
 
 echo "[sftrl-bench] waiting for endpoints..."
 for i in $(seq 1 180); do
   ev_ok=$(curl -s --max-time 5 "http://127.0.0.1:${EVAL_PORT}/v1/models" >/dev/null 2>&1 && echo 1 || echo 0)
-  jd_ok=$(curl -s --max-time 5 "http://127.0.0.1:${JUDGE_PORT}/v1/models" >/dev/null 2>&1 && echo 1 || echo 0)
+  if [[ "${JUDGE_ENABLED}" == "1" ]]; then
+    jd_ok=$(curl -s --max-time 5 "http://127.0.0.1:${JUDGE_PORT}/v1/models" >/dev/null 2>&1 && echo 1 || echo 0)
+  else
+    jd_ok=1
+  fi
   if [[ "${ev_ok}" == "1" && "${jd_ok}" == "1" ]]; then
     echo "[sftrl-bench] both servers ready after ~$((i * 5))s"
     break
   fi
-  if ! kill -0 "${EVAL_PID}" 2>/dev/null || ! kill -0 "${JUDGE_PID}" 2>/dev/null; then
+  if ! kill -0 "${EVAL_PID}" 2>/dev/null || { [[ "${JUDGE_ENABLED}" == "1" ]] && ! kill -0 "${JUDGE_PID}" 2>/dev/null; }; then
     echo "FATAL: a vLLM server died. See ${EVAL_LOG} / ${JUDGE_LOG}"; tail -n 20 "${EVAL_LOG}" "${JUDGE_LOG}"; exit 1
   fi
   sleep 5
 done
 curl -s --max-time 5 "http://127.0.0.1:${EVAL_PORT}/v1/models" >/dev/null 2>&1 || { echo "FATAL: eval server not ready"; exit 1; }
-curl -s --max-time 5 "http://127.0.0.1:${JUDGE_PORT}/v1/models" >/dev/null 2>&1 || { echo "FATAL: judge server not ready"; exit 1; }
+if [[ "${JUDGE_ENABLED}" == "1" ]]; then
+  curl -s --max-time 5 "http://127.0.0.1:${JUDGE_PORT}/v1/models" >/dev/null 2>&1 || { echo "FATAL: judge server not ready"; exit 1; }
+fi
 
 export VISION_OPD_CHECKPOINT="${SFT_RL_MODEL_HF}"
 export VISION_OPD_SERVED_MODEL="${SERVED_NAME}"
