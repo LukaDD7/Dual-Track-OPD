@@ -35,6 +35,16 @@ data/raw/
 data/processed/
 data/downloads/
 
+# External and runtime directories
+external/
+runs/
+third_party_runtime/
+raw_logs/
+
+# GKD/VA-OPD artifact subdirs
+artifacts/vaopd_gkd/raw/
+artifacts/vaopd_blockwise/raw/
+
 # OS/editor
 .DS_Store
 .idea/

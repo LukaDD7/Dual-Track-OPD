@@ -1,0 +1,22 @@
+experiment:
+  id: "005"
+  name: smoke_fc_opd_cpu
+  backend_config: configs/backend/trl_toy.yaml
+  conditions:
+    enabled: [full, blur, free, task]
+    degradation:
+      type: gaussian_blur
+      sigma: 2.0
+  response:
+    format: structured_three_chunk
+    invalid_format_fallback: all_reasoning
+  router:
+    mode: chunk
+    visual_evidence: task
+    reasoning: full
+    answer: full
+    invalid_format_condition: full
+  loss:
+    type: sparse_topk_forward_kl
+    renormalize_topk: true
+    include_tail: true

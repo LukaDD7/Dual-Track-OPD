@@ -1,0 +1,690 @@
+#!/usr/bin/env bash
+# run_gkd_text_smoke.sh — GKD text-only smoke test (Gate 2 / Gate 3)
+#
+# Runs the GKD recipe with synthetic text-only data. Qwen3-0.6B default.
+# No image data, no VA-OPD patch, no Qwen3.5.
+# Pure environment validation: GKD/Megatron/Ray/vLLM pipeline stability.
+#
+# GPU isolation: teacher on TEACHER_GPU, Ray + training on TRAIN_GPUS.
+#
+# Usage:
+#   bash scripts/hpc/run_gkd_text_smoke.sh                        # 10 steps, synthetic data
+#   bash scripts/hpc/run_gkd_text_smoke.sh --steps 200            # Gate 3 (200 steps)
+#   bash scripts/hpc/run_gkd_text_smoke.sh --teacher-gpu 0 --train-gpus 1,2,3,4
+#   bash scripts/hpc/run_gkd_text_smoke.sh --train-data train.parquet --val-data test.parquet
+#   bash scripts/hpc/run_gkd_text_smoke.sh --background
+
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+RUN_ID="gkd_smoke_${TIMESTAMP}"
+
+# ── env var overrides ─────────────────────────────────────────────────────
+CONDA_BASE="${CONDA_BASE:-/inspire/hdd/global_user/mengweicheng-240108120092/lzy/miniconda3}"
+MODEL_ROOT="${MODEL_ROOT:-/inspire/hdd/global_user/mengweicheng-240108120092/lzy/models}"
+GKD_ENV="${GKD_ENV:-/inspire/hdd/global_user/mengweicheng-240108120092/lzy/envs/vaopd-gkd-cu128}"
+CUDA_TOOLCHAIN="${CUDA_TOOLCHAIN:-/inspire/hdd/global_user/mengweicheng-240108120092/lzy/envs/cuda128-toolchain}"
+PYTHON="${GKD_ENV}/bin/python"
+RAY="${GKD_ENV}/bin/ray"
+GKD_COMPAT_COMMIT="d8e97e1724e348658c670b9160f1393d4fb20678"
+DEFAULT_COMPAT_VERL="${REPO_ROOT}/external/verl_gkd_compatible/verl"
+DEFAULT_PATCHED_VERL="${REPO_ROOT}/external/verl_gkd/verl"
+if [[ -z "${VERL_GKD_DIR:-}" ]]; then
+    if [[ -d "${DEFAULT_COMPAT_VERL}" ]]; then
+        VERL_GKD_DIR="${DEFAULT_COMPAT_VERL}"
+    else
+        VERL_GKD_DIR="${DEFAULT_PATCHED_VERL}"
+    fi
+fi
+
+# The known-compatible revision contains GKD inside the verl tree.  Newer verl
+# revisions use a split recipe repository and removed the synchronous/in-process
+# vLLM rollout that this GKD trainer calls.
+if [[ -f "${VERL_GKD_DIR}/recipe/gkd/main_gkd.py" ]]; then
+    GKD_RECIPE_DIR="${VERL_GKD_DIR}/recipe/gkd"
+    GKD_MAIN_MODULE="recipe.gkd.main_gkd"
+    GKD_LAYOUT="integrated"
+else
+    GKD_RECIPE_DIR="${VERL_GKD_DIR}/recipe/gkd/megatron"
+    GKD_MAIN_MODULE="recipe.gkd.megatron.main_gkd"
+    GKD_LAYOUT="split"
+fi
+
+# ── defaults ──────────────────────────────────────────────────────────────
+TEACHER_GPU=0
+TRAIN_GPU_LIST="1,2,3,4"
+NUM_STEPS=10
+TRAIN_BATCH_SIZE=4
+MODEL_PATH="${MODEL_ROOT}/Qwen3-0.6B"
+SYNTHETIC_DATA=true
+TRAIN_DATA_PATH=""
+VAL_DATA_PATH=""
+RUN_BACKGROUND=false
+GKD_TEACHER_GPU_MEMORY_UTILIZATION="${GKD_TEACHER_GPU_MEMORY_UTILIZATION:-0.35}"
+TEACHER_WARMUP_TIMEOUT_SECONDS="${TEACHER_WARMUP_TIMEOUT_SECONDS:-1200}"
+
+# ── fixed paths ───────────────────────────────────────────────────────────
+OUTPUT_DIR="${REPO_ROOT}/runs/gkd_smoke/${RUN_ID}"
+DATA_DIR="${OUTPUT_DIR}/data"
+TEACHER_PORT=15555
+TEACHER_PROXY_PORT=15556
+PROXY_PID=""
+WORKER_PID=""
+
+cleanup_teacher_processes() {
+    local pid
+    # proxy.py and worker.py are launched with setsid.  Killing their process
+    # groups also terminates vLLM EngineCore children, which otherwise become
+    # PPID-1 orphans and retain tens of GiB on the teacher GPU.
+    for pid in "${WORKER_PID:-}" "${PROXY_PID:-}"; do
+        [[ -n "${pid}" ]] || continue
+        kill -TERM -- "-${pid}" 2>/dev/null || kill -TERM "${pid}" 2>/dev/null || true
+    done
+    sleep 1
+    for pid in "${WORKER_PID:-}" "${PROXY_PID:-}"; do
+        [[ -n "${pid}" ]] || continue
+        kill -KILL -- "-${pid}" 2>/dev/null || kill -KILL "${pid}" 2>/dev/null || true
+    done
+    WORKER_PID=""
+    PROXY_PID=""
+}
+
+trap cleanup_teacher_processes EXIT
+
+ORIGINAL_ARGS=("$@")
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --teacher-gpu)    TEACHER_GPU="${2:?--teacher-gpu needs a value}"; shift 2 ;;
+        --train-gpus)     TRAIN_GPU_LIST="${2:?--train-gpus needs a value}"; shift 2 ;;
+        --steps)          NUM_STEPS="${2:?--steps needs a value}"; shift 2 ;;
+        --model-path)     MODEL_PATH="${2:?--model-path needs a value}"; shift 2 ;;
+        --synthetic-data) SYNTHETIC_DATA=true; shift ;;
+        --train-data)     TRAIN_DATA_PATH="${2:?--train-data needs a value}"; SYNTHETIC_DATA=false; shift 2 ;;
+        --val-data)       VAL_DATA_PATH="${2:?--val-data needs a value}"; shift 2 ;;
+        --background)     RUN_BACKGROUND=true; shift ;;
+        *) echo "Unknown arg: $1"; exit 1 ;;
+    esac
+done
+
+mkdir -p "${OUTPUT_DIR}" "${DATA_DIR}"
+
+# ── background re-launch ──────────────────────────────────────────────────
+if ${RUN_BACKGROUND}; then
+    RELAUNCH_ARGS=()
+    for arg in "${ORIGINAL_ARGS[@]}"; do
+        [[ "$arg" != "--background" ]] || continue
+        RELAUNCH_ARGS+=("$arg")
+    done
+    NOHUP_LOG="${OUTPUT_DIR}/nohup.log"
+    echo "Launching background smoke test → ${NOHUP_LOG}"
+    nohup bash "$0" \
+        --teacher-gpu "${TEACHER_GPU}" \
+        --train-gpus "${TRAIN_GPU_LIST}" \
+        --steps "${NUM_STEPS}" \
+        --model-path "${MODEL_PATH}" \
+        "${RELAUNCH_ARGS[@]}" \
+        > "${NOHUP_LOG}" 2>&1 &
+    disown
+    echo "Background PID: $!"
+    exit 0
+fi
+
+# ── preamble ──────────────────────────────────────────────────────────────
+echo "══════════════════════════════════════════════════════════════"
+echo "  GKD Text Smoke Test — Gate 2/3"
+echo "  Run ID:         ${RUN_ID}"
+echo "  Steps:          ${NUM_STEPS}"
+echo "  Model:          ${MODEL_PATH}"
+echo "  Teacher GPU:    ${TEACHER_GPU}"
+echo "  Train GPUs:     ${TRAIN_GPU_LIST}"
+echo "  Output dir:     ${OUTPUT_DIR}"
+echo "  GKD recipe:     ${GKD_RECIPE_DIR}"
+echo "  GKD layout:     ${GKD_LAYOUT}"
+echo "  Synthetic data: ${SYNTHETIC_DATA}"
+echo "══════════════════════════════════════════════════════════════"
+echo ""
+
+# ── validate data paths (early, before env checks) ───────────────────────────
+if ! ${SYNTHETIC_DATA}; then
+    if [[ -n "${TRAIN_DATA_PATH}" ]] && [[ ! -f "${TRAIN_DATA_PATH}" ]]; then
+        echo "FATAL: --train-data file not found: ${TRAIN_DATA_PATH}" >&2
+        exit 1
+    fi
+    if [[ -n "${VAL_DATA_PATH}" ]] && [[ ! -f "${VAL_DATA_PATH}" ]]; then
+        echo "FATAL: --val-data file not found: ${VAL_DATA_PATH}" >&2
+        exit 1
+    fi
+fi
+
+# ── verify env ────────────────────────────────────────────────────────────
+if [[ ! -x "${PYTHON}" ]]; then
+    echo "FATAL: Python not found at ${PYTHON}"
+    echo "Run: bash scripts/setup/setup_vaopd_gkd_cu128.sh --execute"
+    exit 1
+fi
+
+if [[ ! -d "${VERL_GKD_DIR}" ]]; then
+    echo "FATAL: verl GKD checkout not found at ${VERL_GKD_DIR}"
+    echo "Run: bash scripts/setup/setup_vaopd_gkd_cu128.sh --execute"
+    exit 1
+fi
+
+if [[ ! -d "${GKD_RECIPE_DIR}" ]]; then
+    echo "FATAL: GKD recipe not found at ${GKD_RECIPE_DIR}"
+    echo "Did 'git submodule update --init --recursive recipe' succeed?"
+    exit 1
+fi
+
+if [[ ! -d "${MODEL_PATH}" ]]; then
+    echo "FATAL: Model not found at ${MODEL_PATH}"
+    echo "Available local Qwen3 candidates under ${MODEL_ROOT}:"
+    find "${MODEL_ROOT}" -maxdepth 1 -type d -name 'Qwen3*' -print 2>/dev/null | sort || true
+    echo "Download explicitly with: hf download Qwen/<model-name> --local-dir ${MODEL_PATH}"
+    exit 1
+fi
+
+# vLLM 0.11 / FlashInfer builds sampling kernels on first use.  The conda
+# CUDA toolkit stores libcudart under lib/ (and targets/.../lib), while the
+# generated extension link command may only add CUDA_HOME/lib64.  Export both
+# the compiler and the real runtime-library directory before Ray starts so all
+# workers inherit a complete JIT environment.
+if [[ ! -x "${CUDA_TOOLCHAIN}/bin/nvcc" ]]; then
+    echo "FATAL: CUDA 12.8 nvcc not found at ${CUDA_TOOLCHAIN}/bin/nvcc" >&2
+    echo "Run: bash scripts/setup/setup_cuda128_toolchain.sh" >&2
+    exit 1
+fi
+
+CUDA_RUNTIME_LIB=""
+for _candidate in \
+    "${CUDA_TOOLCHAIN}/lib" \
+    "${CUDA_TOOLCHAIN}/targets/x86_64-linux/lib" \
+    "${CUDA_TOOLCHAIN}/lib64"; do
+    if [[ -f "${_candidate}/libcudart.so" ]]; then
+        CUDA_RUNTIME_LIB="${_candidate}"
+        break
+    fi
+done
+if [[ -z "${CUDA_RUNTIME_LIB}" ]]; then
+    echo "FATAL: libcudart.so not found under ${CUDA_TOOLCHAIN}" >&2
+    exit 1
+fi
+
+export CUDA_HOME="${CUDA_TOOLCHAIN}"
+export CUDA_PATH="${CUDA_TOOLCHAIN}"
+export PATH="${CUDA_TOOLCHAIN}/bin:${PATH}"
+export LIBRARY_PATH="${CUDA_RUNTIME_LIB}${LIBRARY_PATH:+:${LIBRARY_PATH}}"
+export LD_LIBRARY_PATH="${CUDA_RUNTIME_LIB}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+export TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-9.0}"
+
+echo "[OK] CUDA JIT toolchain: nvcc=$(${CUDA_TOOLCHAIN}/bin/nvcc --version | grep release | head -1)"
+echo "[OK] CUDA runtime library: ${CUDA_RUNTIME_LIB}/libcudart.so"
+echo "[OK] Environment checks passed"
+
+_VERL_HEAD="$(git -C "${VERL_GKD_DIR}" rev-parse HEAD 2>/dev/null || true)"
+if [[ "${GKD_LAYOUT}" != "integrated" || "${_VERL_HEAD}" != "${GKD_COMPAT_COMMIT}" ]]; then
+    echo "FATAL: unsupported GKD/verl combination: layout=${GKD_LAYOUT} HEAD=${_VERL_HEAD:-unknown}" >&2
+    echo "The split recipe calls synchronous generation, but newer verl exposes only ServerAdapter." >&2
+    echo "Prepare the non-destructive compatible worktree first:" >&2
+    echo "  bash scripts/setup/prepare_gkd_compatible_checkout.sh" >&2
+    exit 1
+fi
+echo "[OK] Integrated GKD/verl compatibility pin verified: ${_VERL_HEAD}"
+
+# Apply runtime patches required by the integrated GKD pin.
+# Do not suppress patcher failures: an unknown source revision must fail before
+# any GPU process starts.
+_PATCH_DIR="${REPO_ROOT}/scripts/hpc"
+
+# B10: safe router_replay access in base megatron_workers
+"${PYTHON}" "${_PATCH_DIR}/patch_gkd_b10_router_replay.py" \
+    "${VERL_GKD_DIR}/verl/workers/megatron_workers.py"
+
+# B20: the upstream teacher hard-codes 0.7, which reserves ~98 GiB on H200
+# even for this 0.6B smoke model.  Make the fraction configurable.
+"${PYTHON}" "${_PATCH_DIR}/patch_gkd_teacher_memory.py" \
+    "${GKD_RECIPE_DIR}/teacher/vllm_engine.py"
+
+# B23: newer TensorDict locks transferred batches; the GKD actor replaces the
+# attention-mask tensor while casting it to bool and must unlock briefly.
+"${PYTHON}" "${_PATCH_DIR}/patch_gkd_b23_locked_tensordict.py" \
+    "${GKD_RECIPE_DIR}/megatron_workers.py"
+
+# Transformers 5 removed AutoModelForVision2Seq, which this verl pin imports
+# during preflight even though the GKD Megatron path does not use it directly.
+"${PYTHON}" "${_PATCH_DIR}/patch_gkd_transformers5_compat.py" \
+    "${VERL_GKD_DIR}/verl/utils/model.py"
+
+echo ""
+
+# ── quick version check ───────────────────────────────────────────────────
+echo "=== Version check ==="
+"${PYTHON}" -c "
+import torch; print(f'torch={torch.__version__} cuda={torch.version.cuda}')
+import vllm; print(f'vllm={vllm.__version__}')
+import ray; print(f'ray={ray.__version__}')
+"
+echo ""
+
+# ── generate synthetic data (text-only, no images) ────────────────────────
+TRAIN_PARQUET="${TRAIN_DATA_PATH:-${DATA_DIR}/train.parquet}"
+VAL_PARQUET="${VAL_DATA_PATH:-${DATA_DIR}/val.parquet}"
+
+if ${SYNTHETIC_DATA}; then
+    echo "=== Generating synthetic text-only data ==="
+    "${PYTHON}" -c "
+import pandas as pd
+
+prompts = [
+    'What is 2 + 2?',
+    'What is the capital of France?',
+    'If a train travels 60 miles in 2 hours, what is its average speed?',
+    'Solve: 3x + 5 = 20. What is x?',
+    'What is the square root of 144?',
+    'How many sides does a hexagon have?',
+    'What is 15% of 200?',
+    'If a pizza is cut into 8 slices and you eat 3, what fraction remains?',
+    'What is the chemical symbol for water?',
+    'How many minutes are in 2.5 hours?',
+    'What is the area of a square with side length 5?',
+    'Solve: 2^3 + 4^2 = ?',
+    'What planet is closest to the Sun?',
+    'If John has 5 apples and gives 2 to Mary, how many does he have left?',
+    'What is the boiling point of water in Celsius?',
+    'Convert 1/4 to a decimal.',
+    'What is 7 * 8?',
+    'How many grams are in a kilogram?',
+    'What is the next prime number after 7?',
+    'If a book costs \$12 and is on 25% discount, what is the sale price?',
+]
+data_sources = ['synthetic_math'] * 10 + ['synthetic_trivia'] * 10
+N = 128  # ensure enough for 10 steps at batch_size=4
+train_rows = []
+for i in range(N):
+    train_rows.append({
+        'prompt': prompts[i % len(prompts)],
+        'data_source': data_sources[i % len(data_sources)],
+    })
+train_df = pd.DataFrame(train_rows)
+train_df.to_parquet('${TRAIN_PARQUET}', index=False)
+print(f'Train data: {len(train_df)} rows → ${TRAIN_PARQUET}')
+
+# Validation: 16 samples
+val_rows = []
+for i in range(16):
+    val_rows.append({
+        'prompt': prompts[i % len(prompts)],
+        'data_source': 'synthetic_val',
+    })
+val_df = pd.DataFrame(val_rows)
+val_df.to_parquet('${VAL_PARQUET}', index=False)
+print(f'Val data:   {len(val_df)} rows  → ${VAL_PARQUET}')
+"
+    echo "[OK] Synthetic data generated"
+else
+    echo "Using existing data:"
+    echo "  Train: ${TRAIN_PARQUET}"
+    echo "  Val:   ${VAL_PARQUET}"
+    if [[ ! -f "${TRAIN_PARQUET}" ]] || [[ ! -f "${VAL_PARQUET}" ]]; then
+        echo "FATAL: Data not found. Pass --train-data/--val-data or use --synthetic-data."
+        exit 1
+    fi
+fi
+echo ""
+
+# Derive enough epochs to supply the requested optimizer steps.  The synthetic
+# dataset has 128 rows and batch size 4 (32 steps/epoch), so a hard-coded single
+# epoch silently truncates a 200-step Gate 3 run at step 32.
+_TRAIN_ROW_COUNT=$("${PYTHON}" - "${TRAIN_PARQUET}" <<'PY'
+import sys
+import pyarrow.parquet as pq
+
+print(pq.ParquetFile(sys.argv[1]).metadata.num_rows)
+PY
+)
+if [[ ! "${_TRAIN_ROW_COUNT}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "FATAL: could not determine positive train row count: ${_TRAIN_ROW_COUNT}" >&2
+    exit 1
+fi
+_STEPS_PER_EPOCH=$(( _TRAIN_ROW_COUNT / TRAIN_BATCH_SIZE ))
+if [[ ${_STEPS_PER_EPOCH} -lt 1 ]]; then
+    echo "FATAL: train dataset (${_TRAIN_ROW_COUNT}) is smaller than batch size (${TRAIN_BATCH_SIZE})" >&2
+    exit 1
+fi
+_TOTAL_EPOCHS=$(( (NUM_STEPS + _STEPS_PER_EPOCH - 1) / _STEPS_PER_EPOCH ))
+echo "[OK] Training horizon: rows=${_TRAIN_ROW_COUNT}, batch=${TRAIN_BATCH_SIZE}, steps/epoch=${_STEPS_PER_EPOCH}, epochs=${_TOTAL_EPOCHS}"
+echo ""
+
+# Resource pools are disjoint in the official GKD recipe.
+_TRAIN_GPU_COUNT=$(echo "${TRAIN_GPU_LIST}" | tr ',' '\n' | wc -l)
+_POOL_GPUS=$(( _TRAIN_GPU_COUNT / 2 ))
+if [[ ${_POOL_GPUS} -lt 1 ]]; then
+    echo "FATAL: GKD needs at least two training GPUs (one actor + one rollout)" >&2
+    exit 1
+fi
+
+# Keep this list close to the official recipe/gkd/run_moonlight_dsv3_training.sh.
+# Explicit compatibility additions are marked below.  The same array is used
+# for Hydra preflight and the real launch so validation cannot drift.
+GKD_OVERRIDES=(
+    "data.train_files=${TRAIN_PARQUET}"
+    "data.val_files=${VAL_PARQUET}"
+    "data.prompt_key=prompt"
+    "data.train_batch_size=${TRAIN_BATCH_SIZE}"
+    "data.max_prompt_length=512"
+    "data.max_response_length=512"
+    "data.filter_overlong_prompts=True"
+    "data.truncation=error"
+    "data.trust_remote_code=True"
+    "actor_rollout_ref.model.path=${MODEL_PATH}"
+    "actor_rollout_ref.model.trust_remote_code=True"
+    "actor_rollout_ref.actor.megatron.sequence_parallel=False"
+    "actor_rollout_ref.actor.optim.lr=1e-6"
+    "actor_rollout_ref.actor.micro_batch_size=1"
+    "actor_rollout_ref.actor.use_dynamic_bsz=False"
+    "actor_rollout_ref.actor.use_torch_compile=False"
+    "actor_rollout_ref.actor.checkpoint.save_contents=['model']"
+    "actor_rollout_ref.actor.checkpoint.load_contents=[]"
+    "actor_rollout_ref.actor.megatron.pipeline_model_parallel_size=1"
+    "actor_rollout_ref.actor.megatron.tensor_model_parallel_size=1"
+    "actor_rollout_ref.actor.megatron.expert_model_parallel_size=1"
+    "actor_rollout_ref.actor.megatron.expert_tensor_parallel_size=1"
+    "actor_rollout_ref.rollout.name=vllm"
+    # GKD calls generate_sequences synchronously and requires the restored
+    # SPMD rollout from the pre-retirement verl revision.
+    "actor_rollout_ref.rollout.mode=sync"
+    "actor_rollout_ref.rollout.gpu_memory_utilization=0.45"
+    "actor_rollout_ref.rollout.temperature=1.0"
+    "actor_rollout_ref.rollout.top_p=0.99"
+    "actor_rollout_ref.rollout.top_k=-1"
+    "actor_rollout_ref.rollout.enable_chunked_prefill=False"
+    "actor_rollout_ref.rollout.enforce_eager=True"
+    "actor_rollout_ref.rollout.tensor_model_parallel_size=1"
+    "actor_rollout_ref.rollout.load_format=dummy_megatron"
+    "actor_rollout_ref.rollout.agent.num_workers=1"
+    # Upstream YAML omission: base MegatronWorker reads both keys before
+    # RolloutConfig dataclass defaults are materialized.
+    "+actor_rollout_ref.rollout.n=1"
+    "+actor_rollout_ref.actor.ppo_mini_batch_size=4"
+    "actor_rollout_ref.teacher.server_ip=127.0.0.1"
+    "actor_rollout_ref.teacher.server_port=${TEACHER_PORT}"
+    "actor_rollout_ref.teacher.n_server_workers=1"
+    "trainer.logger=['console']"
+    "trainer.project_name=gkd_smoke"
+    "trainer.experiment_name=${RUN_ID}"
+    "trainer.n_gpus_per_node=${_POOL_GPUS}"
+    "trainer.nnodes=1"
+    "rollout.n_gpus_per_node=${_POOL_GPUS}"
+    "rollout.nnodes=1"
+    "trainer.scheduler=one_step_off"
+    "trainer.save_freq=-1"
+    "trainer.test_freq=-1"
+    "trainer.val_before_train=False"
+    "trainer.total_training_steps=${NUM_STEPS}"
+    "trainer.total_epochs=${_TOTAL_EPOCHS}"
+)
+
+echo "=== Hydra/config preflight (no Ray, no GPU allocation) ==="
+PYTHONPATH="${_PATCH_DIR}:${VERL_GKD_DIR}:${PYTHONPATH:-}" "${PYTHON}" \
+    "${REPO_ROOT}/scripts/hpc/validate_gkd_smoke_config.py" \
+    --config-dir "${GKD_RECIPE_DIR}/config" \
+    -- "${GKD_OVERRIDES[@]}"
+echo ""
+
+# ── cleanup ───────────────────────────────────────────────────────────────
+echo "=== Cleanup ==="
+"${RAY}" stop -f 2>/dev/null || true
+ps -ef | grep "python.*proxy.py" | grep -v grep | awk '{print $2}' | xargs -r kill -9 2>/dev/null || true
+ps -ef | grep "python.*worker.py" | grep -v grep | awk '{print $2}' | xargs -r kill -9 2>/dev/null || true
+lsof -ti:${TEACHER_PORT} 2>/dev/null | xargs -r kill -9 2>/dev/null || true
+lsof -ti:${TEACHER_PROXY_PORT} 2>/dev/null | xargs -r kill -9 2>/dev/null || true
+rm -rf /dev/shm/*vllm* /dev/shm/*psm_* 2>/dev/null || true
+sleep 2
+
+# ── 1. Teacher server (isolated GPU) ──────────────────────────────────────
+echo "=== Starting GKD teacher server (GPU ${TEACHER_GPU}) ==="
+
+export PROXY_FRONTEND_PORT=${TEACHER_PORT}
+export PROXY_BACKEND_PORT=${TEACHER_PROXY_PORT}
+export GKD_TEACHER_GPU_MEMORY_UTILIZATION
+
+cd "${GKD_RECIPE_DIR}/teacher"
+
+# Start proxy (uses CPU, no GPU needed)
+# -u = unbuffered stdout so log is visible immediately
+nohup setsid env CUDA_VISIBLE_DEVICES="" "${PYTHON}" -u proxy.py > "${OUTPUT_DIR}/proxy.log" 2>&1 &
+PROXY_PID=$!
+
+# Wait for proxy backend — fatal on timeout
+PROXY_READY=false
+echo -n "  Waiting for proxy backend..."
+for i in $(seq 1 60); do
+    if ss -Hltn "sport = :${TEACHER_PROXY_PORT}" 2>/dev/null | grep -q .; then
+        echo " OK"
+        PROXY_READY=true
+        break
+    fi
+    if ! kill -0 ${PROXY_PID} 2>/dev/null; then
+        echo " DIED"
+        echo "=== proxy.log (last 30 lines) ==="
+        tail -30 "${OUTPUT_DIR}/proxy.log" 2>/dev/null || true
+        echo "FATAL: Teacher proxy died during startup"
+        exit 1
+    fi
+    echo -n "."
+    sleep 1
+done
+if ! ${PROXY_READY}; then
+    echo " TIMEOUT"
+    echo "=== proxy.log (last 30 lines) ==="
+    tail -30 "${OUTPUT_DIR}/proxy.log" 2>/dev/null || true
+    echo "FATAL: Teacher proxy not ready after 60s"
+    exit 1
+fi
+
+# Start worker (isolated to TEACHER_GPU)
+# -u = unbuffered stdout so log is visible immediately
+nohup setsid env CUDA_VISIBLE_DEVICES="${TEACHER_GPU}" "${PYTHON}" -u worker.py \
+    --backend vllm \
+    --tp-size 1 \
+    --n-logprobs 32 \
+    --ckpt-path "${MODEL_PATH}" \
+    > "${OUTPUT_DIR}/worker.log" 2>&1 &
+WORKER_PID=$!
+
+# Wait for the worker's post-engine-init marker.  The proxy owns the frontend
+# port, so checking that port alone produces a false positive when vLLM dies.
+WORKER_READY=false
+echo -n "  Waiting for teacher engine..."
+for i in $(seq 1 180); do
+    if grep -q '^worker started\.\.\.' "${OUTPUT_DIR}/worker.log" 2>/dev/null; then
+        echo " OK"
+        WORKER_READY=true
+        break
+    fi
+    if ! kill -0 ${WORKER_PID} 2>/dev/null; then
+        echo " DIED"
+        echo "=== worker.log (last 100 lines) ==="
+        tail -100 "${OUTPUT_DIR}/worker.log" 2>/dev/null || true
+        echo "FATAL: Teacher worker died during startup"
+        exit 1
+    fi
+    echo -n "."
+    sleep 1
+done
+if ! ${WORKER_READY}; then
+    echo " TIMEOUT"
+    echo "=== worker.log (last 100 lines) ==="
+    tail -100 "${OUTPUT_DIR}/worker.log" 2>/dev/null || true
+    echo "FATAL: Teacher engine not ready after 180s"
+    exit 1
+fi
+
+# Exercise the full REQ -> proxy -> teacher -> REP path before Ray starts.
+# This also completes any first-use vLLM/FlashInfer JIT under an explicit,
+# observable timeout instead of poisoning the training client's REQ socket.
+echo "  Warming up teacher inference (timeout ${TEACHER_WARMUP_TIMEOUT_SECONDS}s)..."
+if ! TEACHER_WARMUP_TIMEOUT_SECONDS="${TEACHER_WARMUP_TIMEOUT_SECONDS}" \
+    "${PYTHON}" - "${TEACHER_PORT}" <<'PY'
+import os
+import sys
+
+import zmq
+from utils import deserialize, serialize
+
+port = int(sys.argv[1])
+timeout_ms = int(os.environ["TEACHER_WARMUP_TIMEOUT_SECONDS"]) * 1000
+context = zmq.Context()
+socket = context.socket(zmq.REQ)
+socket.setsockopt(zmq.LINGER, 0)
+socket.setsockopt(zmq.RCVTIMEO, timeout_ms)
+socket.setsockopt(zmq.SNDTIMEO, 10_000)
+socket.connect(f"tcp://127.0.0.1:{port}")
+try:
+    socket.send(
+        serialize(
+            {
+                "prompt_token_ids": [[1, 2, 3, 4]],
+                "max_tokens": 1,
+                "temperature": 1.0,
+                "only_response": True,
+            }
+        )
+    )
+    response = deserialize(socket.recv())
+    if not isinstance(response, dict) or response.get("status") != "ok":
+        raise RuntimeError(f"teacher warmup returned {response!r}")
+    for key in ("responses", "teacher_topk_logprobs", "teacher_topk_indices"):
+        if key not in response or len(response[key]) != 1:
+            raise RuntimeError(f"teacher warmup invalid {key}: {response!r}")
+    print("[OK] Teacher end-to-end inference warmup passed")
+finally:
+    socket.close()
+    context.term()
+PY
+then
+    echo "=== worker.log (last 100 lines) ==="
+    tail -100 "${OUTPUT_DIR}/worker.log" 2>/dev/null || true
+    echo "=== proxy.log (last 30 lines) ==="
+    tail -30 "${OUTPUT_DIR}/proxy.log" 2>/dev/null || true
+    cleanup_teacher_processes
+    echo "FATAL: Teacher end-to-end warmup failed"
+    exit 1
+fi
+
+cd "${REPO_ROOT}"
+echo "[OK] Teacher server ready on port ${TEACHER_PORT}"
+echo ""
+
+# ── 2. Ray (isolated GPUs) ────────────────────────────────────────────────
+# Set PYTHONPATH before Ray starts so workers inherit it
+export PYTHONPATH="${_PATCH_DIR}:${VERL_GKD_DIR}:${PYTHONPATH:-}"
+echo "=== Starting Ray (GPUs ${TRAIN_GPU_LIST}) ==="
+CUDA_VISIBLE_DEVICES="${TRAIN_GPU_LIST}" "${RAY}" start --head --num-gpus="$(echo "${TRAIN_GPU_LIST}" | tr ',' '\n' | wc -l)" --disable-usage-stats
+sleep 3
+echo "[OK] Ray started"
+echo ""
+
+# ── 3. Run GKD text smoke (direct, no ray job submit) ────────────────────
+echo "=== Running GKD text smoke (${NUM_STEPS} steps) ==="
+echo "    Train data: ${TRAIN_PARQUET}"
+echo "    Val data:   ${VAL_PARQUET}"
+echo ""
+
+# Export env vars from runtime_env.yaml (replicated to avoid ray dashboard dependency)
+export TORCH_NCCL_AVOID_RECORD_STREAMS="1"
+export CUDA_LAUNCH_BLOCKING="0"
+export NVTE_DEBUG="1"
+export NVTE_DEBUG_LEVEL="2"
+export NVTE_FLASH_ATTN="1"
+export NVTE_FUSED_ATTN="0"
+export NVTE_UNFUSED_ATTN="0"
+export RAY_DEBUG="legacy"
+export NCCL_DEBUG="WARN"
+export NCCL_DEBUG_FILE="${OUTPUT_DIR}/nccl_debug.log"
+export VLLM_USE_V1="1"
+export VERL_VLLM_DISTRIBUTED_BACKEND="ray"
+export CUDA_VISIBLE_DEVICES="${TRAIN_GPU_LIST}"
+
+TRAIN_LOG="${OUTPUT_DIR}/train.log"
+cd "${GKD_RECIPE_DIR}"
+set +e
+"${PYTHON}" -m "${GKD_MAIN_MODULE}" \
+    --config-path="${GKD_RECIPE_DIR}/config" \
+    --config-name=on_policy_distill_trainer \
+    "${GKD_OVERRIDES[@]}" \
+    > "${TRAIN_LOG}" 2>&1
+VERL_EXIT=$?
+set -e
+cd "${REPO_ROOT}"
+
+
+# ── cleanup ───────────────────────────────────────────────────────────────
+echo ""
+echo "=== Cleanup ==="
+"${RAY}" stop -f 2>/dev/null || true
+cleanup_teacher_processes
+sleep 2
+
+# ── validate smoke result ─────────────────────────────────────────────────
+echo ""
+echo "=== Smoke Validation ==="
+
+EXIT_OK=false
+STEPS_OK=false
+TEACHER_OK=false
+LOSS_OK=false
+
+if [[ ${VERL_EXIT} -eq 0 ]]; then
+    echo "  Exit code: 0 ✓"
+    EXIT_OK=true
+else
+    echo "  Exit code: ${VERL_EXIT} ✗"
+fi
+
+# Count completed optimizer updates, not tqdm progress: skipped teacher batches
+# increment global_steps and the progress bar without training the actor.
+_STEP_COUNT=$(grep -c 'INFO: update actor done\.' "${TRAIN_LOG}" 2>/dev/null) || _STEP_COUNT=0
+if [[ "${_STEP_COUNT}" -ge "${NUM_STEPS}" ]]; then
+    echo "  Actor updates in log: ${_STEP_COUNT} (≥ ${NUM_STEPS}) ✓"
+    STEPS_OK=true
+else
+    echo "  Actor updates in log: ${_STEP_COUNT} (need ≥ ${NUM_STEPS}) ✗"
+fi
+
+# Any teacher failure invalidates on-policy distillation, even if the recipe
+# exits zero after incrementing its progress counter for skipped batches.
+_TEACHER_SKIP_COUNT=$(grep -c 'Error in getting teacher knowledge\. Skip this batch\.' "${TRAIN_LOG}" 2>/dev/null) || _TEACHER_SKIP_COUNT=0
+if [[ "${_TEACHER_SKIP_COUNT}" -eq 0 ]]; then
+    echo "  Teacher batch skips: 0 ✓"
+    TEACHER_OK=true
+else
+    echo "  Teacher batch skips: ${_TEACHER_SKIP_COUNT} ✗"
+fi
+
+if grep -q 'actor/kl_loss' "${TRAIN_LOG}" 2>/dev/null; then
+    echo "  actor/kl_loss found in log ✓"
+    LOSS_OK=true
+else
+    echo "  actor/kl_loss not found in log ✗"
+fi
+
+echo ""
+echo "══════════════════════════════════════════════════════════════"
+echo "  Run ID:     ${RUN_ID}"
+echo "  Steps:      ${NUM_STEPS}"
+echo "  Ray exit:   ${VERL_EXIT}"
+echo "  Log dir:    ${OUTPUT_DIR}"
+echo "  Train log:  ${TRAIN_LOG}"
+echo "══════════════════════════════════════════════════════════════"
+
+if ${EXIT_OK} && ${STEPS_OK} && ${TEACHER_OK} && ${LOSS_OK}; then
+    echo "SMOKE PASSED ✓"
+    exit 0
+else
+    echo "SMOKE FAILED ✗"
+    echo "=== Last 50 lines of train log ==="
+    tail -50 "${TRAIN_LOG}" 2>/dev/null || true
+    exit 1
+fi

@@ -46,6 +46,29 @@ The intended workflow is:
 
 See [docs/hpc_workflow.md](docs/hpc_workflow.md).
 
+All project Conda environments, their purposes, construction/evidence dates,
+status, and the canonical shared prefix layout are tracked in the
+[environment registry](docs/environment_registry.md). New HPC environments
+must use that registry rather than copying paths from historical incident logs.
+
+For the recovered VA-OPD mainline, see the
+[root-cause report](docs/va_opd_root_cause_and_recovery_20260719.md) and the
+[CPU/GPU runbook](docs/va_opd_hpc_runbook.md). The older Geometry3K GKD
+launcher is retained as a legacy forward-GKD ablation, not the canonical
+VA-OPD path.
+
+For the contract benchmark baseline using the reproduced Vision-OPD checkpoint,
+see [docs/project_benchmark_vision_opd.md](docs/project_benchmark_vision_opd.md).
+
+For the canonical six-benchmark evaluation of any trained HF-format checkpoint
+(GQA, DynaMath, ViewSpatial-Bench, MMMU-Pro, ReMI, and MMBench), use
+[scripts/eval/run_target_benchmarks.sh](scripts/eval/run_target_benchmarks.sh)
+and follow
+[docs/target_benchmark_eval_runbook_20260825.md](docs/target_benchmark_eval_runbook_20260825.md).
+
+The interrupted Vision-OPD gs65 evaluation and its resume command are recorded
+in [docs/target_benchmark_eval_pending_20260825.md](docs/target_benchmark_eval_pending_20260825.md).
+
 ## First Milestones
 
 1. Toy OPD loss: keep CPU tests green and validate weighted KL behavior.
@@ -55,4 +78,3 @@ See [docs/hpc_workflow.md](docs/hpc_workflow.md).
 ## Safety
 
 Do not commit secrets, `.env`, model weights, checkpoints, datasets, raw benchmark outputs, `outputs/`, `eval_runs/`, `wandb/`, `mlruns/`, or cache directories.
-

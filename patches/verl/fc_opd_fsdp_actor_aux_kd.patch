@@ -1,0 +1,236 @@
+--- a/verl/workers/actor/dp_actor.py
++++ b/verl/workers/actor/dp_actor.py
+@@ -39,6 +39,12 @@
+ from verl.utils.ulysses import gather_outputs_and_unpad, ulysses_pad, ulysses_pad_and_slice_inputs
+ from verl.workers.actor import BasePPOActor
+ from verl.workers.config import ActorConfig
++from dual_track_opd.fc_opd.verl_actor_loss import (
++    compute_verl_fc_opd_actor_loss,
++    fc_opd_batch_denominator,
++    fc_opd_global_normalizer,
++    has_fc_opd_tensors,
++)
+ 
+ __all__ = ["DataParallelPPOActor"]
+ 
+@@ -124,6 +129,10 @@
+         """
+         calculate_sum_pi_squared = self.config.get("calculate_sum_pi_squared", False)
+         sum_pi_squared_checkpointing = self.config.get("sum_pi_squared_checkpointing", False)
++        has_fc_opd = has_fc_opd_tensors(micro_batch)
++        fc_opd_loss_sum = None
++        fc_opd_active_weight_sum = None
++        fc_opd_metrics = None
+         # PrefixGrouper path for shared-prefix optimization
+         if self.use_prefix_grouper:
+             can_use_pg = (
+@@ -251,12 +260,37 @@
+                 )  # prevent model thinks we are generating
+ 
+                 if self.use_fused_kernels:
++                    if has_fc_opd:
++                        raise RuntimeError("FC/VA-OPD auxiliary loss requires logits; disable fused actor kernels")
+                     log_probs = output.log_probs.squeeze(0)  # (total_nnz,)
+                     entropy_rmpad = output.entropy.squeeze(0)  # (total_nnz,)
+ 
+                 else:
+                     logits_rmpad = output.logits.squeeze(0)  # (total_nnz, vocab_size)
+                     logits_rmpad.div_(temperature)
++                    if has_fc_opd:
++                        if self.use_ulysses_sp:
++                            raise RuntimeError(
++                                "FC/VA-OPD sparse KD with remove-padding + Ulysses SP is not implemented; "
++                                "disable sequence parallel for the VA-OPD smoke"
++                            )
++                        response_logits = _response_logits_from_rmpad(
++                            logits_rmpad=logits_rmpad,
++                            indices=indices,
++                            batch_size=batch_size,
++                            seqlen=seqlen,
++                            response_length=response_length,
++                            response_mask=micro_batch["response_mask"],
++                        )
++                        fc_opd_output = compute_verl_fc_opd_actor_loss(
++                            student_logits=response_logits,
++                            batch=micro_batch,
++                            response_mask=micro_batch["response_mask"],
++                            config=self.config,
++                        )
++                        fc_opd_loss_sum = fc_opd_output.per_token_loss.sum()
++                        fc_opd_active_weight_sum = fc_opd_output.active_weight.sum()
++                        fc_opd_metrics = fc_opd_output.metrics
+ 
+                     # if use_sp: ((total_nnz / sp) + pad) ; if not use_sp: (batch, seqlen)
+                     inplace_backward = True
+@@ -359,6 +393,8 @@
+                 )  # prevent model thinks we are generating
+ 
+                 if self.use_fused_kernels:
++                    if has_fc_opd:
++                        raise RuntimeError("FC/VA-OPD auxiliary loss requires logits; disable fused actor kernels")
+                     log_probs = output.log_probs[:, -response_length - 1 : -1]
+                     entropy = output.entropy[:, -response_length - 1 : -1]  # (bsz, response_length)
+ 
+@@ -367,6 +403,17 @@
+ 
+                     logits.div_(temperature)
+                     logits = logits[:, -response_length - 1 : -1, :]  # (bsz, response_length, vocab_size)
++                    if has_fc_opd:
++                        fc_opd_output = compute_verl_fc_opd_actor_loss(
++                            student_logits=logits,
++                            batch=micro_batch,
++                            response_mask=micro_batch["response_mask"],
++                            config=self.config,
++                        )
++                        fc_opd_loss_sum = fc_opd_output.per_token_loss.sum()
++                        fc_opd_active_weight_sum = fc_opd_output.active_weight.sum()
++                        fc_opd_metrics = fc_opd_output.metrics
++
+                     log_probs = logprobs_from_logits(logits, micro_batch["responses"])
+                     if calculate_entropy:
+                         if not self.config.entropy_checkpointing:
+@@ -382,6 +429,10 @@
+                         )
+ 
+             outputs = {"log_probs": log_probs}
++            if has_fc_opd:
++                outputs["fc_opd_loss_sum"] = fc_opd_loss_sum
++                outputs["fc_opd_active_weight_sum"] = fc_opd_active_weight_sum
++                outputs["fc_opd_metrics"] = fc_opd_metrics
+             if calculate_entropy:
+                 outputs["entropys"] = entropy
+             if calculate_sum_pi_squared:
+@@ -522,6 +573,20 @@
+             "old_log_probs",
+             "advantages",
+         ]
++        select_keys += [
++            key
++            for key in [
++                "fc_teacher_topk_indices",
++                "fc_teacher_topk_log_probs",
++                "fc_teacher_tail_log_prob",
++                "fc_teacher_sampled_log_probs",
++                "fc_teacher_valid_mask",
++                "fc_condition_weights",
++                "fc_rollout_weights",
++                "fc_opd_coef",
++            ]
++            if key in data.batch.keys()
++        ]
+         if self.use_prefix_grouper and "prompts" in data.batch.keys():
+             select_keys.append("prompts")
+         if self.config.use_kl_loss:
+@@ -538,6 +603,15 @@
+         non_tensor_select_keys = []
+         if has_multi_modal_inputs:
+             non_tensor_select_keys.append("multi_modal_inputs")
++        non_tensor_select_keys += [
++            key
++            for key in [
++                "fc_condition_ids",
++                "fc_opd_loss_mode",
++                "fc_prompt_ids",
++            ]
++            if key in data.non_tensor_batch.keys()
++        ]
+         if self.use_prefix_grouper and "uid" in data.non_tensor_batch.keys():
+             non_tensor_select_keys.append("uid")
+ 
+@@ -564,6 +638,17 @@
+                     )
+                     micro_batches = mini_batch.split(self.config.ppo_micro_batch_size_per_gpu)
+ 
++                mini_batch_fields = {**mini_batch.batch, **mini_batch.non_tensor_batch}
++                fc_opd_denominator = None
++                fc_opd_mode = _fc_opd_loss_mode(mini_batch_fields)
++                pure_fc_opd = fc_opd_mode in (
++                    "gkd", "gkd_forward", "reverse", "vgg_opd", "va_opd", "va_opd_jsd"
++                )
++                if has_fc_opd_tensors(mini_batch_fields):
++                    fc_opd_denominator = fc_opd_batch_denominator(
++                        mini_batch_fields, mini_batch.batch["response_mask"]
++                    )
++
+                 self.actor_optimizer.zero_grad()
+ 
+                 for micro_batch in micro_batches:
+@@ -656,6 +741,33 @@
+                         metrics["actor/kl_loss"] += kl_loss.detach().item() * loss_scale_factor
+                         micro_batch_metrics["actor/kl_coef"] = self.config.kl_loss_coef
+ 
++                    fc_opd_loss_sum = outputs.get("fc_opd_loss_sum")
++                    if fc_opd_loss_sum is not None:
++                        if fc_opd_denominator is None:
++                            raise RuntimeError("FC/VA-OPD denominator was not computed for this mini-batch")
++                        denominator, dp_world_size = fc_opd_global_normalizer(
++                            fc_opd_denominator.to(fc_opd_loss_sum.device)
++                        )
++                        fc_opd_loss = fc_opd_loss_sum * dp_world_size / denominator
++                        # The actor multiplies policy_loss by loss_scale_factor below.
++                        # Pure GKD/VA/VGG-OPD is the whole objective, so divide here
++                        # to keep the actor's later scaling from shrinking the gradient.
++                        if pure_fc_opd:
++                            policy_loss = fc_opd_loss / loss_scale_factor
++                        else:
++                            fc_opd_coef = _fc_opd_config_float(self.config, "loss_coef", 0.0)
++                            policy_loss = policy_loss + (fc_opd_loss * fc_opd_coef / loss_scale_factor)
++                            micro_batch_metrics["actor/fc_opd_coef"] = fc_opd_coef
++                        metrics["actor/fc_opd_loss"] = metrics.get("actor/fc_opd_loss", 0.0) + (
++                            fc_opd_loss.detach().item()
++                        )
++                        micro_batch_metrics["actor/fc_opd_denominator"] = denominator.detach().item()
++                        micro_batch_metrics["actor/fc_opd_dp_world_size"] = float(dp_world_size)
++                        fc_opd_metrics = outputs.get("fc_opd_metrics")
++                        if fc_opd_metrics is not None:
++                            for key, value in fc_opd_metrics.items():
++                                micro_batch_metrics[f"actor/fc_opd_{key}"] = _fc_opd_metric_float(value)
++
+                     if self.config.use_dynamic_bsz:
+                         # relative to the dynamic bsz
+                         loss = policy_loss * loss_scale_factor
+@@ -674,3 +783,44 @@
+                 append_to_dict(metrics, mini_batch_metrics)
+         self.actor_optimizer.zero_grad()
+         return metrics
++
++
++def _response_logits_from_rmpad(*, logits_rmpad, indices, batch_size, seqlen, response_length, response_mask):
++    device = logits_rmpad.device
++    response_positions = torch.arange(seqlen - response_length - 1, seqlen - 1, device=device)
++    batch_offsets = torch.arange(batch_size, device=device).unsqueeze(1) * seqlen
++    response_flat_positions = batch_offsets + response_positions.unsqueeze(0)
++    inverse_indices = torch.full((batch_size * seqlen,), -1, dtype=torch.long, device=device)
++    inverse_indices[indices] = torch.arange(indices.numel(), dtype=torch.long, device=device)
++    response_rows = inverse_indices[response_flat_positions]
++    if torch.any((response_rows < 0) & response_mask.bool()):
++        raise RuntimeError("FC/VA-OPD response logits are not aligned with remove-padding indices")
++    return logits_rmpad[response_rows.clamp_min(0)]
++
++
++def _fc_opd_config_float(config, key: str, default: float) -> float:
++    getter = getattr(config, "get", None)
++    fc_config = getter("fc_opd", {}) if callable(getter) else getattr(config, "fc_opd", {})
++    if not fc_config:
++        return default
++    fc_getter = getattr(fc_config, "get", None)
++    if callable(fc_getter):
++        return float(fc_getter(key, default))
++    return float(getattr(fc_config, key, default))
++
++
++def _fc_opd_loss_mode(batch_fields):
++    raw = batch_fields.get("fc_opd_loss_mode", "forward")
++    if hasattr(raw, "flat"):
++        raw = raw.flat[0]
++    elif isinstance(raw, (list, tuple)):
++        raw = raw[0]
++    return str(raw)
++
++
++def _fc_opd_metric_float(value):
++    if isinstance(value, (int, float)):
++        return float(value)
++    if hasattr(value, "detach"):
++        return float(value.detach().cpu().item())
++    return float(value)

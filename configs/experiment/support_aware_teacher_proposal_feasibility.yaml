@@ -1,0 +1,43 @@
+# Executable teacher-proposal feasibility after the K=32 support confirmation.
+# This run creates a verified, exact-token proposal cache; it does not train.
+
+experiment:
+  name: support_aware_teacher_proposal_feasibility
+  objective: measure_verified_teacher_proposal_availability_and_student_reachability
+
+models:
+  student: ${DTOPD_MODEL_ROOT}/Qwen3-VL-4B-Instruct
+  teacher: ${DTOPD_MODEL_ROOT}/Qwen3-VL-32B-Instruct
+  shared_tokenizer_required: true
+
+data:
+  k32_run_dir: ${DTOPD_OUTPUT_ROOT}/support_aware_opd/diag_full_k32_20260804_merged
+  cohort_dir: ${DTOPD_OUTPUT_ROOT}/support_aware_opd/k32_cohort_20260804
+
+selection:
+  states: [no_correct_observed, rare_success]
+  retain_count: 2
+
+generation:
+  proposals_per_prompt: 4
+  temperature: 0.7
+  top_p: 0.95
+  max_new_tokens: 4096
+  seed: 20260805
+  response_format: legacy_answer
+
+reachability:
+  metric: two_sided_trimmed_length_normalized_student_nll
+  low_trim_fraction: 0.10
+  high_trim_fraction: 0.02
+  verifier_first: true
+  exact_teacher_token_ids_required: true
+
+hardware:
+  dtype: bfloat16
+  # A launcher exposes one physical teacher/student pair as logical cuda:0/1.
+  teacher_device: cuda:0
+  student_device: cuda:1
+
+output:
+  dir: ${DTOPD_OUTPUT_ROOT}/support_aware_opd/proposal_feasibility_20260805

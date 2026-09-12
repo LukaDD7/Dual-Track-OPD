@@ -1,0 +1,275 @@
+"""verl 0.7.1 integration for the STP-OPD pilot (thin, opt-in).
+
+Follows the validated FC-OPD verl pattern (patches/verl/fc_opd_*.patch):
+
+1. ``stp_opd_post_rollout_hook`` attaches teacher-scored tensors to the verl
+   rollout batch (``stp_*`` keys).  The teacher service scores the full hybrid
+   (fixed answer-free teacher prefix + student-sampled suffix) trajectory; the
+   suffix masks select the suffix region for the RKL-K1 and GRPO terms.
+2. ``has_stp_opd_tensors`` / ``compute_stp_opd_actor_loss`` are consumed by the
+   thin verl actor patch (patches/verl/0002-stp-opd-actor-loss.patch).
+
+Scaffold contract: the data pipeline must already encode the branch — a
+scaffolded sample has the teacher prefix tokens in the response prefix region
+(covered by ``stp_prefix_mask``) and the student suffix after it; an
+unscaffolded sample has no prefix (empty prefix mask).  The hook derives the
+masks from ``stp_prefix_lengths`` (per-sample prefix token count).
+
+This module imports verl-related classes lazily and is import-safe without a
+verl install.  The end-to-end wiring must be validated in the pinned HPC verl
+environment (handoff §6 P0: exact-token identity, online scorer in A0/A3,
+gradient isolation, resume/manifest).
+"""
+
+from __future__ import annotations
+
+import json
+import os
+from collections.abc import Mapping, Sequence
+from pathlib import Path
+from typing import Any
+
+import torch
+
+from .support_transition_train import SupportTransitionTrainConfig, train_step_loss
+
+
+STP_TENSOR_KEYS = (
+    "stp_prefix_mask",
+    "stp_suffix_mask",
+    "stp_prefix_ids",
+    "stp_sampled_ids",
+    "stp_teacher_k1_log_probs",
+    "stp_valid_mask",
+    "stp_prefix_lengths",
+)
+
+
+def load_prefixes(path: str | Path) -> dict[str, tuple[int, ...]]:
+    """Load the fixed verified answer-free teacher prefixes.
+
+    JSON mapping ``prompt_id -> [token_ids]``; the pilot fixes one horizon per
+    prompt (no horizon tuning inside the pilot, handoff §5).
+    """
+
+    raw = json.loads(Path(path).read_text(encoding="utf-8"))
+    return {
+        str(prompt_id): tuple(int(value) for value in token_ids)
+        for prompt_id, token_ids in raw.items()
+    }
+
+
+def _stp_config(config: Any) -> Mapping[str, Any]:
+    algorithm = getattr(config, "algorithm", None) or (config.get("algorithm") if isinstance(config, Mapping) else {})
+    return (algorithm or {}).get("stp_opd") or {}
+
+
+def stp_opd_post_rollout_hook(
+    *,
+    batch: Any,
+    tokenizer: Any,
+    processor: Any | None,
+    config: Any,
+    global_steps: int,
+    teacher_client: Any = None,
+    prefixes: Mapping[str, tuple[int, ...]] | None = None,
+) -> tuple[Any, dict[str, float]]:
+    """Attach STP-OPD tensors to a verl rollout batch (thin hook body).
+
+    Call this from a registered verl hook entry (see patches/verl/0001-stp-opd-
+    ray-trainer-hook.patch) or directly in a custom trainer.  The teacher client
+    scores the hybrid trajectory; ``teacher_sampled_log_probs`` provides the
+    K1 log-prob per token.
+    """
+
+    from dual_track_opd.fc_opd.teacher_client import TeacherClient
+    from dual_track_opd.fc_opd.teacher_protocol import (
+        Condition,
+        TeacherScoreRequest,
+    )
+    from dual_track_opd.fc_opd.verl_post_rollout_hook import (
+        _condition_inputs_from_row,
+        _row_value,
+    )
+    from dual_track_opd.support_aware.support_transition_dataset import load_prefixes
+
+    del processor, global_steps
+    stp = _stp_config(config)
+    if teacher_client is None:
+        teacher_url = str(stp.get("teacher_url") or "http://127.0.0.1:18080")
+        teacher_client = TeacherClient(teacher_url, timeout_seconds=300.0)
+    if prefixes is None:
+        data_config = getattr(config, "data", None) or (
+            config.get("data") if isinstance(config, Mapping) else None
+        )
+        manifest = (
+            getattr(data_config, "get", lambda *_: None)("prefix_manifest")
+            if data_config is not None
+            else None
+        )
+        if not manifest:
+            raise ValueError(
+                "STP hook requires data.prefix_manifest "
+                "(verified answer-free teacher prefixes)"
+            )
+        prefixes = load_prefixes(str(manifest))
+    responses = batch.batch["responses"]
+    response_mask = batch.batch["response_mask"].bool()
+    B, T = int(responses.shape[0]), int(responses.shape[1])
+    device = responses.device
+    prompt_ids = [
+        str((_row_value(batch, index, ("extra_info",)) or {}).get("sample_uid") or "")
+        for index in range(B)
+    ]
+    if any(not prompt_id for prompt_id in prompt_ids):
+        raise ValueError("STP hook requires extra_info.sample_uid per row")
+
+    prefix_lengths = torch.zeros(B, dtype=torch.long)
+    sampled_ids = responses.clone()
+    prefix_ids_tensor = torch.zeros_like(responses)
+    positions = torch.arange(T)
+    prefix_mask = torch.zeros(B, T, dtype=torch.bool)
+    for index in range(B):
+        prompt_id = str(prompt_ids[index])
+        prefix_ids = prefixes.get(prompt_id, ())
+        prefix_length = min(len(prefix_ids), T)
+        prefix_lengths[index] = prefix_length
+        prefix_mask[index, :prefix_length] = True
+        if prefix_length:
+            prefix_ids_tensor[index, :prefix_length] = torch.tensor(
+                prefix_ids[:prefix_length], dtype=responses.dtype, device=device
+            )
+        # GRPO uses the student-sampled suffix ids; prefix positions are
+        # excluded by the suffix mask, so 0 is harmless there.
+        sampled_ids[index, :prefix_length] = 0
+    suffix_mask = (~prefix_mask) & response_mask
+
+    # Teacher K1 log-probs: the teacher scores the student-sampled suffix after
+    # the same prompt (with the assistant prefix when scaffolded); the response
+    # carries exact sampled_token_log_probs per token.
+    teacher_log_probs = torch.full((B, T), float("-inf"), dtype=torch.float32, device=device)
+    for index in range(B):
+        extra = _row_value(batch, index, ("extra_info",)) or {}
+        question = str(extra.get("question") or "")
+        if not question:
+            raise ValueError(f"STP hook requires extra_info.question at row {index}")
+        condition_inputs = _condition_inputs_from_row(batch, index)
+        prefix_text = str(extra.get("stp_prefix_text") or "")
+        scaffolded = bool(extra.get("stp_scaffolded", False))
+        response_ids = tuple(
+            int(value) for value in responses[index, response_mask[index]].tolist()
+        )
+        prompt_messages = [{
+            "role": "user",
+            "content": f"<image>\n{question}\n\nPut the final answer in \\boxed{{}}.",
+        }]
+        if scaffolded and prefix_text:
+            prompt_messages.append({"role": "assistant", "content": prefix_text})
+        scored = teacher_client.score([
+            TeacherScoreRequest(
+                request_id=f"stp:{index}",
+                condition=Condition.FULL,
+                question=question,
+                condition_inputs=condition_inputs,
+                response_token_ids=response_ids,
+                tokenizer_hash=teacher_client.metadata.tokenizer_hash,
+                prompt=tuple(prompt_messages),
+            )
+        ])[0]
+        positions = response_mask[index].nonzero(as_tuple=True)[0]
+        teacher_log_probs[index, positions] = torch.tensor(
+            list(scored.sampled_token_log_probs),
+            dtype=torch.float32,
+            device=device,
+        )
+    valid_mask = torch.isfinite(teacher_log_probs) & response_mask
+
+    batch.batch["stp_prefix_mask"] = prefix_mask.to(device)
+    batch.batch["stp_suffix_mask"] = suffix_mask.to(device)
+    batch.batch["stp_prefix_ids"] = prefix_ids_tensor.to(device)
+    batch.batch["stp_sampled_ids"] = sampled_ids.to(device)
+    batch.batch["stp_teacher_k1_log_probs"] = teacher_log_probs.to(device)
+    batch.batch["stp_valid_mask"] = valid_mask.to(device)
+    batch.batch["stp_prefix_lengths"] = prefix_lengths.to(device)
+    metrics = {
+        "actor/stp_prefix_tokens": int(prefix_mask.sum()),
+        "actor/stp_suffix_tokens": int(suffix_mask.sum()),
+    }
+    return batch, metrics
+
+
+def has_stp_opd_tensors(batch: Mapping[str, Any]) -> bool:
+    """True when a verl micro-batch carries the STP-OPD tensor set."""
+
+    present = [key in batch for key in STP_TENSOR_KEYS]
+    if any(present) and not all(present):
+        missing = [key for key, is_present in zip(STP_TENSOR_KEYS, present, strict=True) if not is_present]
+        raise RuntimeError(f"incomplete STP-OPD tensor set; missing: {missing}")
+    if os.environ.get("STP_DEBUG_TENSORS"):
+        print(
+            f"[stp-debug] present={[k for k, ok in zip(STP_TENSOR_KEYS, present) if ok]} "
+            f"batch_keys={sorted(batch)[:12]}",
+            flush=True,
+        )
+    return all(present)
+
+
+def compute_stp_opd_actor_loss(
+    student_logits: torch.Tensor,
+    batch: Mapping[str, Any],
+    response_mask: torch.Tensor,
+    config: Any,
+) -> tuple[torch.Tensor, dict[str, float]]:
+    """Assemble the STP-OPD regional loss for one actor mini-batch.
+
+    ``student_logits`` has shape [B, T, V]; the batch carries the hook-attached
+    ``stp_*`` tensors: prefix/suffix masks, sampled ids, teacher K1 log-probs,
+    valid mask, and the verl-computed advantages (``batch["advantages"]``,
+    the standard verl key; ``stp_advantages`` is accepted as an override).
+    Delegates to
+    ``train_step_loss`` with the arm from the config (A0..A3).
+    """
+
+    if not has_stp_opd_tensors(batch):
+        raise RuntimeError("STP-OPD loss requested without stp_* tensors")
+    stp = _stp_config(config)
+    arm = str(stp.get("arm") or "A3")
+    train_config = SupportTransitionTrainConfig(
+        arm=arm,
+        lambda_prefix=float(stp.get("lambda_prefix", 1.0)),
+        lambda_distill=float(stp.get("lambda_distill", 1.0)),
+        lambda_task=float(stp.get("lambda_task", 1.0)),
+    )
+    device = student_logits.device
+    advantages = batch.get("stp_advantages") or batch.get("advantages")
+    if advantages is None:
+        raise RuntimeError(
+            "advantages missing; verl must provide batch['advantages'] "
+            "(or an stp_advantages override)"
+        )
+    total, terms = train_step_loss(
+        student_logits,
+        student_logits,
+        prefix_ids=batch["stp_prefix_ids"].to(device),
+        sampled_ids=batch["stp_sampled_ids"].to(device),
+        advantages=advantages.to(device),
+        arm=arm,
+        response_length=int(student_logits.shape[1]),
+        prefix_length=0,
+        scaffolded=False,
+        prefix_mask=batch["stp_prefix_mask"].to(device),
+        suffix_mask=batch["stp_suffix_mask"].to(device),
+        teacher_sampled_k1_log_probs=batch["stp_teacher_k1_log_probs"].to(device),
+        valid_mask=batch["stp_valid_mask"].to(device),
+        config=train_config,
+    )
+    metrics = {
+        "actor/stp_loss": float(total.detach()),
+        "actor/stp_prefix_fkl": float(terms["prefix_fkl"].detach()),
+        "actor/stp_suffix_rkl": float(terms["suffix_rkl"].detach()),
+        "actor/stp_suffix_pg": float(terms["suffix_pg"].detach()),
+    }
+    per_token = torch.zeros(
+        batch["stp_suffix_mask"].shape, dtype=torch.float32, device=device
+    )
+    return per_token, metrics
