@@ -1,0 +1,99 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Codex <codex@localhost>
+Date: 2026-09-12
+Subject: [PATCH] fix(mmvet): bound judge retries and parse score robustly
+
+MMVet postprocessing could spin forever when the judge returned a score that
+parsed as a float but fell outside [0,1], or when the first token was not a
+valid score. The old loop only advanced its retry state in the ValueError
+branch, so an out-of-range numeric score left the loop unchanged.
+
+This change bounds each sample to four judge attempts, extracts the first
+valid 0-1 score with a regex, and records score 0 when no valid score is
+returned. It preserves the MMVet aggregate schema.
+---
+ lmms_eval/tasks/mmvet/utils.py | 62 +++++++++++++++++++++++++-----------
+ 1 file changed, 43 insertions(+), 19 deletions(-)
+
+diff --git a/lmms_eval/tasks/mmvet/utils.py b/lmms_eval/tasks/mmvet/utils.py
+index 0000000..0000000 100644
+--- a/lmms_eval/tasks/mmvet/utils.py
++++ b/lmms_eval/tasks/mmvet/utils.py
+@@ -67,6 +67,29 @@ def mmvet_doc_to_visual(doc):
+     return [doc["image"].convert("RGB")]
+ 
+ 
++def _parse_mmvet_score(content: str) -> float | None:
++    """Return the first valid MMVet score in [0, 1], if present."""
++    import re
++
++    if not content:
++        return None
++    text = str(content).strip()
++    match = re.search(r"(?<!\d)([01](?:\.\d+)?)(?!\d)", text)
++    if not match:
++        return None
++    try:
++        score = float(match.group(1))
++    except ValueError:
++        return None
++    return score if 0.0 <= score <= 1.0 else None
++
++
+ def mmvet_process_results(doc, results):
+@@ -76,28 +99,29 @@ def mmvet_process_results(doc, results):
+     answer = doc["answer"]
+     gpt_query_prompt = f"{MM_VET_PROMPT}\n{question} | {answer.replace('<AND>', ' <AND> ').replace('<OR>', ' <OR> ')} | {pred} |"
+-    grade_sample_run_complete = False
++    max_attempts = 4
+     temperature = 0.0
++    score = 0.0
++    model_name = ""
+ 
+-    while not grade_sample_run_complete:
++    for attempt in range(max_attempts):
+         content, model_name = get_chat_response(
+             gpt_query_prompt,
+             temperature=temperature,
+         )
+-        if content:
+-            try:
+-                content = content.split(" ")[0].strip()
+-                score = float(content)
+-                if 0.0 <= score <= 1.0:
+-                    grade_sample_run_complete = True
+-            except ValueError:
+-                time.sleep(5)
+-                temperature += 0.5
+-                eval_logger.info(f"Sleep 5 secs, {doc['question_id']} try again with increased temperature {temperature}.")
+-                content, model_name = get_chat_response(
+-                    gpt_query_prompt,
+-                    temperature=temperature,
+-                )
+-                if temperature >= 2:
+-                    score = 0.0
+-                    grade_sample_run_complete = True
+-                    eval_logger.info(f"Reach to max trials, {doc['question_id']} failed to get a score.")
+-        else:
+-            score = 0.0
+-            grade_sample_run_complete = True
+-            eval_logger.info(f"{doc['question_id']} failed to get a score.")
++        parsed_score = _parse_mmvet_score(content or "")
++        if parsed_score is not None:
++            score = parsed_score
++            break
++        eval_logger.info(
++            f"{doc['question_id']} judge attempt {attempt + 1}/{max_attempts} "
++            f"returned invalid score; retrying with temperature {temperature}."
++        )
++        temperature = min(temperature + 0.5, 1.5)
++        if attempt + 1 < max_attempts:
++            time.sleep(5)
++    else:
++        score = 0.0
++        eval_logger.info(f"{doc['question_id']} reached max judge trials; using score 0.")
+ 
+     return {
+-- 
+2.47.0
+
