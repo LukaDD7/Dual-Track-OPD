@@ -33,10 +33,10 @@ Project15-v1,base,MathVista,offline_done,72.70,
 Project15-v1,base,MMVet,offline_done,74.27,
 Project15-v1,ptdpo_r4_step390,MathVista,offline_done,73.30,
 Project15-v1,ptdpo_r4_step390,MMVet,offline_done,72.48,
-Project15-v1,tailsft,MathVista,interrupted,,2816_of_3000_cached_responses
-Project15-v1,tailsft,MMVet,pending,,
-Project15-v1,base,VQAv2,not_persisted,,response_cache_not_flushed_before_gpu_recycle
-Project15-v1,ptdpo_r4_step390,VQAv2,not_persisted,,response_cache_not_flushed_before_gpu_recycle
+Project15-v1,tailsft,MathVista,offline_done,66.80,
+Project15-v1,tailsft,MMVet,offline_done,56.7257,mmvet_judge_retry_fix_applied
+Project15-v1,base,VQAv2,offline_done,0.8182,
+Project15-v1,ptdpo_r4_step390,VQAv2,offline_done,0.8157,
 Project15-v1,tailsft,VQAv2,not_persisted,,response_cache_not_flushed_before_gpu_recycle
 Project15-v2,base,GQA,done,0.6163,
 Project15-v2,base,DynaMath,done,0.6291,
