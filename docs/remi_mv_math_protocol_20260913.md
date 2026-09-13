@@ -79,6 +79,33 @@ Therefore these official-compatible numbers must remain diagnostics, especially
 for models with high truncation rates; they are not a strict completed-answer
 score and must not be mixed directly with the strict B-segment v2 protocol.
 
+### Strict completed-answer correction
+
+The Project15 reporting rule now treats a judge `true` on a truncated response
+as invalid for the headline metric. `score_mv_math --mode strict` reuses the
+completed judge sidecar and requires `finish_reason == "stop"` before a verdict
+can count. Multi-step SAR is reported only over completed multi-step rows.
+
+Strict results from the same 2,009-row replays and judge sidecars:
+
+| Arm | Strict correct / rows | Strict weighted accuracy | Completion-gated rows |
+|---|---:|---:|---:|
+| Base | 719 / 2,009 | 35.79% | 952 |
+| PTD-PO r4 step390 | 644 / 2,009 | 32.06% | 1,104 |
+| TailSFT | 455 / 2,009 | 22.65% | 1,429 |
+
+By answer type:
+
+| Arm | Choice | Single-step | Multi-step |
+|---|---:|---:|---:|
+| Base | 447 / 1,109 | 250 / 800 | 22 / 100 |
+| PTD-PO r4 step390 | 408 / 1,109 | 221 / 800 | 15 / 100 |
+| TailSFT | 234 / 1,109 | 216 / 800 | 5 / 100 |
+
+The strict results are the Project15 diagnostic rows to track. The
+official-compatible table above is retained only to document the protocol
+difference and judge behavior.
+
 ## ReMI
 
 The ReMI paper reports:
@@ -119,11 +146,17 @@ replays:
 TailSFT's ReMI raw output is completion-biased because 1,365 rows hit the
 2,048-token ceiling; its number is not capability-comparable.
 
+These exact/full-denominator values were rerun on 2026-09-13 and are unchanged:
+Base 726/2,600 (27.92%), PTD-PO 842/2,600 (32.38%), and TailSFT 755/2,600
+(29.04%). ReMI remains task-aware exact/relaxed scoring with the full 2,600-row
+denominator.
+
 ## Formal reporting rule
 
 1. Project15 v1's 13 native `lmms-eval` benchmarks remain the formal v1 rows.
 2. Report ReMI and MV-MATH only as clearly labeled diagnostics.
-3. MV-MATH's official-compatible metric requires the LLM judge sidecar; do not
-   substitute the choice-only deterministic diagnostic.
+3. MV-MATH's Project15 diagnostic uses `score_mv_math --mode strict` over the
+   completed LLM judge sidecar; do not use the choice-only diagnostic or the
+   ungated official-compatible value for the primary row.
 4. ReMI must use `remi_reeval.py --mode exact`, not the old
    `normalized_exact_diagnostic`.

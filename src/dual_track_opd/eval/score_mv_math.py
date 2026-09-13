@@ -49,6 +49,18 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
     return rows
 
 
+def _coerce_judge_verdict(value: Any) -> Any:
+    """Restore a JSON-serialized multi-step verdict to a tuple."""
+
+    if (
+        isinstance(value, list)
+        and len(value) == 2
+        and all(isinstance(part, int) and not isinstance(part, bool) for part in value)
+    ):
+        return value[0], value[1]
+    return value
+
+
 def load_metadata(path: str | Path) -> dict[str, dict[str, Any]]:
     """Load MV-MATH metadata indexed by problem id."""
 
@@ -250,6 +262,8 @@ def score_official_with_judge(
             for item in _read_jsonl(resume_path)
             if item.get("judge_verdict") is not None
         }
+        for item in completed.values():
+            item["judge_verdict"] = _coerce_judge_verdict(item.get("judge_verdict"))
 
     pending: list[dict[str, Any]] = []
     prepared: list[dict[str, Any]] = []
@@ -326,6 +340,53 @@ def score_official_with_judge(
     return scored
 
 
+def score_strict_from_judge_sidecar(
+    rows: list[dict[str, Any]], sidecar_path: Path
+) -> list[dict[str, Any]]:
+    """Apply a completed-answer gate to an existing official judge sidecar.
+
+    The official MV-MATH judge prompt can infer an intended answer from a
+    truncated response.  For Project15's strict reporting rule, a row is only
+    eligible for the headline score when the model finished generation
+    (``finish_reason == "stop"``).  This function never mutates the source
+    sidecar; it preserves judge verdicts and emits a gated copy for summary
+    computation.
+    """
+
+    judged = {str(item.get("sample_id", "")): item for item in _read_jsonl(sidecar_path)}
+    for item in judged.values():
+        item["judge_verdict"] = _coerce_judge_verdict(item.get("judge_verdict"))
+    scored: list[dict[str, Any]] = []
+    for row in rows:
+        sample_id = str(row.get("sample_id", ""))
+        if sample_id not in judged:
+            raise KeyError(f"sample_id {sample_id!r} is absent from judge sidecar")
+        item = dict(judged[sample_id])
+        item.update(
+            {
+                "sample_id": sample_id,
+                "answer_type": str(row.get("answer_type", item.get("answer_type", ""))),
+                "finish_reason": row.get("finish_reason"),
+                "prediction": str(row.get("prediction", "") or ""),
+                "ground_truth": str(row.get("ground_truth", "") or ""),
+                "completion_gated": row.get("finish_reason") != "stop",
+            }
+        )
+
+        verdict = item.get("judge_verdict")
+        if isinstance(verdict, tuple):
+            correct_steps, total_steps = verdict
+            item["judge_question_complete"] = correct_steps == total_steps
+            item["correct"] = not item["completion_gated"] and item["judge_question_complete"]
+        else:
+            item["judge_correct"] = verdict is True
+            item["correct"] = not item["completion_gated"] and item["judge_correct"]
+        scored.append(item)
+
+    scored.sort(key=lambda item: int(item["sample_id"]))
+    return scored
+
+
 def _official_summary(scored: list[dict[str, Any]]) -> dict[str, Any]:
     by_type: dict[str, dict[str, int]] = {}
     total_correct = total_rows = 0
@@ -339,8 +400,8 @@ def _official_summary(scored: list[dict[str, Any]]) -> dict[str, Any]:
         total_rows += 1
         total_correct += int(correct)
         if isinstance(item.get("judge_verdict"), tuple):
-            total_correct_steps += int(item["correct_steps"])
-            total_steps += int(item["total_steps"])
+            total_correct_steps += int(item["judge_verdict"][0])
+            total_steps += int(item["judge_verdict"][1])
     return {
         "rows": total_rows,
         "correct": total_correct,
@@ -358,6 +419,42 @@ def _official_summary(scored: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _strict_summary(scored: list[dict[str, Any]]) -> dict[str, Any]:
+    total_rows = len(scored)
+    correct = sum(bool(item.get("correct")) for item in scored)
+    gated = sum(bool(item.get("completion_gated")) for item in scored)
+    judge_unparsed = sum(item.get("judge_verdict") is None for item in scored)
+    multi_rows = [item for item in scored if item.get("answer_type") == "multi-step"]
+    completed_multi = [item for item in multi_rows if not item.get("completion_gated")]
+    completed_steps = sum(int(item["judge_verdict"][1]) for item in completed_multi)
+    completed_correct_steps = sum(int(item["judge_verdict"][0]) for item in completed_multi)
+    by_type: dict[str, dict[str, int]] = {}
+    for item in scored:
+        bucket = by_type.setdefault(str(item.get("answer_type", "unknown")), {"rows": 0, "correct": 0})
+        bucket["rows"] += 1
+        bucket["correct"] += int(bool(item.get("correct")))
+    return {
+        "rows": total_rows,
+        "correct": correct,
+        "completion_gated_rows": gated,
+        "judge_unparsed_or_unextracted": judge_unparsed,
+        "strict_weighted_accuracy": correct / total_rows if total_rows else None,
+        "by_answer_type": by_type,
+        "multi_step": {
+            "completed_rows": len(completed_multi),
+            "completed_steps": completed_steps,
+            "step_accuracy_rate_completed_rows": (
+                completed_correct_steps / completed_steps if completed_steps else None
+            ),
+            "question_completeness_rate": (
+                sum(bool(item.get("correct")) for item in multi_rows) / len(multi_rows)
+                if multi_rows
+                else None
+            ),
+        },
+    }
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--replay-jsonl", required=True)
@@ -365,7 +462,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--metadata-json",
         default="/inspire/hdd/global_user/mengweicheng-240108120092/lzy/dataset/MV-MATH/MV-MATH.json",
     )
-    parser.add_argument("--mode", choices=("choice", "official"), default="choice")
+    parser.add_argument("--mode", choices=("choice", "official", "strict"), default="choice")
     parser.add_argument("--judge-url", default="http://127.0.0.1:8801/v1")
     parser.add_argument("--judge-model", default="Qwen3-VL-32B-Instruct")
     parser.add_argument("--judge-key", default="dummy")
@@ -388,23 +485,33 @@ def main() -> int:
     else:
         metadata = load_metadata(args.metadata_json)
         sidecar = Path(args.judge_sidecar).expanduser() if args.judge_sidecar else None
-        if args.resume and sidecar is None:
-            raise ValueError("--resume requires --judge-sidecar")
-        scored = score_official_with_judge(
-            rows,
-            metadata,
-            judge_url=args.judge_url,
-            judge_model=args.judge_model,
-            judge_key=args.judge_key,
-            workers=args.workers,
-            timeout=args.timeout,
-            resume_path=sidecar if args.resume else None,
-        )
-        summary = {
-            "protocol": "official_llm_equivalence_compatible",
-            "judge_model": args.judge_model,
-            **_official_summary(scored),
-        }
+        if args.mode == "strict":
+            if sidecar is None:
+                raise ValueError("--mode strict requires --judge-sidecar")
+            scored = score_strict_from_judge_sidecar(rows, sidecar)
+            summary = {
+                "protocol": "strict_completed_answer_official_judge",
+                "judge_model": args.judge_model,
+                **_strict_summary(scored),
+            }
+        else:
+            if args.resume and sidecar is None:
+                raise ValueError("--resume requires --judge-sidecar")
+            scored = score_official_with_judge(
+                rows,
+                metadata,
+                judge_url=args.judge_url,
+                judge_model=args.judge_model,
+                judge_key=args.judge_key,
+                workers=args.workers,
+                timeout=args.timeout,
+                resume_path=sidecar if args.resume else None,
+            )
+            summary = {
+                "protocol": "official_llm_equivalence_compatible",
+                "judge_model": args.judge_model,
+                **_official_summary(scored),
+            }
 
     result = {
         "replay_jsonl": str(replay_path),
