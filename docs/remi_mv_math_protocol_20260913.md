@@ -54,6 +54,31 @@ Current choice-only diagnostics from the completed raw replays:
 The high truncation rate means these numbers are completion-biased diagnostics,
 not capability-equivalent scores. TailSFT is especially affected.
 
+The official-compatible judge drain completed on 2026-09-13 using the local
+Qwen3-VL-32B-Instruct endpoint. Official MV-MATH uses DeepSeek-Chat, so this is
+protocol-compatible but not judge-model-identical.
+
+| Arm | Official-compatible correct / rows | Weighted accuracy |
+|---|---:|---:|
+| Base | 1,176 / 2,009 | 58.54% |
+| PTD-PO r4 step390 | 1,203 / 2,009 | 59.88% |
+| TailSFT | 1,525 / 2,009 | 75.91% |
+
+Finish-reason diagnostics from the judge sidecars:
+
+| Arm | `length` rows | Correct among `length` | `stop` rows | Correct among `stop` |
+|---|---:|---:|---:|---:|
+| Base | 952 | 457 | 1,057 | 719 |
+| PTD-PO r4 step390 | 1,104 | 559 | 905 | 644 |
+| TailSFT | 1,429 | 1,070 | 580 | 455 |
+
+The official-style judge prompt asks only whether the model's final answer
+matches the standard answer. In a sample audit, a response with
+`finish_reason=length` and no explicit final answer was still judged `true`.
+Therefore these official-compatible numbers must remain diagnostics, especially
+for models with high truncation rates; they are not a strict completed-answer
+score and must not be mixed directly with the strict B-segment v2 protocol.
+
 ## ReMI
 
 The ReMI paper reports:
