@@ -106,6 +106,9 @@ The strict results are the Project15 diagnostic rows to track. The
 official-compatible table above is retained only to document the protocol
 difference and judge behavior.
 
+See `docs/tailsft_truncation_audit_20260913.md` for the full TailSFT
+truncation-by-benchmark audit.
+
 ## ReMI
 
 The ReMI paper reports:
