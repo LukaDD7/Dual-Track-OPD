@@ -82,6 +82,18 @@ tolerances are closer to the paper than the old `normalized_exact_diagnostic`,
 which counted only an extractable subset and inflated the score. LLM-judge mode
 remains a diagnostic drain and is not the primary metric.
 
+Current exact/relaxed full-denominator diagnostics from the completed raw
+replays:
+
+| Arm | Correct / rows | Full-denominator accuracy | Rows truncated |
+|---|---:|---:|---:|
+| Base | 726 / 2,600 | 27.92% | 7 |
+| PTD-PO r4 step390 | 842 / 2,600 | 32.38% | 18 |
+| TailSFT | 755 / 2,600 | 29.04% | 1,365 |
+
+TailSFT's ReMI raw output is completion-biased because 1,365 rows hit the
+2,048-token ceiling; its number is not capability-comparable.
+
 ## Formal reporting rule
 
 1. Project15 v1's 13 native `lmms-eval` benchmarks remain the formal v1 rows.
