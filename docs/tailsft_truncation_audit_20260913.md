@@ -71,6 +71,20 @@ truncation-sensitive as well, but no final sample-level audit exists yet.
    cap or a task-appropriate cap. Re-running the same protocol would mostly
    reproduce the truncation artifact.
 
+## Format-pilot protocol
+
+`benchmark_suite.py` now supports two environment-only overrides for a
+controlled pilot:
+
+```text
+SFT_RL_SYSTEM_INSTRUCTION
+SFT_RL_APPLY_CHAT_TEMPLATE
+```
+
+The pilot is not an official protocol; it is a format-alignment diagnostic.
+If it removes truncation, Base and PTD-PO must be rerun under the same prompt
+contract before any cross-arm conclusion is drawn.
+
 ## Source paths
 
 All raw outputs and sidecars remain outside Git. The primary TailSFT Project15

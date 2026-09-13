@@ -100,3 +100,26 @@ def test_lmms_command_records_generation_and_raw_outputs() -> None:
     assert command[command.index("--gen_kwargs") + 1] == "temperature=0,max_new_tokens=256"
     assert command[command.index("--limit") + 1] == "4"
     assert "--log_samples" in command
+
+
+def test_lmms_command_supports_format_pilot_overrides(monkeypatch) -> None:
+    suite = load_suite(CONFIG)
+    spec = suite.benchmarks["viewspatial"]
+    monkeypatch.setenv("SFT_RL_MAX_NEW_TOKENS_OVERRIDE", "1024")
+    monkeypatch.setenv("SFT_RL_SYSTEM_INSTRUCTION", "Answer with only the final choice letter.")
+    monkeypatch.setenv("SFT_RL_APPLY_CHAT_TEMPLATE", "1")
+    command = build_command(
+        spec,
+        suite=suite,
+        run_dir=Path("/tmp/run"),
+        python="python",
+        inference_backend="openai",
+        checkpoint="/checkpoint",
+        api_base="http://127.0.0.1:8000/v1",
+        limit=4,
+        judge_policy="defer",
+    )
+    assert command is not None
+    assert command[command.index("--gen_kwargs") + 1] == "temperature=0,max_new_tokens=1024"
+    assert command[command.index("--system_instruction") + 1] == "Answer with only the final choice letter."
+    assert "--apply_chat_template" in command

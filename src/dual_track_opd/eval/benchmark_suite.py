@@ -180,6 +180,9 @@ def build_command(
         return None
     defaults = suite.defaults
     if spec.runner == "lmms_eval":
+        max_new_tokens = spec.max_new_tokens
+        if override := os.environ.get("SFT_RL_MAX_NEW_TOKENS_OVERRIDE"):
+            max_new_tokens = int(override)
         command = [
             python,
             "-m",
@@ -200,7 +203,7 @@ def build_command(
             "--seed",
             str(defaults.get("seed", 42)),
             "--gen_kwargs",
-            f"temperature=0,max_new_tokens={spec.max_new_tokens}",
+            f"temperature=0,max_new_tokens={max_new_tokens}",
             "--log_samples",
             "--log_samples_suffix",
             f"vision_opd_{spec.benchmark_id}",
@@ -211,6 +214,10 @@ def build_command(
             "--trust_remote_code",
             "--show_config",
         ]
+        if system_instruction := os.environ.get("SFT_RL_SYSTEM_INSTRUCTION"):
+            command.extend(["--system_instruction", system_instruction])
+        if os.environ.get("SFT_RL_APPLY_CHAT_TEMPLATE", "0") == "1":
+            command.append("--apply_chat_template")
         if limit is not None:
             command.extend(["--limit", str(limit)])
         include_task_path = defaults.get("include_task_path")
