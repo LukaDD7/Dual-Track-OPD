@@ -127,7 +127,7 @@ benchmarks:
     runner: replay_openai
     source_file: qwen3vl8b_MV_MATH_len65536_maxtok1024_raw.jsonl
     metric_tier: internal_diagnostic
-    scoring: official_evaluator_pending
+    scoring: official_llm_equivalence_sidecar
     primary_metric: null
     max_new_tokens: 4096
     judge_required: false
@@ -139,8 +139,8 @@ benchmarks:
     runner: replay_openai
     source_file: qwen3vl8b_ReMI_test_len65536_maxtok1024_raw.jsonl
     metric_tier: internal_diagnostic
-    scoring: normalized_exact_diagnostic
-    primary_metric: normalized_exact
+    scoring: official_exact_or_relaxed_accuracy_sidecar
+    primary_metric: null
     max_new_tokens: 4096
     judge_required: false
     note: lmms-eval v0.7.1 has no ReMI task; retain as a clearly labeled Tier-3 diagnostic.

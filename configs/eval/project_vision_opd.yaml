@@ -124,11 +124,11 @@ benchmarks:
     runner: replay_openai
     source_file: qwen3vl8b_MV_MATH_len65536_maxtok1024_raw.jsonl
     metric_tier: internal_diagnostic
-    scoring: official_evaluator_pending
+    scoring: official_llm_equivalence_sidecar
     primary_metric: null
     max_new_tokens: 4096
     judge_required: false
-    note: Replays the exact prior baseline prompts/images; do not place its internal score in the main acceptance table.
+    note: Use python -m dual_track_opd.eval.score_mv_math in official mode with a local OpenAI-compatible judge; choice-only deterministic scores are diagnostics.
 
   remi:
     contract_name: ReMI
@@ -136,11 +136,11 @@ benchmarks:
     runner: replay_openai
     source_file: qwen3vl8b_ReMI_test_len65536_maxtok1024_raw.jsonl
     metric_tier: internal_diagnostic
-    scoring: normalized_exact_diagnostic
-    primary_metric: normalized_exact
+    scoring: official_exact_or_relaxed_accuracy_sidecar
+    primary_metric: null
     max_new_tokens: 2048
     judge_required: false
-    note: lmms-eval v0.7.1 has no ReMI task; retain as a clearly labeled Tier-3 diagnostic.
+    note: lmms-eval v0.7.1 has no ReMI task. Use scripts/sft_rl/remi_reeval.py --mode exact, which follows the paper's exact/relaxed tolerance protocol with a full denominator.
 
   dynamath:
     contract_name: DynaMath
