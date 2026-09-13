@@ -161,6 +161,7 @@ def _judge_request(
     answer_type: str,
     judge_url: str,
     judge_model: str,
+    judge_key: str,
     timeout: float,
 ) -> str:
     if answer_type == "multi-step":
@@ -201,7 +202,10 @@ def _judge_request(
     request = urllib.request.Request(
         f"{judge_url.rstrip('/')}/chat/completions",
         data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
+        headers={
+            "Authorization": f"Bearer {judge_key}",
+            "Content-Type": "application/json",
+        },
         method="POST",
     )
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
@@ -232,6 +236,7 @@ def score_official_with_judge(
     *,
     judge_url: str,
     judge_model: str,
+    judge_key: str,
     workers: int,
     timeout: float,
     resume_path: Path | None = None,
@@ -279,6 +284,7 @@ def score_official_with_judge(
                 answer_type=item["answer_type"],
                 judge_url=judge_url,
                 judge_model=judge_model,
+                judge_key=judge_key,
                 timeout=timeout,
             )
             verdict = _parse_judge_verdict(content, item["answer_type"])
@@ -362,6 +368,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--mode", choices=("choice", "official"), default="choice")
     parser.add_argument("--judge-url", default="http://127.0.0.1:8801/v1")
     parser.add_argument("--judge-model", default="Qwen3-VL-32B-Instruct")
+    parser.add_argument("--judge-key", default="dummy")
     parser.add_argument("--workers", type=int, default=16)
     parser.add_argument("--timeout", type=float, default=120)
     parser.add_argument("--output-json")
@@ -388,6 +395,7 @@ def main() -> int:
             metadata,
             judge_url=args.judge_url,
             judge_model=args.judge_model,
+            judge_key=args.judge_key,
             workers=args.workers,
             timeout=args.timeout,
             resume_path=sidecar if args.resume else None,
