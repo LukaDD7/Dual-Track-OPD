@@ -107,7 +107,6 @@ def test_lmms_command_supports_format_pilot_overrides(monkeypatch) -> None:
     spec = suite.benchmarks["viewspatial"]
     monkeypatch.setenv("SFT_RL_MAX_NEW_TOKENS_OVERRIDE", "1024")
     monkeypatch.setenv("SFT_RL_SYSTEM_INSTRUCTION", "Answer with only the final choice letter.")
-    monkeypatch.setenv("SFT_RL_APPLY_CHAT_TEMPLATE", "1")
     command = build_command(
         spec,
         suite=suite,
@@ -120,6 +119,8 @@ def test_lmms_command_supports_format_pilot_overrides(monkeypatch) -> None:
         judge_policy="defer",
     )
     assert command is not None
+    assert command[command.index("--model") + 1] == "async_openai"
     assert command[command.index("--gen_kwargs") + 1] == "temperature=0,max_new_tokens=1024"
-    assert command[command.index("--system_instruction") + 1] == "Answer with only the final choice letter."
-    assert "--apply_chat_template" in command
+    model_args = command[command.index("--model_args") + 1]
+    assert "system_prompt=Answer with only the final choice letter." in model_args
+    assert "is_qwen3_vl=true" in model_args

@@ -150,6 +150,16 @@ def _model_args(
             "num_concurrent": defaults.get("workers", 8),
             "httpx_trust_env": "false",
         }
+    elif backend == "async_openai":
+        values = {
+            "model": defaults["served_model_name"],
+            "base_url": api_base,
+            "api_key": defaults.get("api_key", "EMPTY"),
+            "timeout": 600,
+            "is_qwen3_vl": "true",
+        }
+        if system_instruction := os.environ.get("SFT_RL_SYSTEM_INSTRUCTION"):
+            values["system_prompt"] = system_instruction
     elif backend == "vllm":
         values = {
             "model": checkpoint,
@@ -180,6 +190,11 @@ def build_command(
         return None
     defaults = suite.defaults
     if spec.runner == "lmms_eval":
+        inference_backend = (
+            "async_openai"
+            if os.environ.get("SFT_RL_SYSTEM_INSTRUCTION")
+            else inference_backend
+        )
         max_new_tokens = spec.max_new_tokens
         if override := os.environ.get("SFT_RL_MAX_NEW_TOKENS_OVERRIDE"):
             max_new_tokens = int(override)
@@ -214,10 +229,6 @@ def build_command(
             "--trust_remote_code",
             "--show_config",
         ]
-        if system_instruction := os.environ.get("SFT_RL_SYSTEM_INSTRUCTION"):
-            command.extend(["--system_instruction", system_instruction])
-        if os.environ.get("SFT_RL_APPLY_CHAT_TEMPLATE", "0") == "1":
-            command.append("--apply_chat_template")
         if limit is not None:
             command.extend(["--limit", str(limit)])
         include_task_path = defaults.get("include_task_path")
@@ -516,9 +527,17 @@ def run_suite(args: argparse.Namespace) -> int:
             print(f"\n[run] {spec.contract_name}", flush=True)
             completed = subprocess.run(command, check=False, env=run_env)
             record["returncode"] = completed.returncode
-            record["status"] = "completed" if completed.returncode == 0 else "failed"
-            if completed.returncode != 0:
-                overall_rc = completed.returncode
+            output_dir = run_dir / "lmms" / spec.benchmark_id
+            has_results = any(path.is_file() for path in output_dir.rglob("*.json"))
+            succeeded = completed.returncode == 0 and has_results
+            record["status"] = "completed" if succeeded else "failed"
+            if not succeeded:
+                record["failure_reason"] = (
+                    "lmms_eval_returned_nonzero"
+                    if completed.returncode != 0
+                    else "lmms_eval_returned_no_result_files"
+                )
+                overall_rc = completed.returncode if completed.returncode != 0 else 1
                 if not args.keep_going:
                     manifest["runs"].append(record)
                     _save_manifest(manifest_path, manifest)

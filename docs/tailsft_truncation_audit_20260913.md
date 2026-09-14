@@ -73,16 +73,25 @@ truncation-sensitive as well, but no final sample-level audit exists yet.
 
 ## Format-pilot protocol
 
-`benchmark_suite.py` now supports two environment-only overrides for a
-controlled pilot:
+`benchmark_suite.py` supports an environment-only override for a controlled
+pilot:
 
 ```text
 SFT_RL_SYSTEM_INSTRUCTION
-SFT_RL_APPLY_CHAT_TEMPLATE
 ```
 
-The pilot is not an official protocol; it is a format-alignment diagnostic.
-If it removes truncation, Base and PTD-PO must be rerun under the same prompt
+When set, the suite switches lmms-eval from the sync `openai` backend to
+`async_openai`, passes the prompt as `system_prompt`, and enables Qwen3-VL
+message formatting. The earlier `--apply_chat_template` path is not used: it is
+incompatible with multimodal chat tasks in this lmms-eval runtime and can fail
+before any request reaches vLLM.
+
+The suite also treats an lmms-eval process that exits 0 without writing result
+JSON as failed, because this runtime can catch task-construction exceptions and
+return success.
+
+The pilot is not an official protocol; it is a format-alignment diagnostic. If
+it removes truncation, Base and PTD-PO must be rerun under the same prompt
 contract before any cross-arm conclusion is drawn.
 
 ## Source paths
