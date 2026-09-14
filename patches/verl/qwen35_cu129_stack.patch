@@ -1,0 +1,128 @@
+diff --git a/examples/on_policy_distillation_trainer/run_qwen3_5_4b_fsdp.sh b/examples/on_policy_distillation_trainer/run_qwen3_5_4b_fsdp.sh
+index 04d3bb77..9f6e0376 100644
+--- a/examples/on_policy_distillation_trainer/run_qwen3_5_4b_fsdp.sh
++++ b/examples/on_policy_distillation_trainer/run_qwen3_5_4b_fsdp.sh
+@@ -15,6 +15,7 @@ TEACHER_WORLD_SIZE=${TEACHER_WORLD_SIZE:-8}
+ 
+ distillation_loss_mode=${DISTILLATION_LOSS_MODE:-k1}
+ use_policy_gradient=${USE_POLICY_GRADIENT:-True}
++use_task_rewards=${USE_TASK_REWARDS:-False}
+ distillation_topk=${DISTILLATION_TOPK:-64}
+ 
+ train_batch_size=${TRAIN_BATCH_SIZE:-128}
+@@ -26,6 +27,7 @@ ppo_max_token_len_per_gpu=${PPO_MAX_TOKEN_LEN_PER_GPU:-24576}
+ actor_lr=${ACTOR_LR:-1e-6}
+ 
+ rollout_tp=${ROLLOUT_TP:-2}
++rollout_num_workers=${ROLLOUT_NUM_WORKERS:-8}
+ rollout_gpu_mem_util=${ROLLOUT_GPU_MEM_UTIL:-0.4}
+ teacher_tp=${TEACHER_TP:-8}
+ teacher_ep=${TEACHER_EP:-8}
+@@ -92,6 +94,7 @@ REF=(
+ 
+ ROLLOUT=(
+     actor_rollout_ref.rollout.name=vllm
++    actor_rollout_ref.rollout.agent.num_workers=${rollout_num_workers}
+     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1
+     actor_rollout_ref.rollout.tensor_model_parallel_size=${rollout_tp}
+     actor_rollout_ref.rollout.gpu_memory_utilization=${rollout_gpu_mem_util}
+@@ -127,7 +130,7 @@ EXTRA=(
+     distillation.teacher_models.teacher_model.inference.max_model_len=${max_num_tokens}
+     distillation.distillation_loss.loss_mode=${distillation_loss_mode}
+     distillation.distillation_loss.topk=${distillation_topk}
+-    distillation.distillation_loss.use_task_rewards=False
++    distillation.distillation_loss.use_task_rewards=${use_task_rewards}
+     distillation.distillation_loss.use_policy_gradient=${use_policy_gradient}
+     distillation.distillation_loss.loss_max_clamp=10.0
+     distillation.distillation_loss.log_prob_min_clamp=-10.0
+@@ -144,4 +147,4 @@ python3 -m verl.trainer.main_ppo \
+     "${ROLLOUT[@]}" \
+     "${TRAINER[@]}" \
+     "${EXTRA[@]}" \
+-    "$@" 2>&1 | tee logs/qwen3_5-35b-fsdp2-${start_time}.log
+\ No newline at end of file
++    "$@" 2>&1 | tee logs/qwen3_5-35b-fsdp2-${start_time}.log
+diff --git a/verl/workers/rollout/vllm_rollout/vllm_async_server.py b/verl/workers/rollout/vllm_rollout/vllm_async_server.py
+index 1f465a7a..4c2dfed5 100644
+--- a/verl/workers/rollout/vllm_rollout/vllm_async_server.py
++++ b/verl/workers/rollout/vllm_rollout/vllm_async_server.py
+@@ -83,6 +83,65 @@ logger = logging.getLogger(__file__)
+ logger.setLevel(logging.INFO)
+ 
+ 
++def _dump_engine_diag(exc: BaseException) -> str:
++    """Dump engine-init failure diagnostics to a file on shared storage.
++
++    Ray redirects actor subprocess stdout/stderr into the worker log, so the
++    EngineCore's "root cause" may never reach the user's terminal. The EngineCore
++    process inherits this process's stderr fd, so we tail /proc/self/fd/2 (the
++    Ray worker log) to capture it, plus GPU/memory snapshots.
++    """
++    import os
++    import subprocess
++    import time
++    import traceback
++
++    diag_dir = os.environ.get(
++        "VERL_DIAG_DIR",
++        "/inspire/hdd/global_user/mengweicheng-240108120092/lzy/fc-opd-storage/logs",
++    )
++    try:
++        os.makedirs(diag_dir, exist_ok=True)
++    except OSError:
++        diag_dir = "/tmp"
++    ts = time.strftime("%Y%m%d_%H%M%S")
++    path = os.path.join(diag_dir, f"vllm_engine_diag_{ts}_{os.getpid()}.log")
++
++    def _run(cmd):
++        try:
++            out = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
++            return f"\n=== {' '.join(cmd)} ===\n{out.stdout}\n{out.stderr}"
++        except Exception as e:  # noqa: BLE001
++            return f"\n[cmd {' '.join(cmd)} failed] {e}\n"
++
++    with open(path, "w") as f:
++        f.write(f"=== vLLM engine init failure ({ts}) pid={os.getpid()} ===\n")
++        f.write(traceback.format_exc())
++        try:
++            # WorkerProc's own traceback is logged asynchronously after the
++            # parent raises; give it a moment to flush before tailing.
++            time.sleep(5)
++            fd2 = os.path.realpath("/proc/self/fd/2")
++            f.write(f"\n=== stderr target: {fd2} ===\n")
++            candidates = [fd2]
++            if fd2.endswith(".err"):
++                candidates.append(fd2[:-4] + ".out")  # Ray 分流 stdout -> worker-*.out
++            for cand in candidates:
++                f.write(f"\n=== tail {cand} ===\n")
++                if os.path.isfile(cand):
++                    out = subprocess.run(["tail", "-n", "2500", cand], capture_output=True, text=True, timeout=30)
++                    f.write(out.stdout)
++                    if out.stderr:
++                        f.write(f"\n[tail err] {out.stderr}\n")
++                else:
++                    f.write(f"(not a regular file)\n")
++        except Exception as e:  # noqa: BLE001
++            f.write(f"\n[stderr read failed] {e}\n")
++        f.write(_run(["nvidia-smi"]))
++        f.write(_run(["free", "-g"]))
++    return path
++
++
+ class vLLMHttpServer:
+     """vLLM http server in single node, this is equivalent to launch server with command line:
+     ```
+@@ -398,7 +457,12 @@ class vLLMHttpServer:
+         if "disable_log_stats" in fn_args:
+             kwargs["disable_log_stats"] = engine_args.disable_log_stats
+ 
+-        engine_client = AsyncLLM.from_vllm_config(vllm_config=vllm_config, usage_context=usage_context, **kwargs)
++        try:
++            engine_client = AsyncLLM.from_vllm_config(vllm_config=vllm_config, usage_context=usage_context, **kwargs)
++        except Exception as exc:  # noqa: BLE001
++            diag = _dump_engine_diag(exc)
++            logger.error("vLLM engine init failed; diagnostics dumped to %s", diag)
++            raise
+ 
+         # Don't keep the dummy data in memory
+         await engine_client.reset_mm_cache()

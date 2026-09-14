@@ -1,0 +1,34 @@
+# Adaptive answer-free prefix rescue screen on fresh Geometry3K prompts.
+# Frozen-policy only: 32B teacher proposals + 4B student continuations.
+
+experiment:
+  name: support_aware_rescue_screen
+  objective: select_rescue_positive_rare_prompts_and_minimal_answer_free_horizon
+
+model:
+  teacher: ${DTOPD_MODEL_ROOT}/Qwen3-VL-32B-Instruct
+  student: ${DTOPD_MODEL_ROOT}/Qwen3-VL-4B-Instruct
+
+data:
+  cohort_path: ${DTOPD_OUTPUT_ROOT}/fc_opd/geometry3k_gkd/rescue_screen_cohort_20260806.parquet
+
+screen:
+  response_format: legacy_answer
+  proposals_per_prompt: 4
+  proposal_temperature: 0.7
+  proposal_top_p: 0.95
+  proposal_max_new_tokens: 4096
+  stage1_k: 4
+  stage2_k: 8
+  wrong_source_k: 16
+  max_continuation_tokens: 2048
+  continuation_temperature: 0.7
+  continuation_top_p: 0.95
+  seed: 20260806
+  teacher_device: cuda:0
+  student_device: cuda:1
+  dtype: bfloat16
+  posterior_draws: 20000
+
+output:
+  dir: ${DTOPD_OUTPUT_ROOT}/support_aware_opd/rescue_screen_20260806

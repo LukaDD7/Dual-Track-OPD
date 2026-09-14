@@ -1,0 +1,10 @@
+teacher:
+  backend: transformers
+  model_id: Qwen/Qwen3-VL-32B-Instruct
+  revision: main
+  host: 127.0.0.1
+  port: 18080
+  top_k: 32
+  dtype: bfloat16
+  device: cuda
+  protocol_version: fc-opd-teacher-v1

@@ -1,0 +1,31 @@
+# VA-OPD qwen3.5/3.6 distillation stack — CUDA 13.2 (Driver 595.58.03, 8xH200 SM90)
+#
+# Strategy:
+#   * torch 2.13.0+cu132 installed FIRST from download.pytorch.org/whl/cu132;
+#     vLLM 0.27.1 (cu130 wheel) pins torch==2.13.0, satisfied by the +cu132 build.
+#   * vLLM wheel is pulled explicitly from wheels.vllm.ai/0.27.1/cu130/ (PyPI
+#     default for vLLM >= 0.23 is the cu130 flavor anyway; explicit for provenance).
+#   * verl 0.9.0 metadata pins transformers<5.11 (conservative); we install
+#     5.12.0 (proven with the qwen3.5 stack) via this constraint and gate on
+#     real model load.  Install verl with --no-deps to bypass its resolver.
+#   * torchaudio 2.11.0 is a vLLM 0.27.1 hard pin with NO CUDA deps; audio is
+#     unused in this stack (2.13.0+cu132 torchaudio does not exist).
+#   * No --force-reinstall anywhere in the build.
+torch==2.13.0
+torchvision==0.28.0
+torchaudio==2.11.0
+vllm==0.27.1
+transformers==5.12.0
+flashinfer-python==0.6.16.post3
+flash-attn==2.8.3
+numpy>=2.0.0
+pyarrow>=19.0.0
+ray==2.55.1
+tensordict==0.10.0
+datasets
+pandas
+accelerate
+peft
+qwen-vl-utils==0.0.14
+mathruler
+protobuf>=5.29.6

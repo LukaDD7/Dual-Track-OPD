@@ -1,0 +1,14 @@
+===== vstar / Vision-OPD-4B_seed42 =====
+direct_attributes: 89.57% (n=115)
+relative_position: 86.84% (n=76)
+vstar Acc: 88.48% (n=191)
+===== zoombench / Vision-OPD-4B_seed42 =====
+zoombench Acc: 503/845 = 59.53%
+===== hrbench-4k / Vision-OPD-4B_seed42 =====
+hrbench-4k Acc: 659/800 = 82.38%
+===== hrbench-8k / Vision-OPD-4B_seed42 =====
+hrbench-8k Acc: 569/800 = 71.12%
+===== mme-realworld / Vision-OPD-4B_seed42 =====
+mme-realworld Acc: 17604/23609 = 74.56%
+===== mme-realworld-cn / Vision-OPD-4B_seed42 =====
+mme-realworld-cn Acc: 4157/5917 = 70.26%

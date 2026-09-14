@@ -1,0 +1,14 @@
+Vision-OPD 4xH200 smoke test: PASS
+
+Reached global_step: 20
+VOPD loss: non-zero
+Backward/optimizer step: successful
+Teacher EMA update: successful
+Student rollout and bbox-conditioned teacher: successful
+FlashAttention 2.8.3 SM90: successful
+FlashInfer GDN JIT SM90: successful
+Max allocated GPU memory: 95.0 GiB
+Max reserved GPU memory: 106.9 GiB
+Approximate step time: 14 s
+Prompt length tested up to: 4542
+Response length: 128 (all responses clipped)

@@ -1,0 +1,32 @@
+{
+  "validated_infrastructure_milestones": [
+    "Vision-OPD adapter/prompt audit passed",
+    "fixed-response protocol audit passed",
+    "structured student-rollout audit passed",
+    "trainable Vision-OPD-6K FC-OPD-2C offline score builder passed at limit16_k4",
+    "real Qwen3-VL-4B 2C optimizer-step smoke passed"
+  ],
+  "vision_opd_contamination_finding": {
+    "red_box_localization_cue_suspected": true,
+    "hpc_red_box_audit": {
+      "num_samples_checked": 128,
+      "full_image_red_box_suspected_rate": 0.9140625,
+      "bbox_image_red_box_suspected_rate": 1.0,
+      "likely_conclusion": "red_box_likely_baked_into_full_images"
+    },
+    "teacher_images_contain_red_box_overlays": true,
+    "full_images_likely_contain_red_box_overlays": true,
+    "gaussian_blur_degraded_images_derive_from_loaded_full_images": true,
+    "vision_opd_full_run_frozen_as_main_experimental_data": true
+  },
+  "current_status": {
+    "vision_opd_role": "infrastructure_validation_or_red_box_contaminated_localization_cued_ablation_only",
+    "main_clean_data_order": ["geometry3k", "virl39k"]
+  },
+  "decision": {
+    "do_not_run_vision_opd_full_2c_as_main": true,
+    "do_not_run_vision_opd_full_4c_as_main": true,
+    "implement_clean_data_4c_geometry3k_first": true,
+    "implement_virl39k_after_schema_inspection": true
+  }
+}

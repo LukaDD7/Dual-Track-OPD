@@ -1,0 +1,297 @@
+diff --git a/verl/trainer/config/sft_trainer_engine.yaml b/verl/trainer/config/sft_trainer_engine.yaml
+index 8fe10e6..0973c9b 100644
+--- a/verl/trainer/config/sft_trainer_engine.yaml
++++ b/verl/trainer/config/sft_trainer_engine.yaml
+@@ -46,6 +46,17 @@ data:
+   # Set to True to ignore input_ids mismatch and use the concatenated input_ids as the final input_ids.
+   ignore_input_ids_mismatch: False
+ 
++  # TailSFT online sequence-level filtering (arXiv:2608.25756).
++  # enabled=false keeps verl stock SFT behavior (sft_loss) untouched.
++  tailsft:
++    enabled: False
++    # drop fraction gamma_t of each selection batch (smallest margins first)
++    filter_fraction: 0.5
++    # 'static' -> gamma_t = filter_fraction; 'ramp' -> linear 0 -> filter_fraction
++    schedule: ramp
++    # steps to reach full filter_fraction under 'ramp' (e.g. half of total steps)
++    ramp_steps: 800
++
+ # Checkpoint configuration
+ checkpoint:
+   _target_: verl.trainer.config.CheckpointConfig
+diff --git a/verl/trainer/sft_trainer.py b/verl/trainer/sft_trainer.py
+index 0c4aa8e..b49c002 100644
+--- a/verl/trainer/sft_trainer.py
++++ b/verl/trainer/sft_trainer.py
+@@ -160,7 +160,15 @@ class SFTTrainer:
+         from verl.workers.engine_workers import TrainingWorkerConfig
+         from verl.workers.utils.losses import sft_loss
+ 
+-        self.loss_fn = partial(sft_loss, config=None)
++        # TailSFT (arXiv:2608.25756): swap in the online-filtering loss only
++        # when data.tailsft.enabled; otherwise verl behaves stock (sft_loss).
++        tailsft_cfg = self.config.data.get("tailsft", None)
++        if tailsft_cfg is not None and bool(tailsft_cfg.get("enabled", False)):
++            from verl.workers.utils.losses import tailsft_loss
++
++            self.loss_fn = partial(tailsft_loss, config=None)
++        else:
++            self.loss_fn = partial(sft_loss, config=None)
+ 
+         config = TrainingWorkerConfig(
+             model_type="language_model",
+@@ -351,6 +359,24 @@ class SFTTrainer:
+             "pad_token_id": self.model_config.tokenizer.pad_token_id,
+         }
+ 
++        # TailSFT: resolve γ_t per step from the schedule (static or ramp)
++        # and expose it to tailsft_loss as non-tensor metadata. The val path
++        # reuses meta_info but its data carries no init_ce, so tailsft_loss
++        # degrades to plain CE there automatically.
++        tailsft_cfg = self.config.data.get("tailsft", None)
++        if tailsft_cfg is not None and bool(tailsft_cfg.get("enabled", False)):
++            base_fraction = float(tailsft_cfg.get("filter_fraction", 0.5))
++            schedule = str(tailsft_cfg.get("schedule", "ramp"))
++            ramp_steps = int(tailsft_cfg.get("ramp_steps", 0))
++        else:
++            base_fraction, schedule, ramp_steps = 0.0, "static", 0
++
++        def _tailsft_gamma(step: int) -> float:
++            if schedule == "ramp":
++                t = min(max(step, 0), ramp_steps)
++                return base_fraction * (t / ramp_steps if ramp_steps > 0 else 1.0)
++            return base_fraction
++
+         train_time = 0
+         total_tokens = 0
+         for epoch in range(start_epoch, self.config.trainer.total_epochs):
+@@ -370,6 +396,13 @@ class SFTTrainer:
+             ):
+                 global_step += 1
+ 
++                # TailSFT: inject this step's γ_t before constructing the
++                # TensorDict (meta_info is read-only from here; γ_t mutates
++                # per step, so update the dict entry before get_tensordict
++                # snapshots it into NonTensorData).
++                if schedule is not None:
++                    meta_info["tailsft_filter_fraction"] = _tailsft_gamma(global_step)
++
+                 # construct tensordict
+                 data = tu.get_tensordict(tensor_dict=data, non_tensor_dict=meta_info)
+                 batch_seqlens = self._get_batch_seqlens(data=data)
+@@ -399,6 +432,34 @@ class SFTTrainer:
+                             value = metrics.pop(k)
+                             metrics[f"train/{k}"] = value
+ 
++                    # TailSFT: each dp rank's per-micro-batch metrics are
++                    # flattened into a list by append_to_dict; allgather_
++                    # dict_into_dict then APPENDS each rank's list, so the
++                    # collected value is NESTED: [[f, f, ...], [f, ...]].
++                    # LocalLogger only prints numbers.Number values, so
++                    # unreduced tailsft/* lists are silently invisible on
++                    # the console (and sum() over a nested list raises
++                    # TypeError: int + list). Flatten one level, then
++                    # reduce: counts sum across ranks/micro-batches,
++                    # margin_mean averages over the flattened entries.
++                    for k in sorted(metrics.keys()):
++                        if not k.startswith("tailsft/"):
++                            continue
++                        v = metrics[k]
++                        if isinstance(v, (list, tuple)) and len(v) > 0:
++                            flat = []
++                            for item in v:
++                                if isinstance(item, (list, tuple)):
++                                    flat.extend(float(x) for x in item)
++                                else:
++                                    flat.append(float(item))
++                            if len(flat) == 0:
++                                continue
++                            if k == "tailsft/margin_mean":
++                                metrics[k] = float(sum(flat)) / len(flat)
++                            else:
++                                metrics[k] = float(sum(flat))
++
+                     metrics["train/global_tokens"] = torch.sum(
+                         torch.tensor(batch_seqlens, device=self.device_name)
+                     ).item()
+diff --git a/verl/workers/utils/losses.py b/verl/workers/utils/losses.py
+index ebaa4e4..c877145 100644
+--- a/verl/workers/utils/losses.py
++++ b/verl/workers/utils/losses.py
+@@ -54,6 +54,175 @@ def sft_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
+     return loss, {}
+ 
+ 
++# --- TailSFT (arXiv:2608.25756) online sequence-level filtering -----------------
++#
++# Algorithm 1: with per-example init CE ℓ0_i (recorded once under π0) and
++# current CE ℓt_i, drop the γ_t fraction of each batch with the smallest
++# margin ℓt_i − ℓ0_i, then take a token-averaged gradient on the survivors.
++# ℓ0 and ℓt are length-normalized mean CE over assistant target tokens.
++# Deliberately additive: when `init_ce` is absent (e.g. the validation path,
++# whose shards carry no init_ce column) this falls through to plain sft_loss.
++
++
++def tailsft_keep_mask(
++    margins: "torch.Tensor",
++    filter_fraction: float,
++) -> "torch.Tensor":
++    """Boolean keep-mask: drop exactly the k=floor(n*f) smallest margins.
++
++    margins: 1-D tensor, one entry per sequence in the selection batch
++    (selection batch = the per-dp-rank mini-batch gathered across ranks).
++    Rank-based (stable argsort), so exactly k sequences are dropped even when
++    margins tie; equal margins are broken deterministically by position.
++    """
++    import torch
++
++    n = margins.numel()
++    k = int(n * filter_fraction)
++    if n == 0 or k <= 0:
++        return torch.ones_like(margins, dtype=torch.bool)
++    if k >= n:
++        return torch.zeros_like(margins, dtype=torch.bool)
++    # strict floor semantics: drop exactly the k smallest margins by rank
++    # (stable argsort breaks ties deterministically by position).
++    order = torch.argsort(margins, stable=True)
++    keep = torch.ones_like(margins, dtype=torch.bool)
++    keep[order[:k]] = False
++    return keep
++
++
++def tailsft_filter_fraction(step: int, schedule: str, base_fraction: float, ramp_steps: int) -> float:
++    """γ_t schedule. 'static': γ_t = f. 'ramp': linear 0 → f over ramp_steps."""
++    if schedule == "static":
++        return base_fraction
++    if schedule == "ramp":
++        if ramp_steps <= 0:
++            return base_fraction
++        t = min(max(step, 0), ramp_steps)
++        return base_fraction * (t / ramp_steps)
++    raise ValueError(f"unknown tailsft schedule {schedule!r}")
++
++
++def _tailsft_per_example_ce(log_prob_flatten: "torch.Tensor", loss_mask_flatten: "torch.Tensor",
++                            seq_offsets: "torch.Tensor") -> "torch.Tensor":
++    """Length-normalized mean CE per sequence from flattened rmpad tensors.
++
++    log_prob_flatten[i] is log P(input_ids[i+1] | prefix); loss_mask_flatten
++    must already be the ROLLED mask (torch.roll(-1)), i.e. rolled[i] selects
++    positions whose next token is a target. seq_offsets = input_ids.offsets().
++    """
++    import torch
++
++    seq_lens = seq_offsets.diff()  # unrolled lengths
++    # rolled mask drops the last position of the whole batch, so each
++    # segment's target count is the rolled mask summed within the segment
++    ce_sum = torch.zeros(seq_lens.shape[0], dtype=torch.float32, device=log_prob_flatten.device)
++    n_tok = torch.zeros(seq_lens.shape[0], dtype=torch.float32, device=log_prob_flatten.device)
++    flat_mask = loss_mask_flatten.to(torch.float32)
++    for j in range(seq_lens.shape[0]):
++        seg = slice(int(seq_offsets[j]), int(seq_offsets[j + 1]))
++        n_tok[j] = flat_mask[seg].sum()
++        if n_tok[j] > 0:
++            ce_sum[j] = -(flat_mask[seg] * log_prob_flatten[seg].float()).sum()
++    return ce_sum / n_tok.clamp(min=1.0), n_tok
++
++
++def tailsft_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None):
++    """TailSFT-filtered SFT loss (falls back to sft_loss without init_ce)."""
++    pad_mode = tu.get_non_tensor_data(data=data, key="pad_mode", default=DatasetPadMode.NO_PADDING)
++    if pad_mode != DatasetPadMode.NO_PADDING:
++        return sft_loss(config=config, model_output=model_output, data=data, dp_group=dp_group)
++
++    init_ce = tu.get(data, "init_ce", None)
++    if init_ce is None or len(init_ce) == 0 or any(v is None for v in init_ce):
++        # validation / non-annotated data (missing or partial init_ce): plain SFT
++        return sft_loss(config=config, model_output=model_output, data=data, dp_group=dp_group)
++
++    filter_fraction = tu.get_non_tensor_data(data=data, key="tailsft_filter_fraction", default=0.0)
++    if filter_fraction is None or filter_fraction <= 0:
++        return sft_loss(config=config, model_output=model_output, data=data, dp_group=dp_group)
++
++    dp_size = data["dp_size"]
++    batch_num_tokens = data["batch_num_tokens"]
++
++    log_prob = model_output["log_probs"]
++    loss_mask = data["loss_mask"]
++    input_ids = data["input_ids"]
++
++    log_prob_flatten = log_prob.values()
++    loss_mask_flatten = torch.roll(loss_mask.values(), shifts=-1, dims=0)
++    seq_offsets = input_ids.offsets()
++
++    # per-example current CE ℓt (length-normalized, matches ℓ0 definition)
++    lt, _ = _tailsft_per_example_ce(log_prob_flatten, loss_mask_flatten, seq_offsets)
++    l0 = torch.as_tensor(init_ce, dtype=torch.float32, device=lt.device)
++    if l0.numel() != lt.numel():
++        raise ValueError(
++            f"tailsft: init_ce length {l0.numel()} != micro-batch size {lt.numel()}"
++        )
++    margins = lt - l0
++
++    # selection batch = this rank's mini-batch joined across dp ranks
++    # (micro-batches are disjoint slices of it; each rank computes the same
++    # threshold over the gathered margins, so the filter decision is global)
++    if dp_group is not None and torch.distributed.get_world_size(dp_group) > 1:
++        gathered = [None] * torch.distributed.get_world_size(dp_group)
++        torch.distributed.all_gather_object(gathered, margins.detach().cpu().tolist())
++        all_margins = torch.tensor(
++            [m for part in gathered for m in part], dtype=torch.float32, device=lt.device
++        )
++    else:
++        all_margins = margins
++
++    keep_all = tailsft_keep_mask(all_margins, filter_fraction)
++    if dp_group is not None and torch.distributed.get_world_size(dp_group) > 1:
++        offset = sum(len(part) for part in gathered[: torch.distributed.get_rank(dp_group)])
++        keep = keep_all[offset : offset + margins.numel()]
++    else:
++        keep = keep_all
++
++    # zero the (rolled) target tokens of dropped sequences, then compute the
++    # token-averaged loss over RETAINED tokens only
++    keep_per_token = torch.repeat_interleave(
++        keep.to(torch.float32), seq_offsets.diff()
++    ).to(loss_mask_flatten.dtype)
++    filtered_mask = loss_mask_flatten * keep_per_token
++
++    retained_tokens = int(filtered_mask.sum().item())
++    if retained_tokens == 0:
++        # degenerate step (everything dropped): plain SFT loss as safety net
++        return sft_loss(config=config, model_output=model_output, data=data, dp_group=dp_group)
++
++    # STEP-LEVEL denominator, deliberately NOT the micro-batch's own
++    # retained-token count: the engine's forward_backward_batch calls this
++    # loss per micro-batch and SUMS the losses (postprocess_batch_func +
++    # _postprocess_output), which is only correct when every micro-batch
++    # divides by the same step-global constant — exactly how sft_loss works
++    # (its batch_num_tokens is all-reduced before micro-batching and shared by
++    # all micro-batches). Normalizing by this micro-batch's own global
++    # retained tokens makes each micro-batch loss a complete mean, so M
++    # micro-batches at heavy-token steps produce an Mx-too-large loss AND
++    # gradient (observed as exact-2x train/loss + grad_norm spikes in
++    # qwen3vl_sft_tailsft_mmf122k_1ep at dynamic-bsz M=2 steps).
++    # The exact retained-token count differs per micro-batch, but
++    # batch_num_tokens (all-reduced over the whole dp mini-batch) times
++    # (1 - filter_fraction) is the same constant for every micro-batch of the
++    # step and matches the expected retained fraction in expectation, so the
++    # engine's sum-over-micro-batches recovers the correct global mean.
++    global_retained = float(batch_num_tokens) * (1.0 - float(filter_fraction))
++
++    loss = -masked_sum(log_prob_flatten, filtered_mask) / global_retained * dp_size
++
++    n_drop = int((~keep).sum().item())
++    metrics = {
++        "tailsft/dropped": float(n_drop),
++        "tailsft/batch": float(margins.numel()),
++        "tailsft/margin_mean": float(margins.mean().item()),
++        "tailsft/retained_tokens": float(retained_tokens),
++    }
++    return loss, metrics
++
++
+ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None):
+     """Computes ppo loss from model output (log_prob, entropy, values, etc. ) and old_log_probs from data."""
+     log_prob = no_padding_2_padding(model_output["log_probs"], data)

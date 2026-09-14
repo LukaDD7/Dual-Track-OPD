@@ -1,0 +1,1240 @@
+diff --git a/examples/on_policy_distillation_trainer/run_qwen3_5_4b_fsdp.sh b/examples/on_policy_distillation_trainer/run_qwen3_5_4b_fsdp.sh
+index 04d3bb7..aeb5d25 100644
+--- a/examples/on_policy_distillation_trainer/run_qwen3_5_4b_fsdp.sh
++++ b/examples/on_policy_distillation_trainer/run_qwen3_5_4b_fsdp.sh
+@@ -15,6 +15,7 @@ TEACHER_WORLD_SIZE=${TEACHER_WORLD_SIZE:-8}
+ 
+ distillation_loss_mode=${DISTILLATION_LOSS_MODE:-k1}
+ use_policy_gradient=${USE_POLICY_GRADIENT:-True}
++use_task_rewards=${USE_TASK_REWARDS:-False}
+ distillation_topk=${DISTILLATION_TOPK:-64}
+ 
+ train_batch_size=${TRAIN_BATCH_SIZE:-128}
+@@ -26,6 +27,7 @@ ppo_max_token_len_per_gpu=${PPO_MAX_TOKEN_LEN_PER_GPU:-24576}
+ actor_lr=${ACTOR_LR:-1e-6}
+ 
+ rollout_tp=${ROLLOUT_TP:-2}
++rollout_num_workers=${ROLLOUT_NUM_WORKERS:-8}
+ rollout_gpu_mem_util=${ROLLOUT_GPU_MEM_UTIL:-0.4}
+ teacher_tp=${TEACHER_TP:-8}
+ teacher_ep=${TEACHER_EP:-8}
+@@ -92,6 +94,7 @@ REF=(
+ 
+ ROLLOUT=(
+     actor_rollout_ref.rollout.name=vllm
++    actor_rollout_ref.rollout.agent.num_workers=${rollout_num_workers}
+     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1
+     actor_rollout_ref.rollout.tensor_model_parallel_size=${rollout_tp}
+     actor_rollout_ref.rollout.gpu_memory_utilization=${rollout_gpu_mem_util}
+@@ -127,7 +130,7 @@ EXTRA=(
+     distillation.teacher_models.teacher_model.inference.max_model_len=${max_num_tokens}
+     distillation.distillation_loss.loss_mode=${distillation_loss_mode}
+     distillation.distillation_loss.topk=${distillation_topk}
+-    distillation.distillation_loss.use_task_rewards=False
++    distillation.distillation_loss.use_task_rewards=${use_task_rewards}
+     distillation.distillation_loss.use_policy_gradient=${use_policy_gradient}
+     distillation.distillation_loss.loss_max_clamp=10.0
+     distillation.distillation_loss.log_prob_min_clamp=-10.0
+diff --git a/verl/experimental/agent_loop/agent_loop.py b/verl/experimental/agent_loop/agent_loop.py
+index 4a1f8a9..6ade213 100644
+--- a/verl/experimental/agent_loop/agent_loop.py
++++ b/verl/experimental/agent_loop/agent_loop.py
+@@ -28,6 +28,7 @@ and is designed to be fully replaceable by other agent frameworks such as:
+ """
+ 
+ import asyncio
++import inspect
+ import logging
+ import os
+ import random
+@@ -92,6 +93,10 @@ class AgentLoopOutput(BaseModel):
+ 
+     prompt_ids: list[int]
+     """Prompt token ids."""
++    hint_prompt_ids: Optional[list[int]] = None
++    """Hint-augmented prompt token ids (PTD-PO teacher context), if any."""
++    hint_multi_modal_inputs: Optional[dict[str, Any]] = None
++    """Multi-modal inputs of the hint-augmented prompt (PTD-PO teacher context)."""
+     response_ids: list[int]
+     """Response token ids including LLM generated token, tool response token."""
+     response_mask: list[int]
+@@ -180,6 +185,16 @@ class _InternalAgentLoopOutput(AgentLoopOutput):
+     """Padded log probabilities from teacher model for prompt/response tokens."""
+     teacher_ids: Optional[torch.Tensor] = None
+     """Padded token ids corresponding to the teacher log probabilities."""
++    hint_input_ids: Optional[torch.Tensor] = None
++    """Padded hint-augmented prompt token ids (PTD-PO)."""
++    hint_attention_mask: Optional[torch.Tensor] = None
++    """Padded attention mask for the hint prompt."""
++    hint_position_ids: Optional[torch.Tensor] = None
++    """Padded position ids for the hint prompt."""
++    hint_teacher_position_ids: Optional[torch.Tensor] = None
++    """M-RoPE position ids for the full teacher sequence (hint prompt + response)."""
++    hint_multi_modal_inputs: Optional[dict[str, Any]] = None
++    """Multi-modal inputs of the hint-augmented prompt (PTD-PO)."""
+     routed_experts: Optional[torch.Tensor] = None
+     """Padded routed experts for the total tokens."""
+     multi_modal_inputs: Optional[dict[str, torch.Tensor]] = None
+@@ -831,6 +846,60 @@ class AgentLoopWorker:
+                 output.multi_modal_data.get("audios") if output.multi_modal_data else None
+             ),
+         )
++
++        # PTD-PO: tokenize/pad the hint-augmented prompt (teacher context).
++        hint_input_ids = hint_attention_mask = hint_position_ids = hint_teacher_position_ids = None
++        hint_multi_modal_inputs = output.hint_multi_modal_inputs
++        if output.hint_prompt_ids:
++            hint_prompt_output = self._pad_token_ids(
++                output.hint_prompt_ids,
++                max_length=self.rollout_config.prompt_length,
++                padding_side="left",
++                return_attention_mask=True,
++            )
++            hint_input_ids = hint_prompt_output["input_ids"]
++            hint_attention_mask = hint_prompt_output["attention_mask"]
++            hint_position_ids = self._compute_position_ids(
++                hint_input_ids,
++                hint_attention_mask,
++                dict(hint_multi_modal_inputs) if hint_multi_modal_inputs else dict(multi_modal_inputs),
++                output.mm_processor_kwargs
++                if output.mm_processor_kwargs is not None
++                else self._get_mm_processor_kwargs(
++                    output.multi_modal_data.get("audios") if output.multi_modal_data else None
++                ),
++            )
++            # PTD-PO: the processor tokenizes the hint with a large image patch grid,
++            # so the hint width can exceed rollout.prompt_length for image-heavy rows
++            # even though the vLLM-tokenized student prompt fits. Everything the hint
++            # touches (the torch.cat in _postprocess, the fusion engine teacher
++            # forward) assumes one batch-wide width == prompt_length, so an over-wide
++            # hint kernel must be dropped just like a QC-rejected row (the ptd_mask
++            # has_hint gate excludes it from the distillation loss).
++            if hint_input_ids.size(1) > self.rollout_config.prompt_length:
++                hint_input_ids = hint_attention_mask = hint_position_ids = None
++                hint_multi_modal_inputs = None
++            if hint_input_ids is not None:
++                # PTD-PO: M-RoPE positions for the *full* teacher sequence (hint
++                # prompt + response). The trainer's teacher forward passes these to
++                # the language model directly, which expects the [4, B, seq] layout
++                # (text/time/height/width) and does NOT recompute them. Only valid
++                # when the hint kernel survived the over-width guard above.
++                teacher_ids_for_pos = torch.cat([hint_input_ids, response_output["input_ids"]], dim=-1)
++                teacher_attn_for_pos = torch.cat(
++                    [hint_attention_mask, response_output["attention_mask"]], dim=-1
++                )
++                hint_teacher_position_ids = self._compute_position_ids(
++                    teacher_ids_for_pos,
++                    teacher_attn_for_pos,
++                    dict(hint_multi_modal_inputs) if hint_multi_modal_inputs else dict(multi_modal_inputs),
++                    output.mm_processor_kwargs
++                    if output.mm_processor_kwargs is not None
++                    else self._get_mm_processor_kwargs(
++                        output.multi_modal_data.get("audios") if output.multi_modal_data else None
++                    ),
++                )
++
+         await self._compute_score([output], kwargs=kwargs)
+         await self._compute_teacher_logprobs(
+             output,
+@@ -871,6 +940,11 @@ class AgentLoopWorker:
+             mm_processor_kwargs=output.mm_processor_kwargs,
+             teacher_logprobs=teacher_logprobs,
+             teacher_ids=teacher_ids,
++            hint_input_ids=hint_input_ids,
++            hint_attention_mask=hint_attention_mask,
++            hint_position_ids=hint_position_ids,
++            hint_teacher_position_ids=hint_teacher_position_ids,
++            hint_multi_modal_inputs=hint_multi_modal_inputs,
+             reward_score=output.reward_score,
+             num_turns=output.num_turns,
+             metrics=output.metrics,
+@@ -927,8 +1001,12 @@ class AgentLoopWorker:
+             "image_grid_thw": multi_modal_inputs.get("image_grid_thw"),
+             "video_grid_thw": multi_modal_inputs.get("video_grid_thw"),
+         }
+-        # For transformers>=5.3.0, mm_token_type_ids is only used to calculate position ids.
+-        if multi_modal_inputs.pop("mm_token_type_ids", None) is not None:
++        # For transformers>=5.3.0, mm_token_type_ids is only used to calculate
++        # position ids. Qwen3-VL's get_rope_index requires it as a positional arg;
++        # derive it from the (possibly padded) input_ids whenever the bound method
++        # accepts it, so the hint context (which carries no mm_token_type_ids after
++        # the PTD-PO cleanup) still computes correct M-RoPE positions.
++        if "mm_token_type_ids" in inspect.signature(self.processor.get_rope_index).parameters:
+             mm_token_type_ids = torch.zeros_like(input_ids)
+             image_token_id = get_processor_token_id(self.processor, "image")
+             video_token_id = get_processor_token_id(self.processor, "video")
+@@ -1069,6 +1147,70 @@ class AgentLoopWorker:
+         if inputs[0].teacher_logprobs is not None and inputs[0].teacher_ids is not None:
+             optional_outputs["teacher_logprobs"] = torch.cat([input.teacher_logprobs for input in inputs], dim=0)
+             optional_outputs["teacher_ids"] = torch.cat([input.teacher_ids for input in inputs], dim=0)
++        hint_items = [input for input in inputs if input.hint_input_ids is not None]
++        # PTD-PO: whether this run carries hint-augmented prompts at all. A chunk
++        # whose samples all lack a hint (QC-rejected rows) must still emit the hint
++        # keys — zero-filled — so every worker chunk carries an identical key set.
++        # DataProto.concat -> torch.cat (_check_keys strict=True) requires the key
++        # sets to match exactly, otherwise it raises KeyError (the step-7 crash).
++        # Gate on the data column `prompt_with_hint` so plain non-PTD GRPO runs
++        # (no hint column) are left untouched.
++        ptd_run = bool(input_non_tensor_batch) and "prompt_with_hint" in input_non_tensor_batch
++        if hint_items or ptd_run:
++            ref_hint = hint_items[0] if hint_items else None
++            if ref_hint is not None:
++                # hint_input_ids is NOT normalized to rollout.prompt_length by the
++                # top-of-function pad (over-wide hints were dropped to None) and every
++                # remaining per-sample hint *is* padded to exactly prompt_length, so the
++                # un-padded fallback width below must match or the concat crashes.
++                hint_width = ref_hint.hint_input_ids.size(1)
++                for input in inputs:
++                    if input.hint_input_ids is None:
++                        # sample without a hint (e.g. QC-rejected): zero tensors, same
++                        # shape as the reference hint; teacher top-K will be zeroed by
++                        # the ptd_mask (has_hint) in the trainer.
++                        input.hint_input_ids = torch.zeros_like(ref_hint.hint_input_ids)
++                        input.hint_attention_mask = torch.zeros_like(ref_hint.hint_attention_mask)
++                        input.hint_position_ids = torch.zeros_like(ref_hint.hint_position_ids)
++                        input.hint_teacher_position_ids = torch.zeros_like(ref_hint.hint_teacher_position_ids)
++                optional_outputs["hint_input_ids"] = torch.cat([input.hint_input_ids for input in inputs], dim=0)
++                optional_outputs["hint_attention_mask"] = torch.cat(
++                    [input.hint_attention_mask for input in inputs], dim=0
++                )
++                optional_outputs["hint_position_ids"] = torch.cat(
++                    [input.hint_position_ids for input in inputs], dim=0
++                )
++                optional_outputs["hint_teacher_position_ids"] = torch.cat(
++                    [input.hint_teacher_position_ids for input in inputs], dim=0
++                )
++            else:
++                # No hint in this whole chunk: synthesize zero tensors with the same
++                # shapes a hint chunk would produce (prompt/response widths and the
++                # batch's M-RoPE row count), so concat sees an identical key set.
++                bsz = len(inputs)
++                prompt_len = prompt_ids.size(1)
++                resp_len = response_ids.size(1)
++                optional_outputs["hint_input_ids"] = torch.zeros((bsz, prompt_len), dtype=prompt_ids.dtype)
++                optional_outputs["hint_attention_mask"] = torch.zeros(
++                    (bsz, prompt_len), dtype=attention_mask.dtype
++                )
++                if position_ids.dim() == 3:
++                    # M-RoPE (Qwen3-VL): [bsz, 4, seq] (text/time/height/width).
++                    n_pos = position_ids.size(1)
++                    optional_outputs["hint_position_ids"] = torch.zeros(
++                        (bsz, n_pos, prompt_len), dtype=position_ids.dtype
++                    )
++                    optional_outputs["hint_teacher_position_ids"] = torch.zeros(
++                        (bsz, n_pos, prompt_len + resp_len), dtype=position_ids.dtype
++                    )
++                else:
++                    # 1-D positions: [bsz, seq].
++                    optional_outputs["hint_position_ids"] = torch.zeros(
++                        (bsz, prompt_len), dtype=position_ids.dtype
++                    )
++                    optional_outputs["hint_teacher_position_ids"] = torch.zeros(
++                        (bsz, prompt_len + resp_len), dtype=position_ids.dtype
++                    )
+         batch = TensorDict(
+             {
+                 "prompts": prompt_ids,  # [bsz, prompt_length]
+@@ -1107,6 +1249,16 @@ class AgentLoopWorker:
+         multi_modal_inputs_list = [input.multi_modal_inputs for input in inputs]
+         if any(mmi is not None for mmi in multi_modal_inputs_list):
+             non_tensor_batch["multi_modal_inputs"] = np.array(multi_modal_inputs_list, dtype=object)
++        # PTD-PO: hint-context multi-modal inputs (teacher forward uses these so
++        # image tokens in hint_input_ids match the pixel_values/grid it gets).
++        # Emit the key on EVERY worker of a PTD run (None entries where a sample
++        # has no hint) so the non_tensor key set is uniform — the downstream
++        # DataProto.concat -> list_of_dict_to_dict_of_list asserts the keys of all
++        # worker dicts match the first worker's, so a hint-less worker that drops
++        # this key would crash a batch that otherwise concats fine.
++        hint_mm_list = [input.hint_multi_modal_inputs for input in inputs]
++        if any(mmi is not None for mmi in hint_mm_list) or ptd_run:
++            non_tensor_batch["hint_multi_modal_inputs"] = np.array(hint_mm_list, dtype=object)
+ 
+         metrics = [input.metrics.model_dump() for input in inputs]
+         # Collect extra fields from all inputs and convert them to np.ndarray
+diff --git a/verl/experimental/agent_loop/single_turn_agent_loop.py b/verl/experimental/agent_loop/single_turn_agent_loop.py
+index dda94de..f775ac9 100644
+--- a/verl/experimental/agent_loop/single_turn_agent_loop.py
++++ b/verl/experimental/agent_loop/single_turn_agent_loop.py
+@@ -13,12 +13,15 @@
+ # limitations under the License.
+ import logging
+ import os
++import re
+ from typing import Any
+ from uuid import uuid4
+ 
+ from verl.experimental.agent_loop.agent_loop import AgentLoopBase, AgentLoopOutput, register
+ from verl.utils.profiler import simple_timer
+ from verl.utils.rollout_trace import rollout_trace_op
++from verl.utils.tokenizer.chat_template import apply_chat_template as _apply_chat_template
++from verl.utils.tokenizer.tokenizer import build_multimodal_processor_inputs, normalize_token_ids
+ from verl.workers.rollout.replica import TokenOutput
+ 
+ logger = logging.getLogger(__file__)
+@@ -60,6 +63,69 @@ class SingleTurnAgentLoop(AgentLoopBase):
+                 mm_processor_kwargs=mm_processor_kwargs,
+             )
+ 
++        # PTD-PO: tokenize the hint-augmented prompt (teacher context) with the
++        # same images; used by the trainer's hint-conditioned reference forward.
++        hint_prompt_ids = None
++        hint_multi_modal_inputs = None
++        hint_messages = kwargs.get("prompt_with_hint")
++        # Note: the hint parquet stores rejected rows as prompt_with_hint == []
++        # (verified 2026-09-04: 5,712 of 38,348 rows are empty-list), so an empty
++        # hint means "no hint" and is handled by the has_hint ptd gate. The
++        # {"no-hint"} check below is only a defensive alias for the same state.
++        if hint_messages and not use_continuous_token:
++            # The hint context is plain text with a literal "<image>" placeholder
++            # (build_mmf_hints.py), which Qwen3-VL's chat template does NOT expand
++            # into vision tokens. Rebuild it as structured content so that
++            # apply_chat_template injects the image(s) properly.
++            hint_text = str(hint_messages[0].get("content", ""))
++            hint_text = re.sub(r"<image>", "", hint_text)
++            hint_content: list[dict[str, Any]] = [{"type": "image"} for _ in (images or [])]
++            hint_content.append({"type": "text", "text": hint_text})
++            hint_messages = [{"role": "user", "content": hint_content}]
++            # Tokenize with the processor directly so we can keep the *hint's own*
++            # multi-modal inputs (pixel_values/grid). The rollout prompt's mm is
++            # produced by the vLLM server with different image preprocessing, so
++            # reusing it for the teacher forward would mismatch the hint tokens.
++            raw_hint = await self.loop.run_in_executor(
++                None,
++                lambda: _apply_chat_template(
++                    self.processor,
++                    list(hint_messages),
++                    add_generation_prompt=True,
++                    tokenize=False,
++                    **self.apply_chat_template_kwargs,
++                ),
++            )
++            hint_model_inputs = build_multimodal_processor_inputs(
++                self.processor,
++                text=[raw_hint],
++                images=images,
++                videos=videos,
++                audio=audios,
++                mm_processor_kwargs=mm_processor_kwargs,
++            )
++            hint_prompt_ids = normalize_token_ids(hint_model_inputs.pop("input_ids"))
++            # Drop text-side tensors tied to the *unpadded* hint length: the trainer
++            # pads hint_input_ids to prompt_length and rebuilds attention/positions,
++            # and Qwen3-VL's forward requires mm_token_type_ids aligned to the full
++            # teacher sequence (the trainer rebuilds it from teacher_ids).
++            hint_model_inputs.pop("attention_mask", None)
++            hint_model_inputs.pop("mm_token_type_ids", None)
++            hint_multi_modal_inputs = dict(hint_model_inputs)
++            # PTD-PO: hint is tokenized by the *processor* (big image patch grid),
++            # so its width can exceed rollout.prompt_length for image-heavy rows
++            # while the vLLM-tokenized student prompt stays <= prompt_length.
++            # The hint tensors get padded to prompt_length and concatenated across
++            # the batch in _postprocess, and the teacher forward in the fusion
++            # engine slices the student attention at ``hint width`` — both require
++            # hint width == student prompt width. Truncating a multimodal hint
++            # corrupts image-token <-> pixel_values alignment, so treat over-length
++            # hints like QC-rejected rows: no hint at all (the ptd mask's has_hint
++            # gate already excludes them from the distillation loss).
++            if len(hint_prompt_ids) > self.prompt_length:
++                hint_prompt_ids = None
++                hint_multi_modal_inputs = None
++
+         # 3. generate sequences
+         metrics = {}
+         with simple_timer("generate_sequences", metrics):
+@@ -94,6 +160,8 @@ class SingleTurnAgentLoop(AgentLoopBase):
+ 
+         output: AgentLoopOutput = AgentLoopOutput(
+             prompt_ids=prompt_ids,
++            hint_prompt_ids=hint_prompt_ids,
++            hint_multi_modal_inputs=hint_multi_modal_inputs,
+             response_ids=response_ids[: self.response_length],
+             response_mask=response_mask[: self.response_length],
+             response_logprobs=response_logprobs[: self.response_length] if response_logprobs else None,
+diff --git a/verl/trainer/config/algorithm.py b/verl/trainer/config/algorithm.py
+index 6cef3c8..930c60c 100644
+--- a/verl/trainer/config/algorithm.py
++++ b/verl/trainer/config/algorithm.py
+@@ -20,6 +20,13 @@ from verl.base_config import BaseConfig
+ __all__ = ["AlgoConfig", "FilterGroupsConfig", "KLControlConfig", "RolloutCorrectionConfig"]
+ 
+ 
++def _default_ptd():
++    """Lazy default factory to avoid a circular import (workers.config <- trainer.config)."""
++    from verl.workers.config import PtdConfig
++
++    return PtdConfig()
++
++
+ @dataclass
+ class KLControlConfig(BaseConfig):
+     """Configuration for KL control.
+@@ -670,3 +677,5 @@ class AlgoConfig(BaseConfig):
+     # gdpo_reward_weights: per-dimension weights for aggregation (default: equal weights).
+     gdpo_reward_keys: Optional[list[str]] = None
+     gdpo_reward_weights: Optional[list[float]] = None
++    # PTD-PO: privileged tutoring distillation (arXiv:2606.07000)
++    ptd: Any = field(default_factory=_default_ptd)
+diff --git a/verl/trainer/config/ppo_trainer.yaml b/verl/trainer/config/ppo_trainer.yaml
+index 8981433..21c084c 100644
+--- a/verl/trainer/config/ppo_trainer.yaml
++++ b/verl/trainer/config/ppo_trainer.yaml
+@@ -127,8 +127,47 @@ algorithm:
+     # Method for reweighting samples: "pow", "max_min", or "max_random"
+     reweight_method: pow
+ 
+-    # Power used for weight scaling in "pow" method
+-    weight_pow: 2.0
++  # Power used for weight scaling in "pow" method
++  weight_pow: 2.0
++
++  # PTD-PO: privileged tutoring distillation (arXiv:2606.07000)
++  ptd:
++
++    # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
++    _target_: verl.workers.config.PtdConfig
++
++    # Whether to enable PTD
++    enable: False
++
++    # Group-accuracy threshold: PTD activates on failed trajectories in groups with acc < threshold
++    threshold: 1.0
++
++    # Top-K support for the student/teacher distributions (paper: 100)
++    top_k: 100
++
++    # Weight of the PTD JSD loss added to the GRPO policy loss (paper: 8B 5e-2)
++    coef: 5.0e-2
++
++    # Divergence direction: "jsd_kl" (paper), "forward_kl", or "reverse_kl"
++    kl_direction: jsd_kl
++
++    # True: teacher = frozen reference policy with hint-augmented context
++    use_ref_teacher: True
++
++    # False (paper): only failed trajectories; True: all trajectories in PTD groups
++    all_trajectories: False
++
++    # Dataset column holding the hint-augmented chat messages
++    prompt_with_hint_key: prompt_with_hint
++
++    # Upper clamp for the per-token PTD loss
++    loss_max_clamp: 10.0
++
++    # Lower clamp for the per-token PTD log probabilities
++    log_prob_min_clamp: -10.0
++
++    # Vocabulary size used for tail-mass approximation of top-K misses
++    vocab_size: 151936
+ 
+ # config for the trainer
+ trainer:
+diff --git a/verl/trainer/distillation/fsdp/losses.py b/verl/trainer/distillation/fsdp/losses.py
+index 602d387..51fb039 100644
+--- a/verl/trainer/distillation/fsdp/losses.py
++++ b/verl/trainer/distillation/fsdp/losses.py
+@@ -15,6 +15,7 @@
+ 
+ import torch
+ import torch.nn.functional as F
++import math
+ 
+ from verl.utils.ulysses import (
+     get_ulysses_sequence_parallel_world_size,
+@@ -147,3 +148,112 @@ def compute_forward_kl_topk(
+         "overlap_count": overlap_count,
+         "overlap_token_advantage": overlap_token_advantage,
+     }
++
++
++def _topk_match_and_gather(
++    query_ids: torch.Tensor,
++    key_topk_log_probs: torch.Tensor,
++    key_topk_ids: torch.Tensor,
++    vocab_size: int = 150000,
++) -> torch.Tensor:
++    """For each query index, look it up in key's stored top-K and return log-prob.
++
++    Indices not found in key's top-K are approximated as uniform over key's
++    remaining tail mass: log(tail_mass / (vocab_size - M)). Ported from
++    PTD-PO (arXiv:2606.07000) ``compute_topk_kl``.
++    """
++    M = key_topk_ids.shape[-1]
++    match = query_ids.unsqueeze(-1).eq(key_topk_ids.unsqueeze(-2))  # [B,T,K,M]
++    lp_matched = (match.float() * key_topk_log_probs.unsqueeze(-2)).sum(-1)  # [B,T,K]
++    has_match = match.any(-1)
++    key_tail_mass = (1.0 - key_topk_log_probs.exp().sum(-1)).clamp(min=1e-10)  # [B,T]
++    vocab_miss_count = max(1, vocab_size - M)
++    miss_lp = (key_tail_mass.log() - math.log(vocab_miss_count)).unsqueeze(-1)
++    return torch.where(has_match, lp_matched, miss_lp.expand_as(lp_matched))
++
++
++def compute_jsd_topk(
++    student_logits: torch.Tensor,
++    teacher_topk_log_probs: torch.Tensor,
++    teacher_topk_ids: torch.Tensor,
++    config: DistillationConfig,
++    data_format: str,
++) -> dict[str, torch.Tensor]:
++    """Per-token JSD (with tail compensation) between student and teacher top-K.
++
++    Same interface as :func:`compute_forward_kl_topk`. The support is the
++    student's top-K; teacher probabilities at those tokens are gathered from the
++    teacher's own top-K (tail-uniform approximation for misses), and both tail
++    masses are preserved, so the divergence is a proper JSD over the compressed
++    distributions (PTD-PO, arXiv:2606.07000).
++    """
++    assert teacher_topk_log_probs.is_nested and teacher_topk_ids.is_nested
++    teacher_topk_log_probs = teacher_topk_log_probs.values().unsqueeze(0)  # (1, total_nnz, K)
++    teacher_topk_ids = teacher_topk_ids.values().unsqueeze(0)
++
++    if get_ulysses_sequence_parallel_world_size() > 1:
++        teacher_topk_log_probs = slice_input_tensor(teacher_topk_log_probs, dim=1)
++        teacher_topk_ids = slice_input_tensor(teacher_topk_ids, dim=1)
++    assert teacher_topk_log_probs.shape[:2] == teacher_topk_ids.shape[:2] == student_logits.shape[:2]
++
++    loss_config: DistillationLossConfig = config.distillation_loss
++    K = teacher_topk_ids.shape[-1]
++    vocab_size = loss_config.vocab_size or 150000
++    kl_direction = loss_config.kl_direction
++
++    # student top-K from logits (with grad)
++    student_log_probs = F.log_softmax(student_logits.float(), dim=-1)
++    student_topk_ids = torch.topk(student_log_probs, k=K, dim=-1).indices
++    student_topk_log_probs = torch.gather(student_log_probs, dim=-1, index=student_topk_ids)
++    student_topk_probs = student_topk_log_probs.exp()
++
++    # teacher log-probs at student top-K positions (detached)
++    teacher_lp_at_student = _topk_match_and_gather(
++        student_topk_ids,
++        teacher_topk_log_probs.detach(),
++        teacher_topk_ids.detach(),
++        vocab_size,
++    ).detach()
++    teacher_probs_at_student = teacher_lp_at_student.exp()
++
++    # tail masses in fp32 for numerical stability
++    p_tail_s = (1.0 - student_topk_probs.sum(-1)).to(torch.float32).clamp(min=1e-8)
++    p_tail_t = (1.0 - teacher_probs_at_student.sum(-1)).to(torch.float32).clamp(min=1e-8)
++
++    if kl_direction == "jsd_kl":
++        m_probs = 0.5 * (student_topk_probs + teacher_probs_at_student)
++        m_log_probs = m_probs.clamp(min=1e-10).log()
++        m_tail = 0.5 * (p_tail_s + p_tail_t)
++        m_tail_log = m_tail.clamp(min=1e-10).log()
++        # NOTE: do NOT stop-grad the student weights here. The released PTD-PO
++        # implementation applies ``.detach()`` on student_topk_probs / p_tail_s,
++        # which makes the whole JSD gradient vanish exactly (verified by finite
++        # differences), i.e. the released jsd_kl branch provides no training
++        # signal. We keep the mathematically correct JSD gradient; stability is
++        # handled by log_prob_min_clamp / loss_max_clamp instead.
++        kl_s_m = (student_topk_probs * (student_topk_log_probs - m_log_probs)).sum(-1) + (
++            p_tail_s * (p_tail_s.log() - m_tail_log)
++        )
++        kl_t_m = (teacher_probs_at_student * (teacher_lp_at_student - m_log_probs)).sum(-1) + (
++            p_tail_t * (p_tail_t.log() - m_tail_log)
++        )
++        distillation_losses = 0.5 * (kl_s_m + kl_t_m)
++    elif kl_direction == "forward_kl":
++        distillation_losses = (student_topk_probs * (student_topk_log_probs - teacher_lp_at_student)).sum(-1) + (
++            p_tail_s * (p_tail_s.log() - p_tail_t.log())
++        )
++    elif kl_direction == "reverse_kl":
++        distillation_losses = (
++            teacher_probs_at_student * (teacher_lp_at_student - student_topk_log_probs)
++        ).sum(-1) + (p_tail_t * (p_tail_t.log() - p_tail_s.log()))
++    else:
++        raise ValueError(f"Unknown kl_direction: {kl_direction}")
++
++    if loss_config.log_prob_min_clamp is not None:
++        distillation_losses = distillation_losses.clamp_min(loss_config.log_prob_min_clamp)
++
++    return {
++        "distillation_losses": distillation_losses,
++        "student_mass": student_topk_probs.sum(-1),
++        "teacher_mass": teacher_probs_at_student.sum(-1),
++    }
+diff --git a/verl/trainer/distillation/losses.py b/verl/trainer/distillation/losses.py
+index eb1e1bb..a7867bd 100644
+--- a/verl/trainer/distillation/losses.py
++++ b/verl/trainer/distillation/losses.py
+@@ -15,6 +15,7 @@
+ from dataclasses import dataclass, field
+ from typing import Any, Callable, Optional
+ 
++import numpy as np
+ import torch
+ from tensordict import TensorDict
+ 
+@@ -109,11 +110,24 @@ def get_distillation_loss_settings(loss_name: str) -> DistillationLossSettings:
+ def compute_distillation_loss_range(
+     distillation_losses: torch.Tensor, response_mask: torch.Tensor
+ ) -> dict[str, Metric]:
+-    """Compute min and max distillation loss over valid response tokens."""
++    """Compute min and max distillation loss over valid response tokens.
++
++    Empty-safe: PTD-PO masks distillation to failed+hinted trajectories, so a
++    micro-batch can legitimately contain zero active tokens (every trajectory
++    succeeded or lacked a hint). ``.min()``/``.max()`` on an empty tensor raises
++    ``RuntimeError: min(): Expected reduction dim to be specified for
++    input.numel() == 0``, so fall back to zero-valued metrics instead of crashing.
++    """
+     if response_mask.is_nested:
+         distillation_losses_response = distillation_losses[response_mask.bool().to_padded_tensor(False)]
+     else:
+         distillation_losses_response = distillation_losses[response_mask.bool()]
++    if distillation_losses_response.numel() == 0:
++        zero = distillation_losses.new_zeros(())
++        return {
++            "distillation/loss_min": Metric(AggregationType.MIN, zero.clone()),
++            "distillation/loss_max": Metric(AggregationType.MAX, zero.clone()),
++        }
+     return {
+         "distillation/loss_min": Metric(AggregationType.MIN, distillation_losses_response.min()),
+         "distillation/loss_max": Metric(AggregationType.MAX, distillation_losses_response.max()),
+@@ -136,11 +150,18 @@ def compute_topk_loss(
+     """
+     match config.strategy:
+         # VeOmni uses FSDP2 internally, so its loss computation is identical to FSDP.
+-        case "fsdp" | "veomni":
++        # Plain fsdp2 is likewise identical loss-wise (sharding strategy does not change
++        # the top-k distillation math); only missing actor.strategy was not dispatched.
++        case "fsdp" | "fsdp2" | "veomni":
+             import verl.trainer.distillation.fsdp.losses as fsdp_losses
+ 
+-            distillation_loss_fn = fsdp_losses.compute_forward_kl_topk
++            if distillation_config.distillation_loss.loss_mode == "jsd_topk":
++                distillation_loss_fn = fsdp_losses.compute_jsd_topk
++            else:
++                distillation_loss_fn = fsdp_losses.compute_forward_kl_topk
+         case "megatron":
++            if distillation_config.distillation_loss.loss_mode == "jsd_topk":
++                raise NotImplementedError("jsd_topk is not supported on the megatron engine")
+             import verl.trainer.distillation.megatron.losses as megatron_losses
+ 
+             distillation_loss_fn = megatron_losses.compute_forward_kl_topk
+@@ -252,6 +273,28 @@ def distillation_loss(
+     response_mask = data["response_mask"]
+     loss_agg_mode = config.loss_agg_mode
+ 
++    # PTD-PO: mask distillation to failed trajectories (non-tensor ptd_mask [B])
++    ptd_mask = data.get("ptd_mask", None)
++    if ptd_mask is not None:
++        # ptd_mask reaches the micro-batch as a tensordict NonTensorStack (one
++        # NonTensorData per sample). np.asarray() on a NonTensorStack dispatches to
++        # tensordict's __getitem__, which raises "indexing a tensordict with
++        # td.batch_dims==0 is not permitted. Got index 0." instead of iterating.
++        # Extract the underlying per-sample scalar explicitly.
++        ptd_mask_vals = [getattr(e, "data", e) for e in ptd_mask]
++        ptd_m = torch.as_tensor(
++            np.asarray(ptd_mask_vals, dtype=np.float32), device=distillation_losses.device
++        ).unsqueeze(-1)
++        if ptd_m.shape[0] != distillation_losses.shape[0]:
++            raise RuntimeError(
++                f"ptd_mask batch {ptd_m.shape[0]} != distillation losses batch "
++                f"{distillation_losses.shape[0]}"
++            )
++        distillation_losses = distillation_losses * ptd_m
++        if response_mask.is_nested:
++            response_mask = response_mask.to_padded_tensor(False)
++        response_mask = response_mask & (ptd_m > 0)
++
+     distillation_metrics.update(
+         compute_distillation_loss_range(distillation_losses=distillation_losses, response_mask=response_mask)
+     )
+@@ -302,6 +345,48 @@ def distillation_loss(
+     return distillation_loss, distillation_metrics
+ 
+ 
++@register_distillation_loss(DistillationLossSettings(names=["jsd_topk"], use_topk=True))  # type: ignore[arg-type]
++def compute_jsd_topk(
++    config: ActorConfig,
++    distillation_config: DistillationConfig,
++    model_output: dict,
++    data: TensorDict,
++) -> tuple[torch.Tensor, dict[str, Any]]:
++    """PTD-PO JSD top-K distillation loss (final-loss variant).
++
++    The per-token JSD was already computed by the logits processor
++    (``fsdp_losses.compute_jsd_topk``); here we convert it back to the padded
++    response layout, expose PTD metrics, and clamp to non-negative values.
++    """
++    distillation_losses = no_padding_2_padding(model_output["distillation_losses"], data)
++    student_mass = no_padding_2_padding(model_output["student_mass"], data)
++    teacher_mass = no_padding_2_padding(model_output["teacher_mass"], data)
++    if data["response_mask"].is_nested:
++        response_mask_bool = data["response_mask"].bool().to_padded_tensor(False)
++    else:
++        response_mask_bool = data["response_mask"].bool()
++    assert (
++        distillation_losses.shape
++        == student_mass.shape
++        == teacher_mass.shape
++        == response_mask_bool.shape
++    ), (
++        f"{distillation_losses.shape=} {student_mass.shape=} "
++        f"{teacher_mass.shape=} {response_mask_bool.shape=}"
++    )
++
++    distillation_losses = distillation_losses.clamp_min(0.0)
++    valid = response_mask_bool
++    s_mass = student_mass[valid]
++    t_mass = teacher_mass[valid]
++    distillation_metrics = {
++        "ptd/jsd_mean": distillation_losses[valid].mean().item(),
++        "ptd/student_mass": s_mass.mean().item() if s_mass.numel() else 0.0,
++        "ptd/teacher_mass": t_mass.mean().item() if t_mass.numel() else 0.0,
++    }
++    return distillation_losses, distillation_metrics
++
++
+ @register_distillation_loss(DistillationLossSettings(names=["forward_kl_topk"], use_topk=True))  # type: ignore[arg-type]
+ def compute_forward_kl_topk(
+     config: ActorConfig,
+diff --git a/verl/trainer/ppo/ray_trainer.py b/verl/trainer/ppo/ray_trainer.py
+index 908d36b..45019e2 100644
+--- a/verl/trainer/ppo/ray_trainer.py
++++ b/verl/trainer/ppo/ray_trainer.py
+@@ -346,6 +346,10 @@ class RayPPOTrainer:
+         self.use_rm = need_reward_model(self.config)
+ 
+         self.use_critic = need_critic(self.config)
++        # PTD-PO: privileged tutoring distillation (arXiv:2606.07000)
++        ptd_omega = self.config.algorithm.get("ptd", None)
++        self.ptd_enabled = bool(ptd_omega is not None and getattr(ptd_omega, "enable", False))
++        self.ptd_config = ptd_omega if self.ptd_enabled else None
+         self.ray_worker_group_cls = ray_worker_group_cls
+         self.device_name = device_name if device_name else self.config.trainer.device
+         self.validation_generations_logger = ValidationGenerationsLogger(
+@@ -788,6 +792,7 @@ class RayPPOTrainer:
+                 cls=self.role_worker_mapping[actor_role],
+                 config=self.config.actor_rollout_ref,
+                 distillation_config=self.config.get("distillation"),
++                ptd_config=self.ptd_config,
+                 role=str(actor_role),
+             )
+             self.resource_pool_to_cls[actor_rollout_resource_pool][str(actor_role)] = actor_rollout_cls
+@@ -1262,6 +1267,59 @@ class RayPPOTrainer:
+ 
+         return ref_log_prob
+ 
++    def _compute_teacher_log_prob(self, batch: DataProto) -> DataProto | None:
++        """PTD-PO: hint-augmented reference forward -> teacher top-K for the batch."""
++        if "hint_input_ids" not in batch.batch:
++            return None
++        batch_td = batch.to_tensordict()
++        if self.ref_in_actor:
++            output = self.actor_rollout_wg.compute_teacher_log_prob(batch_td)
++        else:
++            output = self.ref_policy_wg.compute_teacher_log_prob(batch_td)
++        teacher_logprobs = tu.get(output, "teacher_logprobs")  # [B, R, K] padded cpu
++        teacher_ids = tu.get(output, "teacher_ids")
++        # assemble into the student full-sequence layout [B, P+R, K]
++        prompt_len = batch.batch["prompts"].shape[1]
++        full_len = batch.batch["input_ids"].shape[1]
++        K = teacher_logprobs.shape[-1]
++        full_lp = teacher_logprobs.new_zeros((teacher_logprobs.shape[0], full_len, K))
++        full_ids = teacher_ids.new_zeros((teacher_ids.shape[0], full_len, K))
++        resp_cols = slice(prompt_len, prompt_len + teacher_logprobs.shape[1])
++        full_lp[:, resp_cols, :] = teacher_logprobs
++        full_ids[:, resp_cols, :] = teacher_ids
++        return DataProto.from_tensordict(
++            tu.get_tensordict({"teacher_logprobs": full_lp, "teacher_ids": full_ids})
++        )
++
++    def _compute_ptd_mask(self, batch: DataProto) -> np.ndarray:
++        """Group-accuracy-based PTD mask (paper: failed trajectories in groups with acc < threshold)."""
++        scores = batch.batch["token_level_scores"].sum(-1).cpu().tolist()
++        uids = batch.non_tensor_batch.get("uid")
++        if uids is None:
++            uids = list(range(len(batch)))
++        group_acc: dict[Any, float] = {}
++        group_cnt: dict[Any, int] = {}
++        for s, u in zip(scores, uids, strict=True):
++            group_acc[u] = group_acc.get(u, 0.0) + float(s)
++            group_cnt[u] = group_cnt.get(u, 0) + 1
++        for u in group_acc:
++            group_acc[u] /= group_cnt[u]
++        acc_arr = np.array([group_acc[u] for u in uids], dtype=np.float32)
++        threshold = float(self.ptd_config.threshold)
++        if self.ptd_config.all_trajectories:
++            ptd_mask = acc_arr < threshold
++        else:
++            failed = np.asarray(scores, dtype=np.float32) < 0.5
++            ptd_mask = (acc_arr < threshold) & failed
++        # PTD-PO: only distill trajectories that carry a hint. Samples whose hint
++        # generation was rejected have all-zero hint_input_ids; without this AND they
++        # would distill against the zero-filled teacher (mass on the pad token).
++        hint_ids = batch.batch.get("hint_input_ids")
++        if hint_ids is not None:
++            has_hint = hint_ids.abs().sum(dim=-1).cpu().numpy() > 0
++            ptd_mask = ptd_mask & has_hint
++        return ptd_mask
++
+     def _compute_old_log_prob(self, batch: DataProto):
+         # TODO: remove step 1, 2, 4 after we make the whole training tensordict and padding free
+         # step 1: convert dataproto to tensordict.
+@@ -1311,7 +1369,7 @@ class RayPPOTrainer:
+         calculate_entropy = self.config.actor_rollout_ref.actor.calculate_entropy or (
+             self.config.actor_rollout_ref.actor.entropy_coeff != 0.0
+         )
+-        distillation_use_topk = (
++        distillation_use_topk = self.ptd_enabled or (
+             self.distillation_config.distillation_loss.loss_settings.use_topk
+             if is_distillation_enabled(self.config.get("distillation"))
+             else False
+@@ -1610,6 +1668,18 @@ class RayPPOTrainer:
+                         if reward_extra_infos_dict:
+                             batch.non_tensor_batch.update({k: np.array(v) for k, v in reward_extra_infos_dict.items()})
+ 
++                        # PTD-PO: mask failed trajectories by group accuracy and
++                        # compute the hint-augmented teacher top-K (ref forward).
++                        if self.ptd_enabled:
++                            ptd_mask = self._compute_ptd_mask(batch)
++                            batch.non_tensor_batch["ptd_mask"] = ptd_mask
++                            metrics["ptd/mask_ratio"] = ptd_mask.mean().item()
++                            metrics["ptd/active"] = int(ptd_mask.sum())
++                            with marked_timer("teacher_topk", timing_raw, color="purple"):
++                                teacher = self._compute_teacher_log_prob(batch)
++                            if teacher is not None:
++                                batch = batch.union(teacher)
++
+                         # compute rewards. apply_kl_penalty if available
+                         if self.config.algorithm.use_kl_in_reward:
+                             batch, kl_metrics = apply_kl_penalty(
+diff --git a/verl/workers/config/__init__.py b/verl/workers/config/__init__.py
+index b3635a1..7b3fbbe 100644
+--- a/verl/workers/config/__init__.py
++++ b/verl/workers/config/__init__.py
+@@ -12,7 +12,7 @@
+ # See the License for the specific language governing permissions and
+ # limitations under the License.
+ 
+-from . import actor, checkpoint, critic, disaggregation, engine, model, optimizer, reward, rollout
++from . import actor, checkpoint, critic, disaggregation, engine, model, optimizer, ptd, reward, rollout
+ from .actor import *  # noqa: F401
+ from .checkpoint import *  # noqa: F401
+ from .critic import *  # noqa: F401
+@@ -21,6 +21,7 @@ from .distillation import *  # noqa: F401
+ from .engine import *  # noqa: F401
+ from .model import *  # noqa: F401
+ from .optimizer import *  # noqa: F401
++from .ptd import *  # noqa: F401
+ from .reward import *  # noqa: F401
+ from .rollout import *  # noqa: F401
+ 
+@@ -33,6 +34,7 @@ __all__ = (
+     + rollout.__all__
+     + model.__all__
+     + distillation.__all__
++    + ptd.__all__
+     + disaggregation.__all__
+     + checkpoint.__all__
+ )
+diff --git a/verl/workers/config/distillation.py b/verl/workers/config/distillation.py
+index b58f8bc..b5f7212 100644
+--- a/verl/workers/config/distillation.py
++++ b/verl/workers/config/distillation.py
+@@ -81,6 +81,12 @@ class DistillationLossConfig(BaseConfig):
+     # overhead (saved-tensor total stays constant either way).
+     chunked_topk_chunk_size: int = 4096
+ 
++    # PTD-PO (arXiv:2606.07000) extensions:
++    # divergence direction for the top-K distillation loss
++    kl_direction: str = "forward_kl"
++    # vocabulary size used for tail-mass approximation of top-K misses
++    vocab_size: Optional[int] = None
++
+     use_policy_gradient: bool = True
+     policy_loss_mode: str = "vanilla"
+     clip_ratio: float = 0.2
+diff --git a/verl/workers/config/ptd.py b/verl/workers/config/ptd.py
+new file mode 100644
+index 0000000..ba49762
+--- /dev/null
++++ b/verl/workers/config/ptd.py
+@@ -0,0 +1,42 @@
++# Copyright 2026 Dual-Track-OPD contributors
++"""Configuration for PTD-PO (Privileged Tutoring Distillation) on verl V0.
++
++PTD complements GRPO with dense token-level supervision from a hint-augmented
++frozen reference model on failed trajectories (arXiv:2606.07000). It reuses the
++built-in top-K distillation machinery with a JSD loss mode and a custom teacher
++forward (ref model + hint context) instead of an external teacher server.
++"""
++
++from dataclasses import dataclass
++
++from verl.base_config import BaseConfig
++
++__all__ = ["PtdConfig"]
++
++
++@dataclass
++class PtdConfig(BaseConfig):
++    """PTD-PO configuration (nested under ``algorithm.ptd``)."""
++
++    enable: bool = False
++    # group-accuracy threshold: PTD activates on failed trajectories in groups
++    # whose accuracy < threshold (paper default 1.0 = all failed trajectories)
++    threshold: float = 1.0
++    # top-K support for the student/teacher distributions (paper: 100)
++    top_k: int = 100
++    # weight of the PTD JSD loss added to the GRPO policy loss (paper: 8B 5e-2)
++    coef: float = 5e-2
++    # divergence direction: "jsd_kl" (paper), or "forward_kl"/"reverse_kl"
++    kl_direction: str = "jsd_kl"
++    # True: teacher = frozen reference policy (hint-augmented). False: old-policy
++    # teacher (OPSD-style) -- not wired yet; keep True.
++    use_ref_teacher: bool = True
++    # False (paper): only failed trajectories. True: all trajectories in PTD groups.
++    all_trajectories: bool = False
++    # dataset column holding the hint-augmented chat messages
++    prompt_with_hint_key: str = "prompt_with_hint"
++    # numerical guards for the top-K JSD
++    loss_max_clamp: float = 10.0
++    log_prob_min_clamp: float = -10.0
++    # vocabulary size used for tail-mass approximation of miss tokens
++    vocab_size: int = 151936
+diff --git a/verl/workers/engine_workers.py b/verl/workers/engine_workers.py
+index c0ef011..fe5c0e9 100644
+--- a/verl/workers/engine_workers.py
++++ b/verl/workers/engine_workers.py
+@@ -39,6 +39,7 @@ from verl.utils.flops_counter import FlopsCounter
+ from verl.utils.import_utils import import_external_libs
+ from verl.utils.memory_utils import aggressive_empty_cache
+ from verl.utils.metric.utils import Metric
++from verl.utils.model import extract_multi_modal_inputs
+ from verl.utils.profiler import DistProfiler, DistProfilerExtension, ProfilerConfig, log_gpu_memory_usage
+ from verl.utils.py_functional import append_to_dict
+ from verl.utils.tensordict_utils import maybe_fix_3d_position_ids
+@@ -434,6 +435,165 @@ class TrainingWorker(Worker, DistProfilerExtension):
+ 
+         return final_output
+ 
++    @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="train"), blocking=False)
++    def compute_teacher_log_prob(self, data: TensorDict) -> TensorDict:
++        """PTD-PO: hint-augmented reference forward -> teacher top-K over response tokens.
++
++        Runs a padded forward with input = hint_prompt + student response on the
++        frozen reference model (no grad), computes top-K log-probs at response
++        positions, and returns padded ``[B, R, K]`` tensors on CPU.
++        """
++        # dispatch requires all args to be chunkable DataProto; scalar hyper-params
++        # are carried as worker attributes set by ActorRolloutRefWorker.
++        top_k = int(getattr(self, "ptd_top_k", 100))
++        temperature = float(getattr(self, "ptd_temperature", 1.0))
++        hint_input_ids = data["hint_input_ids"]
++        hint_attention_mask = data["hint_attention_mask"]
++        hint_position_ids = data["hint_position_ids"]
++        responses = data["responses"]
++        # get_torch_device() returns the platform *module* (torch.cuda), not a
++        # torch.device; build an explicit device for .to()/autocast.
++        device = torch.device(get_device_name())
++        bsz, resp_len = responses.shape
++
++        # The hint context carries its own multi-modal inputs (tokenized by the
++        # agent loop processor); using the rollout batch's mm would mismatch the
++        # image token count in hint_input_ids.
++        hint_mm_raw = data.get("hint_multi_modal_inputs", None)
++        # Per-sample hint mm dicts may carry text-side tensors (attention_mask /
++        # mm_token_type_ids) tied to the *unpadded* hint length; drop them here so
++        # they can't leak into the batched extract (lengths differ across samples).
++        # mm_token_type_ids is rebuilt from teacher_ids below, aligned to the full
++        # padded teacher sequence.
++        if hint_mm_raw is not None:
++            cleaned_mm: list[Optional[dict]] = []
++            for sample in hint_mm_raw:
++                if sample is None:
++                    cleaned_mm.append(None)
++                    continue
++                d = dict(sample)
++                for key in ("input_ids", "attention_mask", "mm_token_type_ids", "images_seqlens"):
++                    d.pop(key, None)
++                cleaned_mm.append(d)
++            hint_mm_raw = cleaned_mm
++        # Only rows that actually carry a hint participate in the teacher forward;
++        # no-hint rows (hint generator rejected) keep zero tensors and are masked
++        # out of the distillation loss by ptd_mask & has_hint in the trainer.
++        hint_rows = [
++            i for i in range(bsz) if hint_mm_raw is not None and hint_mm_raw[i] is not None
++        ]
++        n_hint = len(hint_rows)
++        if n_hint == 0:
++            return tu.get_tensordict(
++                {
++                    "teacher_logprobs": torch.zeros((bsz, resp_len, top_k), dtype=torch.float32),
++                    "teacher_ids": torch.zeros((bsz, resp_len, top_k), dtype=torch.long),
++                }
++            )
++
++        # Sub-batch only the hint rows; hint_input_ids/attention_mask are already
++        # padded to a fixed prompt length by the agent loop, so fancy indexing
++        # keeps the 2-D [n, prompt_length] layout.
++        sub_ids = hint_input_ids[hint_rows].to(device)
++        sub_resp = responses[hint_rows].to(device)
++        sub_attn = hint_attention_mask[hint_rows].to(device)
++        teacher_ids = torch.cat([sub_ids, sub_resp], dim=-1)
++        # Use the real response attention mask from the full student sequence.
++        # ``responses`` is right-padded; treating every padded token as valid makes
++        # the teacher context semantically wrong and creates meaningless top-K
++        # outputs at padding positions (even though causal attention usually hides
++        # the future padding from valid response positions).
++        full_attention_mask = data["attention_mask"]
++        sub_resp_attn = full_attention_mask[hint_rows, sub_ids.shape[1] :].to(device)
++        teacher_attn = torch.cat([sub_attn, sub_resp_attn], dim=-1)
++        # M-RoPE positions for the full teacher sequence (hint + response) were
++        # computed in the agent loop via the processor's get_rope_index. The
++        # Qwen3VLTextModel expects the [4, B, seq] layout (text/time/height/width
++        # on axis 0) and does not recompute positions, so transpose here.
++        sub_teacher_pos = data.get("hint_teacher_position_ids", hint_position_ids)[hint_rows].to(device)
++        if sub_teacher_pos.dim() == 3:
++            teacher_pos = sub_teacher_pos.transpose(0, 1)
++        else:
++            teacher_pos = torch.clip(teacher_attn.cumsum(dim=-1) - 1, min=0)
++
++        multi_modal_inputs = extract_multi_modal_inputs([hint_mm_raw[i] for i in hint_rows])
++        multi_modal_inputs = {
++            k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in multi_modal_inputs.items()
++        }
++        # Qwen3-VL raises if images are passed without mm_token_type_ids; rebuild it
++        # from the full teacher sequence so it is shape-consistent with teacher_ids.
++        image_token_id = getattr(getattr(self.model_config, "hf_config", None), "image_token_id", None)
++        if image_token_id is not None:
++            mm_token_type_ids = torch.zeros_like(teacher_ids)
++            mm_token_type_ids[teacher_ids == image_token_id] = 1
++            multi_modal_inputs["mm_token_type_ids"] = mm_token_type_ids
++
++        # pixel_values is concatenated across image patches ([total_patches, ...]),
++        # while image_grid_thw is per-sample ([B, 3]); slice pixel_values by the
++        # cumulative patch count of each sample so they stay consistent.
++        grids = multi_modal_inputs.get("image_grid_thw")
++        if grids is not None and "pixel_values" in multi_modal_inputs:
++            patch_lens = (grids[:, 0] * grids[:, 1] * grids[:, 2]).long()
++            patch_cum = torch.cat(
++                [torch.zeros(1, dtype=torch.long, device=grids.device), patch_lens.cumsum(0)]
++            )
++        else:
++            patch_cum = None
++        autocast_dtype = getattr(self.engine, "_autocast_dtype", torch.bfloat16)
++        # Keep chunks small: a hint row can be up to prompt_length + max_response
++        # tokens, and the eager logits tensor (vocab x seq) dominates memory.
++        mb = max(1, min(2, n_hint))
++        outs_lp: list[torch.Tensor] = []
++        outs_ids: list[torch.Tensor] = []
++        with torch.no_grad():
++            for i in range(0, n_hint, mb):
++                end = min(i + mb, n_hint)
++                mm = {}
++                for k, v in multi_modal_inputs.items():
++                    if not isinstance(v, torch.Tensor):
++                        mm[k] = v
++                    elif k == "pixel_values" and patch_cum is not None:
++                        mm[k] = v[patch_cum[i] : patch_cum[end]]
++                    else:
++                        mm[k] = v[i:end]
++                with self.engine.eval_mode(disable_auto_offload=True):
++                    with torch.autocast(device_type=get_device_name(), dtype=autocast_dtype):
++                        # teacher_pos is [4, B, seq] after the transpose above
++                        # (text/time/height/width on axis 0), so the micro-batch
++                        # must be sliced on dim=1. Slicing dim=0 would instead
++                        # take the first mb mRoPE components and crash inside
++                        # Qwen3VLRotaryEmbedding with a 3-vs-mb shape mismatch.
++                        pos_batch = (
++                            teacher_pos[:, i:end] if teacher_pos.dim() == 3 else teacher_pos[i:end]
++                        )
++                        logits = self.engine.module(
++                            input_ids=teacher_ids[i:end],
++                            attention_mask=teacher_attn[i:end],
++                            position_ids=pos_batch,
++                            use_cache=False,
++                            **mm,
++                        ).logits
++                # response-slice logits (predict response tokens given context up to them)
++                chunk = logits[:, -resp_len - 1 : -1, :].detach().clone()
++                del logits
++                chunk = chunk / max(float(temperature), 1e-8)
++                log_Z = torch.logsumexp(chunk.float(), dim=-1, keepdim=True)
++                _, topk_ids = torch.topk(chunk, k=top_k, dim=-1)
++                topk_log_probs = torch.gather(chunk.float(), -1, topk_ids) - log_Z
++                outs_lp.append(topk_log_probs.cpu())
++                outs_ids.append(topk_ids.cpu())
++
++        teacher_logprobs = torch.zeros((bsz, resp_len, top_k), dtype=torch.float32)
++        teacher_ids_out = torch.zeros((bsz, resp_len, top_k), dtype=torch.long)
++        teacher_logprobs[hint_rows] = torch.cat(outs_lp, dim=0)
++        teacher_ids_out[hint_rows] = torch.cat(outs_ids, dim=0)
++        return tu.get_tensordict(
++            {
++                "teacher_logprobs": teacher_logprobs,
++                "teacher_ids": teacher_ids_out,
++            }
++        )
++
+     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+     def save_checkpoint(self, local_path, hdfs_path=None, global_step=0, max_ckpt_to_keep=None):
+         return self.engine.save_checkpoint(local_path, hdfs_path, global_step, max_ckpt_to_keep)
+@@ -454,12 +614,19 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
+     ref_worker_cls = TrainingWorker
+ 
+     def __init__(
+-        self, config: DictConfig, role: str, distillation_config: Optional[DistillationConfig] = None, **kwargs
++        self,
++        config: DictConfig,
++        role: str,
++        distillation_config: Optional[DistillationConfig] = None,
++        ptd_config: Optional[DictConfig] = None,
++        **kwargs,
+     ):
+         Worker.__init__(self)
+         self.config = config
+         self.distillation_config = distillation_config
+         self.distillation_enabled = is_distillation_enabled(distillation_config)
++        self.ptd_config = ptd_config
++        self.ptd_enabled = bool(ptd_config is not None and getattr(ptd_config, "enable", False))
+         self.role = role
+         self.actor: TrainingWorker | None = None
+         self.ref: TrainingWorker | None = None
+@@ -633,6 +800,38 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
+                 self.loss_fn = partial(
+                     distillation_ppo_loss, config=actor_config, distillation_config=distillation_config
+                 )
++            elif self.ptd_enabled:
++                # PTD-PO reuses the built-in top-K distillation machinery with a
++                # synthetic DistillationConfig (loss_mode=jsd_topk, supervised
++                # backprop, GRPO policy loss kept via use_task_rewards=True).
++                from verl.workers.config import DistillationConfig, DistillationLossConfig
++
++                ptd_cfg = self.ptd_config
++                ptd_distillation_config = DistillationConfig(
++                    # enabled stays False: we select this loss_fn directly via
++                    # self.ptd_enabled, and DistillationConfig.__post_init__
++                    # would otherwise try to resolve external teacher models.
++                    enabled=False,
++                    n_gpus_per_node=1,
++                    nnodes=1,
++                    teacher_models={},
++                    distillation_loss=DistillationLossConfig(
++                        loss_mode="jsd_topk",
++                        topk=ptd_cfg.top_k,
++                        use_task_rewards=True,
++                        distillation_loss_coef=ptd_cfg.coef,
++                        use_policy_gradient=False,
++                        loss_max_clamp=ptd_cfg.loss_max_clamp,
++                        log_prob_min_clamp=ptd_cfg.log_prob_min_clamp,
++                        kl_direction=ptd_cfg.kl_direction,
++                        vocab_size=ptd_cfg.vocab_size,
++                    ),
++                )
++                self.loss_fn = partial(
++                    distillation_ppo_loss,
++                    config=actor_config,
++                    distillation_config=ptd_distillation_config,
++                )
+             else:
+                 self.loss_fn = partial(ppo_loss, config=actor_config)
+             self.actor = self.actor_worker_cls(config=actor_training_config)
+@@ -691,6 +890,15 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
+         output = self.ref.infer_batch(data=data)
+         return output.cpu() if output is not None else None
+ 
++    @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="ref"))
++    def compute_teacher_log_prob(self, data: TensorDict) -> TensorDict:
++        """PTD-PO teacher top-K: hint-augmented forward on the frozen ref policy."""
++        worker = self.ref if (self._is_ref and self.ref is not None) else self.actor
++        worker.ptd_top_k = int(self.ptd_config.top_k)
++        worker.ptd_temperature = float(self.config.rollout.temperature)
++        output = worker.compute_teacher_log_prob(data=data)
++        return output.cpu() if output is not None else None
++
+     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
+     @DistProfiler.annotate(color="blue", role="actor_compute_log_prob")
+     @_with_routing_replay_flag(enabled=True)
+diff --git a/verl/workers/rollout/vllm_rollout/vllm_async_server.py b/verl/workers/rollout/vllm_rollout/vllm_async_server.py
+index 730bc60..c65b4ec 100644
+--- a/verl/workers/rollout/vllm_rollout/vllm_async_server.py
++++ b/verl/workers/rollout/vllm_rollout/vllm_async_server.py
+@@ -74,6 +74,68 @@ logger = logging.getLogger(__file__)
+ logger.setLevel(logging.INFO)
+ 
+ 
++def _dump_engine_diag(exc: BaseException) -> str:
++    """Dump engine-init failure diagnostics to a file on shared storage.
++
++    Ray redirects actor subprocess stdout/stderr into the worker log, so the
++    EngineCore's "root cause" may never reach the user's terminal. The EngineCore
++    process inherits this process's stderr fd, so we tail /proc/self/fd/2 (the
++    Ray worker log) to capture it, plus GPU/memory snapshots.
++    """
++    import os
++    import subprocess
++    import time
++    import traceback
++
++    diag_dir = os.environ.get(
++        "VERL_DIAG_DIR",
++        "/inspire/hdd/global_user/mengweicheng-240108120092/lzy/fc-opd-storage/logs",
++    )
++    try:
++        os.makedirs(diag_dir, exist_ok=True)
++    except OSError:
++        diag_dir = "/tmp"
++    ts = time.strftime("%Y%m%d_%H%M%S")
++    path = os.path.join(diag_dir, f"vllm_engine_diag_{ts}_{os.getpid()}.log")
++
++    def _run(cmd):
++        try:
++            out = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
++            return f"\n=== {' '.join(cmd)} ===\n{out.stdout}\n{out.stderr}"
++        except Exception as e:  # noqa: BLE001
++            return f"\n[cmd {' '.join(cmd)} failed] {e}\n"
++
++    with open(path, "w") as f:
++        f.write(f"=== vLLM engine init failure ({ts}) pid={os.getpid()} ===\n")
++        f.write(traceback.format_exc())
++        try:
++            # WorkerProc's own traceback is logged asynchronously after the
++            # parent raises; give it a moment to flush before tailing.
++            time.sleep(5)
++            fd2 = os.path.realpath("/proc/self/fd/2")
++            f.write(f"\n=== stderr target: {fd2} ===\n")
++            candidates = [fd2]
++            if fd2.endswith(".err"):
++                candidates.append(fd2[:-4] + ".out")  # Ray splits stdout -> worker-*.out
++            for cand in candidates:
++                f.write(f"\n=== tail {cand} ===\n")
++                if os.path.isfile(cand):
++                    out = subprocess.run(["tail", "-n", "2500", cand], capture_output=True, text=True, timeout=30)
++                    f.write(out.stdout)
++                    if out.stderr:
++                        f.write(f"\n[tail err] {out.stderr}\n")
++                else:
++                    f.write("(not a regular file)\n")
++        except Exception as e:  # noqa: BLE001
++            f.write(f"\n[stderr read failed] {e}\n")
++        f.write(_run(["nvidia-smi"]))
++        f.write(_run(["free", "-g"]))
++    return path
++
++
++
++
++
+ class vLLMHttpServer:
+     """vLLM http server in single node, this is equivalent to launch server with command line:
+     ```
+@@ -444,7 +506,14 @@ class vLLMHttpServer:
+         if "disable_log_stats" in fn_args:
+             kwargs["disable_log_stats"] = engine_args.disable_log_stats
+ 
+-        engine_client = AsyncLLM.from_vllm_config(vllm_config=vllm_config, usage_context=usage_context, **kwargs)
++        try:
++            engine_client = AsyncLLM.from_vllm_config(vllm_config=vllm_config, usage_context=usage_context, **kwargs)
++        except Exception as exc:  # noqa: BLE001
++            diag = _dump_engine_diag(exc)
++            logger.error("vLLM engine init failed; diagnostics dumped to %s", diag)
++            raise
++
++
+ 
+         # Don't keep the dummy data in memory
+         await engine_client.reset_mm_cache()

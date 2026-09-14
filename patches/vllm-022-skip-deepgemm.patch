@@ -1,0 +1,33 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 49e75688a..7c013162a 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -1390,7 +1390,11 @@ endif()
+ 
+ # For CUDA we also build and ship some external projects.
+ if (VLLM_GPU_LANG STREQUAL "CUDA")
+-    include(cmake/external_projects/deepgemm.cmake)
++    if(NOT DEFINED ENV{VLLM_SKIP_DEEPGEMM})
++        include(cmake/external_projects/deepgemm.cmake)
++    else()
++        message(STATUS "[DeepGEMM] skipped (VLLM_SKIP_DEEPGEMM set)")
++    endif()
+     include(cmake/external_projects/flashmla.cmake)
+     include(cmake/external_projects/qutlass.cmake)
+ 
+diff --git a/setup.py b/setup.py
+index 8ef2d5eec..46793c1e2 100644
+--- a/setup.py
++++ b/setup.py
+@@ -1114,8 +1114,9 @@ if _is_cuda():
+         ext_modules.append(
+             CMakeExtension(name="vllm._flashmla_extension_C", optional=True)
+         )
+-    if envs.VLLM_USE_PRECOMPILED or (
+-        CUDA_HOME and get_nvcc_cuda_version() >= Version("12.3")
++    if not os.environ.get("VLLM_SKIP_DEEPGEMM") and (
++        envs.VLLM_USE_PRECOMPILED
++        or (CUDA_HOME and get_nvcc_cuda_version() >= Version("12.3"))
+     ):
+         # DeepGEMM requires CUDA 12.3+ (SM90/SM100)
+         # Optional since it won't build on unsupported architectures
