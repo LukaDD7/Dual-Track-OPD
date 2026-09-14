@@ -56,6 +56,23 @@ The fixed-width final-span extraction was still wrong for padded V1 layouts beca
 2+2 layout. See `docs/va_opd_v1_smoke_incident_20260914.md` for the incident
 chain and evidence. The next gate is the paired 50-step OPD and VA-OPD pilot.
 
+**VA-OPD 50-step pilot update, 2026-09-14:** the paper-primary VA-OPD pilot
+passed on the 4-GPU 2+2 layout:
+
+- Run: `fc-opd-storage/runs/va_opd_native/qwen3vl_geometry3k_native_va_opd_paper_paper_va_pilot50_4gpu_20260914_093313`
+- `result.json`: `passed=true`, `completed_steps=50`, `exit_code=0`
+- Validation monitor: step 0 `0.25`, step 25 `0.23`, step 50 `0.29`
+- `last_va_mean=0.09697`, `last_distillation_loss=0.27175`,
+  `last_gradient_norm=6.826`, `last_actor_entropy=879.0`
+- `max_group_weight_sum_error=1.788e-7`
+- Checkpoint: `global_step_50`, approximately 24 GiB
+
+The OPD pilot launched in parallel did not complete: its Ray control plane was
+terminated when the second VA launcher executed host-wide `ray stop -f`. GPU
+sets did not overlap, but Ray does. Do not launch two VA-OPD/OPD launchers on
+the same host concurrently. Post-run vLLM teardown errors were benign because
+the terminal result gate recorded `exit_code=0`.
+
 ## Required gates
 
 Run these in order on a GPU node after the blockers above are resolved:

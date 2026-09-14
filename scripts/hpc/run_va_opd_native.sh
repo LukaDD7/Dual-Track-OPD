@@ -27,7 +27,8 @@ TOTAL_STEPS=3
 TOTAL_EPOCHS=100
 SAVE_FREQ=3
 TEST_FREQ=3
-MAX_ACTOR_CKPT_TO_KEEP="${VA_OPD_MAX_ACTOR_CKPT_TO_KEEP:-2}"
+MAX_ACTOR_CKPT_TO_KEEP="${VA_OPD_MAX_ACTOR_CKPT_TO_KEEP:-null}"
+RESUME_MODE="${VA_OPD_RESUME_MODE:-disable}"
 MAX_PROMPT_LENGTH=6144
 MAX_RESPONSE_LENGTH=2048
 LEARNING_RATE=1e-6
@@ -62,6 +63,10 @@ Usage: bash scripts/hpc/run_va_opd_native.sh [options]
   --steps N                    Override optimizer steps; 0 means epoch-driven
   --batch-size N               Prompt batch before K=4 expansion
   --name TAG
+  --run-id ID                  Fixed lineage/run id; use the same value to resume
+  --resume                     Enable trainer.resume_mode=auto
+  --save-freq N                Checkpoint frequency (paper profile default: 25)
+  --test-freq N                Validation frequency (paper profile default: 25)
   --preflight-only             CPU-safe validation; do not start Ray/GPU work
   --audit-all-images           Validate every prepared full/degraded image pair
   --allow-busy-gpus            Deliberate override after manual PID inspection
@@ -86,6 +91,10 @@ while [[ $# -gt 0 ]]; do
         --steps) TOTAL_STEPS="${2:?missing step count}"; STEPS_EXPLICIT=true; shift 2 ;;
         --batch-size) PROMPT_BATCH_SIZE="${2:?missing batch size}"; BATCH_EXPLICIT=true; shift 2 ;;
         --name) NAME="_${2:?missing name}"; shift 2 ;;
+        --run-id) RUN_ID_OVERRIDE="${2:?missing run id}"; shift 2 ;;
+        --resume) RESUME_MODE="auto"; shift ;;
+        --save-freq) SAVE_FREQ_OVERRIDE="${2:?missing save frequency}"; shift 2 ;;
+        --test-freq) TEST_FREQ_OVERRIDE="${2:?missing test frequency}"; shift 2 ;;
         --preflight-only) PREFLIGHT_ONLY=true; shift ;;
         --audit-all-images) AUDIT_ALL_IMAGES=true; shift ;;
         --allow-busy-gpus) ALLOW_BUSY_GPUS=true; shift ;;
@@ -107,8 +116,8 @@ case "${PROFILE}" in
         if ! ${BATCH_EXPLICIT}; then PROMPT_BATCH_SIZE=16; fi
         if ! ${STEPS_EXPLICIT}; then TOTAL_STEPS=0; fi
         TOTAL_EPOCHS=5
-        SAVE_FREQ=50
-        TEST_FREQ=25
+        SAVE_FREQ="${SAVE_FREQ_OVERRIDE:-25}"
+        TEST_FREQ="${TEST_FREQ_OVERRIDE:-25}"
         AUDIT_ALL_IMAGES=true
         if [[ "${PROFILE}" == "paper" ]]; then
             STUDENT_MODEL="${VA_OPD_STUDENT_MODEL:-${HPC_ROOT}/models/Qwen3-VL-2B-Instruct}"
@@ -145,7 +154,11 @@ if ${PREPARE_DATA} && [[ ! -f "${TRAIN_DATA}" || ! -f "${VAL_DATA}" ]]; then
 fi
 
 TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
-RUN_ID="qwen3vl_geometry3k_native_${OBJECTIVE}_${PROFILE}${NAME}_${TIMESTAMP}"
+if [[ -n "${RUN_ID_OVERRIDE:-}" ]]; then
+    RUN_ID="${RUN_ID_OVERRIDE}"
+else
+    RUN_ID="qwen3vl_geometry3k_native_${OBJECTIVE}_${PROFILE}${NAME}_${TIMESTAMP}"
+fi
 RUN_ROOT="${VA_OPD_RUN_ROOT:-${HPC_ROOT}/fc-opd-storage/runs/va_opd_native}"
 RUN_DIR="${RUN_ROOT}/${RUN_ID}"
 CHECKPOINT_DIR="${HPC_ROOT}/fc-opd-storage/checkpoints/va_opd_native/${RUN_ID}"
@@ -303,7 +316,7 @@ CUDA_VISIBLE_DEVICES="${VISIBLE_GPUS}" "${PYTHON}" -m verl.trainer.main_ppo \
     "trainer.default_local_dir=${CHECKPOINT_DIR}" \
     "trainer.rollout_data_dir=${RUN_DIR}/rollouts" \
     "trainer.validation_data_dir=${RUN_DIR}/validation" \
-    "trainer.resume_mode=disable" \
+    "trainer.resume_mode=${RESUME_MODE}" \
     "${TRAINING_LIMITS[@]}" \
     2>&1 | tee "${TRAIN_LOG}"
 TRAIN_EXIT=${PIPESTATUS[0]}
