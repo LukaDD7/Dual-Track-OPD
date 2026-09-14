@@ -83,6 +83,7 @@ git -C "${REPO_ROOT}" archive HEAD \
     tests/test_benchmark_suite.py tests/test_project_summary.py tests/test_run_vlm_eval.py \
     scripts/eval/run_target_benchmarks.sh scripts/eval/run_target_benchmarks_v2.sh \
     scripts/sft_rl/run_sftrl_benchmarks.sh scripts/sft_rl/download_bench_datasets.sh \
+    scripts/sft_rl/remi_reeval.py docs/remi_mv_math_protocol_20260913.md \
     pyproject.toml README.md \
     | tar -xf - -C "${DST}"
 
@@ -112,7 +113,7 @@ for ds in datasets--lmms-lab--GQA datasets--kcz358--DynaMath datasets--oscarqjh-
     find "${STAGE}/hf_cache/hub/${ds}" -name '*.lock' -delete 2>/dev/null || true
 done
 
-echo "== ReMI replay 源 (v1 remi 项) =="
+echo "== ReMI replay 源 (strict exact rescore) =="
 mkdir -p "${STAGE}/remi_replay/raw_responses" "${STAGE}/remi_replay/dataset/ReMI"
 cp "${REMI_RAW}" "${STAGE}/remi_replay/raw_responses/"
 cp "${REMI_PARQUET}"/*.parquet "${REMI_PARQUET}/README.md" "${REMI_PARQUET}/LICENSE" "${STAGE}/remi_replay/dataset/ReMI/" 2>/dev/null || true
@@ -154,11 +155,17 @@ cat > "${STAGE}/README_B.md" <<'EOF_README_B'
 | dynamath | kcz358/DynaMath | **v2** | rule, 官方链 + 标签优先 | 4096 |
 | viewspatial | oscarqjh/ViewSpatial_lmmseval | **v2** | rule, 标签优先 | 4096 |
 | mmmu_pro | MMMU/MMMU_Pro (standard 10 选项) | **v2** | rule, 标签优先 | 4096 |
-| remi | 本地 replay（包内 remi_replay/） | **v1** | rule, normalized_exact | 2048 (replay 预算) |
+| remi | 本地 replay（包内 remi_replay/） | **v1 生成 + exact 重算** | task-aware exact/relaxed, 全 2600 分母 | 2048 (replay 预算) |
 | mmbench | lmms-lab/MMBench (en dev) | **v1** | judge（Qwen3-VL-32B-Instruct） | 1024 |
 
 对表规则（manuscript 第 0(b) 步已定）: **v2 4 项 + v1 2 项, 各用各口径**。
 v1 的历史 6 项全 v1 口径分数（macro avg 0.3714 等）只作历史对照。
+
+### ReMI 正式口径
+
+runner 自带 `summary.json` 的 ReMI 行是旧 `normalized_exact_diagnostic`，分母只算
+可抽取/已匹配样本，会虚高。正式对表必须用 `remi_reval.py --mode exact` 重算；
+`run_bench_example.sh` 的 v1/both 模式会自动执行并打印结果。
 
 ## 包内容
 | 条目 | 说明 |
@@ -225,13 +232,16 @@ openai / pyyaml。
    - v1 2 项:   RUN_V1=1 bash run_bench_example.sh   （2 张卡, 含 judge）
    - 全部:      bash run_bench_example.sh            （默认先 v2 后 v1）
 3. 产物: ${BUNDLE_DIR}/outputs/<RUN_NAME>_v2 与 ${BUNDLE_DIR}/outputs/<RUN_NAME>_remimmb_nojudge/_judged
-   （run_manifest.json + lmms/*/results + replay/remi.jsonl; 汇总打在日志末尾）。
+   （run_manifest.json + lmms/*/results + replay/remi.jsonl）。
+   ReMI 正式分数看 `logs/bseg_remi_exact_<RUN_NAME>.log`; `summary.json` 的 ReMI
+   行是旧 normalized_exact 诊断，不能用于对表。
 
 ## 可比性
 不变项: lmms-eval @ 88b23e2 + 上述未提交 patch + 同一批数据 snapshot +
 dual_track_opd.eval 调度层（temperature=0, seed 42, workers 8, batch 1）+
-判分链（v2 = <answer> 标签优先 + 确定性 fallback; v1 mmbench = 32B judge
-extractor）。满足即与主线 B 段表直接可比。
+判分链（v2 = <answer> 标签优先 + 确定性 fallback; ReMI = remi_reeval.py
+全分母 exact/relaxed; v1 mmbench = 32B judge extractor）。满足即与主线 B 段表
+直接可比。
 EOF_README_B
 
 cat > "${STAGE}/run_bench_example.sh" <<'EOF_RUN_B'
@@ -308,6 +318,13 @@ run_v1() {
         DTOPD_DATASET_ROOT="${BUNDLE_DIR}/remi_replay/dataset" \
         bash "${REPO_DIR}/scripts/eval/run_target_benchmarks.sh" \
         2>&1 | tee "${BUNDLE_DIR}/logs/bseg_v1_${RUN_NAME}.log"
+
+    echo "== [ReMI] strict full-denominator rescore =="
+    "${PYTHON}" "${REPO_DIR}/scripts/sft_rl/remi_reeval.py" \
+        --mode exact \
+        --jsonl "${BUNDLE_DIR}/outputs/${RUN_NAME}_remimmb_nojudge/replay/remi.jsonl" \
+        --label-jsonl "${BUNDLE_DIR}/remi_replay/raw_responses/qwen3vl8b_ReMI_test_len65536_maxtok1024_raw.jsonl" \
+        2>&1 | tee "${BUNDLE_DIR}/logs/bseg_remi_exact_${RUN_NAME}.log"
 }
 
 case "${MODE}" in
@@ -326,7 +343,7 @@ lmms_eval_commit: ${LMMS_COMMIT}
 lmms_eval_source: ${LMMS_GIT} (整树拷贝, 含主线未提交 patch; 副本 patches/lmms_eval_mainline_uncommitted.patch)
 scheduler_source: ${REPO_ROOT} git archive HEAD (src/dual_track_opd/eval + configs/eval + eval_tasks/opd_v2 + tests + scripts)
 hf_hub_source: ${HF_HUB} (5 dataset repos, symlink 解引用平铺)
-remi_replay_source: ${REMI_RAW} + ${REMI_PARQUET}
+remi_replay_source: ${REMI_RAW} + ${REMI_PARQUET} (strict rescore via scripts/sft_rl/remi_reeval.py)
 env_source: ${EVAL_ENV} (pip freeze -> env/requirements_bseg_freeze.txt)
 EOF_VERSION
 
