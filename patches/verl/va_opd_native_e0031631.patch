@@ -2,6 +2,21 @@ diff --git a/verl/experimental/agent_loop/agent_loop.py b/verl/experimental/agen
 index 1bd98610..13d1ab64 100644
 --- a/verl/experimental/agent_loop/agent_loop.py
 +++ b/verl/experimental/agent_loop/agent_loop.py
+@@ -139,6 +139,14 @@ class AgentLoopOutput(BaseModel):
+         if teacher_ids is not None:
+             output["teacher_ids"] = teacher_ids
+         if teacher_logprobs is not None:
+             output["teacher_logprobs"] = teacher_logprobs
++        teacher_degraded_ids, teacher_degraded_logprobs = (
++            output["extra_fields"].pop("teacher_degraded_ids", None),
++            output["extra_fields"].pop("teacher_degraded_logprobs", None),
++        )
++        if teacher_degraded_ids is not None:
++            output["teacher_degraded_ids"] = teacher_degraded_ids
++        if teacher_degraded_logprobs is not None:
++            output["teacher_degraded_logprobs"] = teacher_degraded_logprobs
+         return output
+
 @@ -170,6 +170,10 @@ class _InternalAgentLoopOutput(AgentLoopOutput):
      """Padded log probabilities from teacher model for prompt/response tokens."""
      teacher_ids: Optional[torch.Tensor] = None
@@ -106,9 +121,7 @@ diff --git a/verl/trainer/ppo/ray_trainer.py b/verl/trainer/ppo/ray_trainer.py
 index 7fc30e61..4bd9939b 100644
 --- a/verl/trainer/ppo/ray_trainer.py
 +++ b/verl/trainer/ppo/ray_trainer.py
-@@ -1505,6 +1505,11 @@ class RayPPOTrainer:
--
-+
+@@ -1505,5 +1505,10 @@ class RayPPOTrainer:
                      if "response_mask" not in batch.batch.keys():
                          batch.batch["response_mask"] = compute_response_mask(batch)
 +                    va_config = self.config.get("va_opd", {})
@@ -119,3 +132,66 @@ index 7fc30e61..4bd9939b 100644
                      # Balance the number of valid tokens across DP ranks.
                      # NOTE: This usually changes the order of data in the `batch`,
                      # which won't affect the advantage calculation (since it's based on uid),
+diff --git a/verl/trainer/ppo/v1/trainer_base.py b/verl/trainer/ppo/v1/trainer_base.py
+--- a/verl/trainer/ppo/v1/trainer_base.py
++++ b/verl/trainer/ppo/v1/trainer_base.py
+@@ -479,8 +479,13 @@ class BasePPOTrainer:
+         # 2. [OPTIONAL] compute reward score with colocated reward model
+         if self.reward_loop_manager.reward_loop_worker_handles is None:
+             with marked_timer("reward", timing_raw, color="yellow"):
+                 batch = self._compute_reward_colocate(batch, metrics=metrics)
+
++        # VA-OPD must receive the complete sibling-rollout group before sequence balancing.
++        va_config = self.config.get("va_opd", {})
++        if va_config.get("enabled", False):
++            batch = self._prepare_va_opd_weights(batch, metrics=metrics)
++
+         # 3. balance batch across data parallel groups
+         batch = self._balance_batch(batch, metrics=metrics)
+
+@@ -1511,7 +1517,45 @@ class BasePPOTrainer:
+         tq.kv_batch_put(keys=batch.keys, partition_id=batch.partition_id, fields=data.select("values"))
+
+         return batch
+
++    def _prepare_va_opd_weights(self, batch: KVBatchMeta, metrics: dict) -> KVBatchMeta:
++        """Compute and persist VA-OPD token weights for the V1 TransferQueue trainer."""
++        from dual_track_opd.va_opd.native_verl import prepare_native_verl_batch
++
++        fields = [
++            "uid",
++            "responses",
++            "response_mask",
++            "teacher_ids",
++            "teacher_logprobs",
++            "teacher_degraded_ids",
++            "teacher_degraded_logprobs",
++        ]
++        data = tq.kv_batch_get(
++            keys=batch.keys,
++            partition_id=batch.partition_id,
++            select_fields=fields,
++        )
++        response_mask = data["response_mask"]
++        data = DataProto(batch=data.to_padded_tensor())
++        data.non_tensor_batch["uid"] = np.array(data.batch.pop("uid").tolist(), dtype=object)
++
++        metrics.update(prepare_native_verl_batch(data, self.config))
++        output = {
++            "va_opd_token_weights": response_to_nested(
++                data.batch["va_opd_token_weights"], response_mask
++            ),
++            "va_opd_visual_advantage": response_to_nested(
++                data.batch["va_opd_visual_advantage"], response_mask
++            ),
++        }
++        output = TensorDict(output, batch_size=len(batch))
++        return tq.kv_batch_put(
++            keys=batch.keys,
++            partition_id=batch.partition_id,
++            fields=output,
++        )
++
+     def _compute_advantage(self, batch: KVBatchMeta, metrics: dict) -> KVBatchMeta:
+         """Compute the advantage of the batch."""
+         fields = ["uid", "response_mask", "rm_scores", "rollout_log_probs", "old_log_probs", "ref_log_prob", "values"]

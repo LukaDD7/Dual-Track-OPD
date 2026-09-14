@@ -39,21 +39,34 @@ def build_degraded_multi_modal_data(
         or extra_info.get("condition_inputs")
         or extra_info.get("fc_opd_condition_inputs")
     )
+    full = _as_mapping(condition_inputs.get("full_image"))
+    full_path = Path(str(full.get("path", ""))).expanduser()
     degraded = _as_mapping(condition_inputs.get("degraded_image"))
     degraded_path = Path(str(degraded.get("path", ""))).expanduser()
+    if not full_path.is_file():
+        raise FileNotFoundError(f"prepared VA-OPD full image is missing: {full_path}")
     if not degraded_path.is_file():
         raise FileNotFoundError(f"prepared VA-OPD degraded image is missing: {degraded_path}")
 
     from PIL import Image
 
+    with Image.open(full_path) as handle:
+        stored_full_size = handle.size
     with Image.open(degraded_path) as handle:
         degraded_image = handle.convert("RGB").copy()
+    if degraded_image.size != stored_full_size:
+        raise ValueError(
+            "prepared degraded image dimensions differ from the prepared full image: "
+            f"full={stored_full_size}, degraded={degraded_image.size}, path={degraded_path}"
+        )
+
     original_size = _image_size(image_items[0])
     if original_size is not None and degraded_image.size != original_size:
-        raise ValueError(
-            "degraded image dimensions must equal the full image dimensions to preserve visual-token alignment: "
-            f"full={original_size}, degraded={degraded_image.size}, path={degraded_path}"
-        )
+        # vLLM may resize the full image before returning it to the agent loop.
+        # The persisted image pair remains the provenance source, but the teacher
+        # must consume the same runtime dimensions for both conditions so the
+        # visual token count and sequence alignment stay unchanged.
+        degraded_image = degraded_image.resize(original_size, Image.Resampling.NEAREST)
 
     source["images"] = _replace_single(images, degraded_image)
     return source
@@ -81,16 +94,35 @@ def prepare_native_verl_batch(batch: Any, config: Any) -> dict[str, float]:
 
     response_mask = tensors["response_mask"].bool()
     response_length = int(response_mask.shape[1])
-    full_log_probs = _response_scalar(tensors["teacher_logprobs"], response_length)
-    degraded_log_probs = _response_scalar(tensors["teacher_degraded_logprobs"], response_length)
-    full_ids = _response_scalar(tensors["teacher_ids"], response_length).long()
-    degraded_ids = _response_scalar(tensors["teacher_degraded_ids"], response_length).long()
+    # Teacher tensors are full prompt+response sequences, but the V1 TransferQueue
+    # path may already have converted them to response-length jagged tensors.
+    # Preserve both layouts and never trust padding-only positions for identity.
     responses = tensors["responses"].long()
     valid = response_mask
+    full_ids, full_log_probs = _aligned_teacher_pair(
+        tensors["teacher_ids"],
+        tensors["teacher_logprobs"],
+        responses,
+        response_mask,
+    )
+    degraded_ids, degraded_log_probs = _aligned_teacher_pair(
+        tensors["teacher_degraded_ids"],
+        tensors["teacher_degraded_logprobs"],
+        responses,
+        response_mask,
+    )
     if not torch.equal(full_ids[valid], responses[valid]):
-        raise ValueError("full-image teacher IDs are not aligned to the exact student response IDs")
+        mismatch = torch.nonzero(full_ids[valid] != responses[valid], as_tuple=False).flatten()
+        raise ValueError(
+            "full-image teacher IDs are not aligned to the exact student response IDs "
+            f"(mismatch_count={mismatch.numel()})"
+        )
     if not torch.equal(degraded_ids[valid], responses[valid]):
-        raise ValueError("degraded-image teacher IDs are not aligned to the exact student response IDs")
+        mismatch = torch.nonzero(degraded_ids[valid] != responses[valid], as_tuple=False).flatten()
+        raise ValueError(
+            "degraded-image teacher IDs are not aligned to the exact student response IDs "
+            f"(mismatch_count={mismatch.numel()})"
+        )
 
     prompt_ids = list(batch.non_tensor_batch.get("uid", ()))
     if len(prompt_ids) != response_mask.shape[0]:
@@ -179,6 +211,82 @@ def _response_scalar(tensor: torch.Tensor, response_length: int) -> torch.Tensor
     if tensor.ndim != 2 or tensor.shape[1] < response_length:
         raise ValueError(f"expected [B, prompt+response, 1] teacher tensor, got {tuple(tensor.shape)}")
     return tensor[:, -response_length:]
+
+
+def _aligned_teacher_pair(
+    teacher_ids: torch.Tensor,
+    teacher_values: torch.Tensor,
+    responses: torch.Tensor,
+    response_mask: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Locate each student response inside teacher IDs and extract paired values.
+
+    V1 stores teacher tensors either as full prompt+response tensors or as
+    response-only tensors, with layout-dependent left/right padding.  Exact
+    subsequence matching makes the alignment contract explicit instead of
+    guessing a fixed slice offset.
+    """
+    if teacher_ids.is_nested:
+        ids = teacher_ids.to_padded_tensor(0).long()
+    else:
+        ids = _squeeze_last_one(teacher_ids).long()
+    if teacher_values.is_nested:
+        values = teacher_values.to_padded_tensor(0.0)
+    else:
+        values = _squeeze_last_one(teacher_values)
+
+    if ids.shape[0] != values.shape[0] or ids.shape[0] != responses.shape[0]:
+        raise ValueError(
+            "teacher/student batch sizes differ: "
+            f"ids={ids.shape[0]}, values={values.shape[0]}, responses={responses.shape[0]}"
+        )
+
+    aligned_ids = torch.zeros_like(responses, dtype=torch.long)
+    aligned_values = torch.zeros_like(responses, dtype=teacher_values.dtype)
+    for row in range(responses.shape[0]):
+        mask = response_mask[row].bool()
+        response_tokens = responses[row, mask]
+        count = int(mask.sum().item())
+        if count == 0:
+            continue
+        if ids.shape[1] == responses.shape[1]:
+            aligned_ids[row, mask] = ids[row, mask]
+            aligned_values[row, mask] = values[row, mask]
+            continue
+        else:
+            positions = _find_subsequence(ids[row], response_tokens)
+        if positions is None or positions.numel() != count:
+            raise ValueError(
+                f"teacher response subsequence not found for row {row}: "
+                f"teacher_width={ids.shape[1]}, response_tokens={count}"
+            )
+        aligned_ids[row, mask] = ids[row, positions]
+        aligned_values[row, mask] = values[row, positions]
+    return aligned_ids, aligned_values
+
+
+def _find_subsequence(source: torch.Tensor, target: torch.Tensor) -> torch.Tensor | None:
+    """Return exact contiguous source indices for ``target``."""
+    source = source.flatten()
+    target = target.flatten()
+    if target.numel() == 0:
+        return torch.empty(0, dtype=torch.long, device=source.device)
+    if source.numel() < target.numel():
+        return None
+    matches = (source == target[0]).nonzero(as_tuple=False).flatten()
+    for start in matches.tolist():
+        candidate = source[start : start + target.numel()]
+        if candidate.numel() == target.numel() and torch.equal(candidate, target):
+            return torch.arange(start, start + target.numel(), device=source.device)
+    return None
+
+
+def _squeeze_last_one(tensor: torch.Tensor) -> torch.Tensor:
+    if tensor.ndim == 3 and tensor.shape[-1] == 1:
+        tensor = tensor.squeeze(-1)
+    if tensor.ndim != 2:
+        raise ValueError(f"expected a 2-D teacher tensor, got {tuple(tensor.shape)}")
+    return tensor
 
 
 def _as_mapping(value: Any) -> dict[str, Any]:

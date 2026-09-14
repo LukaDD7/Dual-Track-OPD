@@ -12,17 +12,22 @@ from dual_track_opd.va_opd.native_verl import (
 
 
 def test_build_degraded_multimodal_uses_prepared_same_size_image(tmp_path):
+    full_path = tmp_path / "full.png"
     degraded_path = tmp_path / "diagram.lowres.png"
+    Image.new("RGB", (20, 10), "white").save(full_path)
     Image.new("RGB", (20, 10), "gray").save(degraded_path)
     full = Image.new("RGB", (20, 10), "white")
 
     output = build_degraded_multi_modal_data(
         {"images": [full], "videos": None},
-        {
-            "extra_info": {
-                "condition_inputs": {"degraded_image": {"path": str(degraded_path)}}
-            }
-        },
+            {
+                "extra_info": {
+                    "condition_inputs": {
+                        "full_image": {"path": str(full_path)},
+                        "degraded_image": {"path": str(degraded_path)},
+                    }
+                }
+            },
     )
 
     assert output["images"][0].size == (20, 10)
@@ -31,13 +36,41 @@ def test_build_degraded_multimodal_uses_prepared_same_size_image(tmp_path):
 
 
 def test_build_degraded_multimodal_rejects_dimension_drift(tmp_path):
+    full_path = tmp_path / "full.png"
     degraded_path = tmp_path / "wrong.png"
+    Image.new("RGB", (20, 10), "white").save(full_path)
     Image.new("RGB", (10, 10), "gray").save(degraded_path)
     with pytest.raises(ValueError, match="dimensions"):
         build_degraded_multi_modal_data(
             {"images": [Image.new("RGB", (20, 10), "white")]},
-            {"condition_inputs": {"degraded_image": {"path": str(degraded_path)}}},
+            {
+                "condition_inputs": {
+                    "full_image": {"path": str(full_path)},
+                    "degraded_image": {"path": str(degraded_path)},
+                }
+            },
         )
+
+
+def test_build_degraded_multimodal_follows_runtime_resize(tmp_path):
+    full_path = tmp_path / "full.png"
+    degraded_path = tmp_path / "degraded.png"
+    Image.new("RGB", (20, 10), "white").save(full_path)
+    Image.new("RGB", (20, 10), "gray").save(degraded_path)
+
+    output = build_degraded_multi_modal_data(
+        {"images": [Image.new("RGB", (40, 20), "white")]},
+        {
+            "extra_info": {
+                "condition_inputs": {
+                    "full_image": {"path": str(full_path)},
+                    "degraded_image": {"path": str(degraded_path)},
+                }
+            }
+        },
+    )
+
+    assert output["images"][0].size == (40, 20)
 
 
 def test_prepare_native_verl_batch_validates_ids_and_drops_degraded_transport():

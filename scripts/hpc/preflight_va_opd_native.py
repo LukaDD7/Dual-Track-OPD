@@ -24,6 +24,7 @@ EXPECTED_BACKEND_CHANGES_CU128 = {
     "verl/experimental/agent_loop/agent_loop.py",
     "verl/trainer/distillation/losses.py",
     "verl/trainer/ppo/ray_trainer.py",
+    "verl/trainer/ppo/v1/trainer_base.py",
 }
 EXPECTED_RUNTIME_CU128 = ("2.9.0", "12.8", "0.12.0+cu128", "4.57.3")
 EXPECTED_BUILD_KIND_CU128 = "cpu-source-build-cu128-h200-sm90"
@@ -56,9 +57,10 @@ EXPECTED_VERSIONS_CU132 = {
 
 # Patch SHA-256 are only validated for cu128 (exact known-good overlay).
 EXPECTED_PATCHED_FILE_SHA256 = {
-    "verl/experimental/agent_loop/agent_loop.py": "97be16d52f92ed6dee42d1cbdbe7200b8105e842f86a229f7acc9ace766602b8",
+    "verl/experimental/agent_loop/agent_loop.py": "5539e605a041689662d7a25613115bc424781d1d564c7bd50029ec9f9911b85c",
     "verl/trainer/distillation/losses.py": "41f8959296620b0e08bed59719a405e7d7b835653ff86a17340ed495bdb5197b",
     "verl/trainer/ppo/ray_trainer.py": "23bacdc7b537cc73c3677dbc478984c9c9b6c6ea31f1514c31cd6ca2006cd543",
+    "verl/trainer/ppo/v1/trainer_base.py": "2d173013957fe20e1dfe51714dbbebeb07f0d7ecaad7a894cf3aec316ebf4137",
 }
 
 

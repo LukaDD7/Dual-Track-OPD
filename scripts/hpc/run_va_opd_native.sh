@@ -27,6 +27,7 @@ TOTAL_STEPS=3
 TOTAL_EPOCHS=100
 SAVE_FREQ=3
 TEST_FREQ=3
+MAX_ACTOR_CKPT_TO_KEEP="${VA_OPD_MAX_ACTOR_CKPT_TO_KEEP:-2}"
 MAX_PROMPT_LENGTH=6144
 MAX_RESPONSE_LENGTH=2048
 LEARNING_RATE=1e-6
@@ -47,7 +48,8 @@ usage() {
 Usage: bash scripts/hpc/run_va_opd_native.sh [options]
 
   --objective opd|va_opd       Fair native reverse-KL baseline or VA-OPD
-  --profile smoke|train        smoke=3 updates/batch 4; train=5 epochs/batch 16
+  --profile smoke|train|paper  smoke=3 updates/batch 4; train=5 epochs/batch 16;
+                               paper=paper primary 8B→2B on full Geometry3K
   --visible-gpus LIST          Physical GPU list (default: 0,1,2,3,4,5)
   --actor-gpus N               FSDP/rollout pool size (default: 4)
   --teacher-gpus N             Native teacher pool size (default: 2)
@@ -101,15 +103,23 @@ case "${OBJECTIVE}" in
 esac
 case "${PROFILE}" in
     smoke) ;;
-    train)
+    train|paper)
         if ! ${BATCH_EXPLICIT}; then PROMPT_BATCH_SIZE=16; fi
         if ! ${STEPS_EXPLICIT}; then TOTAL_STEPS=0; fi
         TOTAL_EPOCHS=5
         SAVE_FREQ=50
         TEST_FREQ=25
         AUDIT_ALL_IMAGES=true
+        if [[ "${PROFILE}" == "paper" ]]; then
+            STUDENT_MODEL="${VA_OPD_STUDENT_MODEL:-${HPC_ROOT}/models/Qwen3-VL-2B-Instruct}"
+            TEACHER_MODEL="${VA_OPD_TEACHER_MODEL:-${HPC_ROOT}/models/Qwen3-VL-8B-Instruct}"
+            TRAIN_DATA="${GEOMETRY3K_VA_OPD_PAPER_TRAIN:-${HPC_ROOT}/fc-opd-storage/outputs/fc_opd/geometry3k_va_paper/train.parquet}"
+            VAL_DATA="${GEOMETRY3K_VA_OPD_PAPER_VAL:-${HPC_ROOT}/fc-opd-storage/outputs/fc_opd/geometry3k_va_paper/val_monitor.parquet}"
+            PREPARE_DATA=false
+            CONFIG_REFERENCE="${REPO_ROOT}/configs/experiment/qwen3vl_8b_2b_geometry3k_va_opd_paper.yaml"
+        fi
         ;;
-    *) echo "FATAL: profile must be smoke or train" >&2; exit 2 ;;
+    *) echo "FATAL: profile must be smoke, train, or paper" >&2; exit 2 ;;
 esac
 
 PYTHON="${ENV_PREFIX}/bin/python"
@@ -257,6 +267,8 @@ CUDA_VISIBLE_DEVICES="${VISIBLE_GPUS}" "${PYTHON}" -m verl.trainer.main_ppo \
     "actor_rollout_ref.rollout.top_k=-1" \
     "actor_rollout_ref.rollout.agent.num_workers=${ACTOR_GPUS}" \
     "reward_model.enable=false" \
+    "reward.custom_reward_function.path=${REWARD_FN}" \
+    "reward.custom_reward_function.name=compute_score" \
     "custom_reward_function.path=${REWARD_FN}" \
     "custom_reward_function.name=compute_score" \
     "algorithm.adv_estimator=grpo" \
@@ -287,6 +299,7 @@ CUDA_VISIBLE_DEVICES="${VISIBLE_GPUS}" "${PYTHON}" -m verl.trainer.main_ppo \
     "trainer.val_before_train=true" \
     "trainer.test_freq=${TEST_FREQ}" \
     "trainer.save_freq=${SAVE_FREQ}" \
+    "trainer.max_actor_ckpt_to_keep=${MAX_ACTOR_CKPT_TO_KEEP}" \
     "trainer.default_local_dir=${CHECKPOINT_DIR}" \
     "trainer.rollout_data_dir=${RUN_DIR}/rollouts" \
     "trainer.validation_data_dir=${RUN_DIR}/validation" \
