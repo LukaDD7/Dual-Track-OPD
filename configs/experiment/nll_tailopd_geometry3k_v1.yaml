@@ -1,0 +1,75 @@
+experiment:
+  name: nll_tailopd_v1
+  hypothesis: Higher within-prompt sampled NLL rollouts receive more OPD supervision.
+  stage: opd_only
+
+backend:
+  root: /inspire/hdd/global_user/mengweicheng-240108120092/lzy/fc-opd-storage/backends/verl-qwen35-v090-cu132
+  launcher: examples/on_policy_distillation_trainer/run_qwen3_5_4b_fsdp.sh
+  patch: patches/verl/nll_tailopd_v1.patch
+
+environment:
+  python: /inspire/hdd/global_user/mengweicheng-240108120092/lzy/envs/va-opd-qwen35-v090-cu132-r595-v1/bin/python
+
+paths:
+  student_model: /inspire/hdd/global_user/mengweicheng-240108120092/lzy/models/Qwen3.5-4B
+  teacher_model: /inspire/hdd/global_user/mengweicheng-240108120092/lzy/models/qwen3.6-35B-A3B
+  train_file: /inspire/hdd/global_user/mengweicheng-240108120092/lzy/fc-opd-storage/outputs/fc_opd/geometry3k_full/train.parquet
+  val_file: /inspire/hdd/global_user/mengweicheng-240108120092/lzy/fc-opd-storage/outputs/fc_opd/geometry3k_full/train_val200.parquet
+  output_root: /inspire/hdd/global_user/mengweicheng-240108120092/lzy/fc-opd-storage/runs/nll_tailopd_v1
+
+training:
+  rollout_n: 4
+  train_batch_size: 16
+  total_epochs: 5
+  eval_frequency: 132
+  checkpoint_frequency: 132
+  loss_agg_mode: seq-mean-token-mean
+  distillation_loss_mode: k1
+  use_policy_gradient: true
+  use_task_rewards: false
+
+tail_opd:
+  enabled_by_run:
+    vanilla_opd: false
+    tail_opd: true
+  score_type: nll
+  group_normalization: zscore_softmax
+  temperature: 1.0
+  eps: 1.0e-6
+  score_source: old_log_probs
+  detach_score: true
+  zero_std_behavior: uniform
+  rollout_scale_mode: mean_one
+
+stages:
+  smoke:
+    total_epochs: 1
+    total_steps: 3
+    eval_frequency: 1000000
+    checkpoint_frequency: 1000000
+  formal:
+    total_epochs: 5
+    eval_frequency: 132
+    checkpoint_frequency: 132
+
+runs:
+  vanilla_opd:
+    tail_opd_enabled: false
+  tail_opd:
+    tail_opd_enabled: true
+
+selection:
+  primary_metric: best validation checkpoint
+  hard_cap_epochs: 5
+  patience: 2
+  min_delta_percentage_points: 0.2
+
+future:
+  scale_path:
+    - 3-step smoke
+    - 20-30 step stability check
+    - 5-epoch Geometry3K A/B
+    - optional K=8 or tau sensitivity after positive signal
+    - identical GRPO continuation from selected checkpoints
+    - larger multimodal dataset and DAPO robustness only after V1 go/no-go
