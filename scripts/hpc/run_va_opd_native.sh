@@ -14,6 +14,7 @@ DATA_DIR="${GEOMETRY3K_VA_OPD_DATA_DIR:-${HPC_ROOT}/fc-opd-storage/outputs/fc_op
 TRAIN_DATA="${DATA_DIR}/train.parquet"
 VAL_DATA="${DATA_DIR}/val.parquet"
 CONFIG_REFERENCE="${REPO_ROOT}/configs/experiment/qwen3vl_geometry3k_va_opd_native.yaml"
+CONFIG_REFERENCE_OVERRIDE=""
 
 OBJECTIVE="va_opd"
 PROFILE="smoke"
@@ -57,6 +58,7 @@ Usage: bash scripts/hpc/run_va_opd_native.sh [options]
   --teacher-tp N               GPUs per teacher replica (default: 2)
   --student-model PATH
   --teacher-model PATH
+  --config-reference PATH
   --source-data PATH
   --train-data PATH            Also disables data preparation
   --val-data PATH              Also disables data preparation
@@ -83,8 +85,9 @@ while [[ $# -gt 0 ]]; do
         --actor-gpus) ACTOR_GPUS="${2:?missing actor GPU count}"; shift 2 ;;
         --teacher-gpus) TEACHER_GPUS="${2:?missing teacher GPU count}"; shift 2 ;;
         --teacher-tp) TEACHER_TP="${2:?missing teacher TP}"; shift 2 ;;
-        --student-model) STUDENT_MODEL="${2:?missing student model}"; shift 2 ;;
-        --teacher-model) TEACHER_MODEL="${2:?missing teacher model}"; shift 2 ;;
+    --student-model) STUDENT_MODEL="${2:?missing student model}"; shift 2 ;;
+    --teacher-model) TEACHER_MODEL="${2:?missing teacher model}"; shift 2 ;;
+    --config-reference) CONFIG_REFERENCE_OVERRIDE="${2:?missing config reference}"; shift 2 ;;
         --source-data) SOURCE_DATA="${2:?missing source data}"; shift 2 ;;
         --train-data) TRAIN_DATA="${2:?missing train data}"; PREPARE_DATA=false; shift 2 ;;
         --val-data) VAL_DATA="${2:?missing val data}"; PREPARE_DATA=false; shift 2 ;;
@@ -166,6 +169,9 @@ TRAIN_LOG="${RUN_DIR}/train.log"
 mkdir -p "${RUN_DIR}/rollouts" "${RUN_DIR}/validation" "${CHECKPOINT_DIR}"
 
 PREFLIGHT_EXTRA=()
+if [[ -n "${CONFIG_REFERENCE_OVERRIDE}" ]]; then
+    CONFIG_REFERENCE="${CONFIG_REFERENCE_OVERRIDE}"
+fi
 if ${AUDIT_ALL_IMAGES}; then PREFLIGHT_EXTRA+=(--audit-all-images); fi
 if ${ALLOW_SYSTEM_NVCC}; then PREFLIGHT_EXTRA+=(--allow-system-nvcc); fi
 "${PYTHON}" "${REPO_ROOT}/scripts/hpc/preflight_va_opd_native.py" \
