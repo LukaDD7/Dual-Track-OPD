@@ -37,7 +37,7 @@ The score and scale are detached. If a group has zero standard deviation, all
 weights are `1/K`, so `tail_scale=1` and the vanilla OPD gradient scale is
 recovered. Complete groups satisfy `mean_k(tail_scale)=1`.
 
-Both Vanilla OPD and TailOPD experiment runs use:
+TailOPD experiment runs use:
 
 ```text
 loss_agg_mode = seq-mean-token-mean
@@ -107,13 +107,28 @@ and the existing OPD path is unchanged.
 - Hydra `--cfg job` parse check: passed with `algorithm.tail_opd.enabled=true`.
 - Backend reward dispatcher syntax check: passed.
 - v1 trainer syntax check: passed.
-- TailOPD and Vanilla OPD dry-runs: passed.
+- TailOPD dry-run: passed.
 - Provenance manifests record repo/backend Git state, patch hash, dataset
   hashes, model paths, resolved config, command, and output paths.
 
-Current limitation: this Codex container exposes no CUDA device
-(`torch.cuda.is_available() == False`, device count 0). Therefore the required
-3-step GPU smoke has not been launched here.
+The real 3-step GPU smoke completed successfully on 2026-09-17 with return code
+0, a saved `global_step_3` checkpoint, and final validation accuracy 0.135.
+
+## Model decision
+
+`Qwen/Qwen3-1.7B` is a text-only language model and cannot process Geometry3K
+images. No public `Qwen3-VL-1.7B-Instruct` release is available on ModelScope.
+Therefore the smallest valid VLM student is the already-downloaded:
+
+```text
+/inspire/hdd/global_user/mengweicheng-240108120092/lzy/models/Qwen3-VL-2B-Instruct
+```
+
+The teacher remains:
+
+```text
+/inspire/hdd/global_user/mengweicheng-240108120092/lzy/models/Qwen3-VL-8B-Instruct
+```
 
 ## Launch commands
 
@@ -139,21 +154,17 @@ student = Qwen3-VL-2B-Instruct
 teacher = Qwen3-VL-8B-Instruct
 ```
 
-3-step Vanilla OPD control:
+30-step stability check:
 
 ```bash
 /inspire/hdd/global_user/mengweicheng-240108120092/lzy/envs/dtopd-dev/bin/python \
   scripts/hpc/launch_nll_tailopd_v1.py \
-  --run vanilla_opd --stage smoke
+  --run tail_opd --stage stability
 ```
 
-Formal Geometry3K A/B:
+Formal Geometry3K TailOPD run:
 
 ```bash
-/inspire/hdd/global_user/mengweicheng-240108120092/lzy/envs/dtopd-dev/bin/python \
-  scripts/hpc/launch_nll_tailopd_v1.py \
-  --run vanilla_opd --stage formal
-
 /inspire/hdd/global_user/mengweicheng-240108120092/lzy/envs/dtopd-dev/bin/python \
   scripts/hpc/launch_nll_tailopd_v1.py \
   --run tail_opd --stage formal
@@ -175,11 +186,13 @@ required.
    `tail_opd/scale_mean ~= 1`, and checkpoint save/load.
 2. Run 20-30 steps and confirm stable loss, KL, response length, and weight
    concentration.
-3. Run the 5-epoch Geometry3K A/B with identical data, models, optimizer, K=4,
-   and aggregation.
+3. Run the 5-epoch Geometry3K TailOPD stage with K=4 and sequence-normalized
+   aggregation.
 4. Select the best validation checkpoint, not epoch 5 by default.
-5. Only after a positive V1 signal, test K=8 or tau sensitivity, then identical
-   GRPO continuation.
+5. Run identical GRPO continuations from the base student and the selected
+   TailOPD checkpoint.
+6. Evaluate both exported RL checkpoints with the same benchmark suite.
+7. Only after a positive V1 signal, test K=8 or tau sensitivity.
 
 Do not add correctness routing, teacher compatibility, token-level weighting, or
 joint OPD+RL while validating V1.

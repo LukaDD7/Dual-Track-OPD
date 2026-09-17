@@ -2,6 +2,16 @@ experiment:
   name: nll_tailopd_v1
   hypothesis: Higher within-prompt sampled NLL rollouts receive more OPD supervision.
   stage: opd_only
+  objective: validate TailOPD as an initialization stage before identical RL continuation
+
+models:
+  student: Qwen3-VL-2B-Instruct
+  teacher: Qwen3-VL-8B-Instruct
+  student_path: /inspire/hdd/global_user/mengweicheng-240108120092/lzy/models/Qwen3-VL-2B-Instruct
+  teacher_path: /inspire/hdd/global_user/mengweicheng-240108120092/lzy/models/Qwen3-VL-8B-Instruct
+  student_note: >
+    Qwen3-1.7B is text-only and cannot process Geometry3K images. The smallest
+    available public Qwen3-VL Instruct student is Qwen3-VL-2B-Instruct.
 
 backend:
   root: /inspire/hdd/global_user/mengweicheng-240108120092/lzy/fc-opd-storage/backends/verl-qwen35-v090-cu132
@@ -59,6 +69,13 @@ stages:
     ppo_mini_batch_size: 4
     eval_frequency: 1000000
     checkpoint_frequency: 1000000
+  stability:
+    total_epochs: 1
+    total_steps: 30
+    train_batch_size: 16
+    ppo_mini_batch_size: 16
+    eval_frequency: 10
+    checkpoint_frequency: 10
   formal:
     total_epochs: 5
     ppo_mini_batch_size: 16
@@ -66,22 +83,38 @@ stages:
     checkpoint_frequency: 132
 
 runs:
-  vanilla_opd:
-    tail_opd_enabled: false
   tail_opd:
     tail_opd_enabled: true
 
 selection:
-  primary_metric: best validation checkpoint
+  primary_metric: val-core/geometry3k/acc/mean@1
+  direction: maximize
+  policy: select the best validation checkpoint before RL
   hard_cap_epochs: 5
   patience: 2
   min_delta_percentage_points: 0.2
 
 future:
+  comparison:
+    base_student_pure_rl:
+      initialization: /inspire/hdd/global_user/mengweicheng-240108120092/lzy/models/Qwen3-VL-2B-Instruct
+      algorithm: GRPO
+    tail_opd_student_rl:
+      initialization: selected TailOPD validation checkpoint
+      algorithm: GRPO
+  shared_rl_protocol:
+    data: Geometry3K
+    reward: geometry3k verifier
+    rollout_n: 4
+    optimizer: same across both arms
+    benchmark_entry: scripts/sft_rl/run_sftrl_benchmarks.sh
+    benchmark_note: evaluate exported HF checkpoints with the same benchmark suite
   scale_path:
     - 3-step smoke
-    - 20-30 step stability check
-    - 5-epoch Geometry3K A/B
+    - 30-step stability check
+    - 5-epoch Geometry3K TailOPD run
+    - validation checkpoint selection
+    - identical GRPO continuation for base and TailOPD students
+    - benchmark evaluation of both RL arms
     - optional K=8 or tau sensitivity after positive signal
-    - identical GRPO continuation from selected checkpoints
     - larger multimodal dataset and DAPO robustness only after V1 go/no-go

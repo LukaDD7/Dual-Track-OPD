@@ -162,7 +162,7 @@ def build_environment(config: dict[str, Any], run_name: str, stage: str) -> dict
 
 def build_extra_args(config: dict[str, Any], stage: str) -> list[str]:
     stage_config = config["stages"][stage]
-    if stage == "smoke":
+    if "total_steps" in stage_config:
         return [f"trainer.total_training_steps={int(stage_config['total_steps'])}"]
     return []
 
@@ -176,8 +176,8 @@ def write_json(path: Path, payload: dict[str, Any]) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, default=REPO_ROOT / "configs/experiment/nll_tailopd_geometry3k_v1.yaml")
-    parser.add_argument("--run", choices=("vanilla_opd", "tail_opd"), default="tail_opd")
-    parser.add_argument("--stage", choices=("smoke", "formal"), default="smoke")
+    parser.add_argument("--run", choices=("tail_opd",), default="tail_opd")
+    parser.add_argument("--stage", choices=("smoke", "stability", "formal"), default="smoke")
     parser.add_argument("--apply-patch", action="store_true", help="apply the pinned backend patch if needed")
     parser.add_argument("--dry-run", action="store_true", help="validate and print the command without launching")
     args = parser.parse_args()
