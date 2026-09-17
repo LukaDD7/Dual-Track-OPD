@@ -103,6 +103,7 @@ def build_environment(config: dict[str, Any], run_name: str, stage: str) -> dict
     training = config["training"]
     stage_config = config["stages"][stage]
     train_batch_size = stage_config.get("train_batch_size", training["train_batch_size"])
+    ppo_mini_batch_size = stage_config.get("ppo_mini_batch_size", train_batch_size)
     paths = config["paths"]
     tail_enabled = bool(config["runs"][run_name]["tail_opd_enabled"])
     tail = config["tail_opd"]
@@ -120,6 +121,7 @@ def build_environment(config: dict[str, Any], run_name: str, stage: str) -> dict
             "VAL_FILE": str(paths["val_file"]),
             "ROLLOUT_N": str(training["rollout_n"]),
             "TRAIN_BATCH_SIZE": str(train_batch_size),
+            "PPO_MINI_BATCH_SIZE": str(ppo_mini_batch_size),
             "NGPUS_PER_NODE": str(hardware["ngpus_per_node"]),
             "TEACHER_WORLD_SIZE": str(hardware["teacher_world_size"]),
             "TEACHER_TP": str(hardware["teacher_tp"]),
@@ -229,7 +231,7 @@ def main() -> int:
             key: value for key, value in environment.items() if key in {
                 "STUDENT_MODEL", "TEACHER_MODEL", "TRAIN_FILE", "VAL_FILE",
                 "ROLLOUT_N", "TRAIN_BATCH_SIZE", "TOTAL_EPOCHS", "TEST_FREQ",
-                "SAVE_FREQ", "ACTOR_LOSS_AGG_MODE", "DISTILLATION_LOSS_MODE",
+                "SAVE_FREQ", "PPO_MINI_BATCH_SIZE", "ACTOR_LOSS_AGG_MODE", "DISTILLATION_LOSS_MODE",
                 "USE_POLICY_GRADIENT", "USE_TASK_REWARDS", "TAIL_OPD_ENABLED",
                 "TAIL_OPD_TEMPERATURE", "TAIL_OPD_EPS", "PROJECT_NAME",
                 "EXPERIMENT_NAME", "PYTHON_BIN", "NGPUS_PER_NODE",

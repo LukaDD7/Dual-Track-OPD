@@ -56,10 +56,12 @@ stages:
     total_epochs: 1
     total_steps: 3
     train_batch_size: 4
+    ppo_mini_batch_size: 4
     eval_frequency: 1000000
     checkpoint_frequency: 1000000
   formal:
     total_epochs: 5
+    ppo_mini_batch_size: 16
     eval_frequency: 132
     checkpoint_frequency: 132
 
