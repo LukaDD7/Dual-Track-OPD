@@ -108,6 +108,9 @@ def build_environment(config: dict[str, Any], run_name: str, stage: str) -> dict
     tail_enabled = bool(config["runs"][run_name]["tail_opd_enabled"])
     tail = config["tail_opd"]
     hardware = config["hardware"]
+    experiment_name = os.environ.get("NLL_TAILOPD_EXPERIMENT_NAME")
+    if experiment_name is None:
+        experiment_name = f"{run_name}_{stage}_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
 
     env = os.environ.copy()
     python_bin = Path(config["environment"]["python"])
@@ -140,7 +143,7 @@ def build_environment(config: dict[str, Any], run_name: str, stage: str) -> dict
             "TAIL_OPD_TEMPERATURE": str(tail["temperature"]),
             "TAIL_OPD_EPS": str(tail["eps"]),
             "PROJECT_NAME": "nll_tailopd_v1",
-            "EXPERIMENT_NAME": f"{run_name}_{stage}",
+            "EXPERIMENT_NAME": experiment_name,
             "PYTHON_BIN": str(python_bin),
             "PYTHONUNBUFFERED": "1",
         }
