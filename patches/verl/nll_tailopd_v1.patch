@@ -245,3 +245,14 @@
                      if self.use_reference_policy:
                          # compute reference log_prob
                          with marked_timer(str(Role.RefPolicy), timing_raw, color="olive"):
+--- a/verl/utils/reward_score/__init__.py
++++ b/verl/utils/reward_score/__init__.py
+@@ -86,7 +86,7 @@
+
+             # Assuming prime_code doesn't need the URL
+             res = prime_code.compute_score(solution_str, ground_truth, continuous=True)
+-    elif data_source in ["hiyouga/geometry3k"]:
++    elif data_source in ["hiyouga/geometry3k", "geometry3k"]:
+         from . import geo3k
+
+         res = geo3k.compute_score(solution_str, ground_truth)

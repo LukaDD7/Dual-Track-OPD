@@ -85,6 +85,9 @@ The patch changes:
     available and before actor update.
 - `verl/trainer/distillation/losses.py`
   - Applies detached `K*w` to the existing per-token OPD estimator.
+- `verl/utils/reward_score/__init__.py`
+  - Accepts the local `geometry3k` data-source alias in addition to the upstream
+    `hiyouga/geometry3k` identifier.
 - `examples/on_policy_distillation_trainer/run_qwen3_5_4b_fsdp.sh`
   - Adds configurable `ROLLOUT_N`, loss aggregation, and TailOPD flags.
 
@@ -99,6 +102,7 @@ and the existing OPD path is unchanged.
 - Patch reverse-check: passed, proving the applied backend state matches the
   stored patch.
 - Hydra `--cfg job` parse check: passed with `algorithm.tail_opd.enabled=true`.
+- Backend reward dispatcher syntax check: passed.
 - TailOPD and Vanilla OPD dry-runs: passed.
 - Provenance manifests record repo/backend Git state, patch hash, dataset
   hashes, model paths, resolved config, command, and output paths.
