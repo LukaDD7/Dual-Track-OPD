@@ -115,6 +115,52 @@
 +    # lives in the Dual-Track-OPD package; this backend only carries config and
 +    # a thin integration hook.
 +    tail_opd: TailOpdConfig = field(default_factory=TailOpdConfig)
+--- a/verl/trainer/config/ppo_trainer.yaml
++++ b/verl/trainer/config/ppo_trainer.yaml
+@@ -166,8 +166,41 @@
+     # Lower clamp for the per-token PTD log probabilities
+     log_prob_min_clamp: -10.0
+
+-    # Vocabulary size used for tail-mass approximation of top-K misses
+-    vocab_size: 151936
++  # Vocabulary size used for tail-mass approximation of top-K misses
++  vocab_size: 151936
++
++  # NLL-TailOPD v1: default-off rollout-level weighting
++  tail_opd:
++
++    # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
++    _target_: verl.trainer.config.TailOpdConfig
++
++    # Whether to enable TailOPD rollout reweighting
++    enabled: False
++
++    # Rollout score type; v1 only supports sequence-normalized NLL
++    score_type: nll
++
++    # Within-prompt score normalization; v1 only supports z-score + softmax
++    group_normalization: zscore_softmax
++
++    # Softmax temperature tau
++    temperature: 1.0
++
++    # Numerical epsilon for group normalization
++    eps: 1.0e-6
++
++    # Score source; v1 requires old-policy log probabilities
++    score_source: old_log_probs
++
++    # Whether to detach the score from autograd; v1 requires True
++    detach_score: True
++
++    # Behavior when group std is near zero; v1 uses uniform weights
++    zero_std_behavior: uniform
++
++    # Rollout scale mode; v1 uses K*w with group mean one
++    rollout_scale_mode: mean_one
+
+ # config for the trainer
+ trainer:
 --- a/verl/trainer/distillation/losses.py
 +++ b/verl/trainer/distillation/losses.py
 @@ -302,6 +302,24 @@

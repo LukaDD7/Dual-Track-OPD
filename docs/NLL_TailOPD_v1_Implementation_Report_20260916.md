@@ -77,6 +77,9 @@ The patch changes:
 
 - `verl/trainer/config/algorithm.py`
   - Adds default-off `algorithm.tail_opd` and validates V1-only options.
+- `verl/trainer/config/ppo_trainer.yaml`
+  - Adds the default-off Hydra config block so command-line overrides are
+    accepted in struct mode.
 - `verl/trainer/ppo/ray_trainer.py`
   - Computes weights once on the complete global batch after old log-probs are
     available and before actor update.
@@ -95,6 +98,7 @@ and the existing OPD path is unchanged.
 - Backend launcher `bash -n`: passed.
 - Patch reverse-check: passed, proving the applied backend state matches the
   stored patch.
+- Hydra `--cfg job` parse check: passed with `algorithm.tail_opd.enabled=true`.
 - TailOPD and Vanilla OPD dry-runs: passed.
 - Provenance manifests record repo/backend Git state, patch hash, dataset
   hashes, model paths, resolved config, command, and output paths.
