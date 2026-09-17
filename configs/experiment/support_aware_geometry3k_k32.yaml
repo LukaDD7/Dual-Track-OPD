@@ -1,0 +1,58 @@
+# K=32 confirmation run for the immutable 64-prompt cohort produced by
+# dual_track_opd.support_aware.k32_cohort.  This is an independent confirmation
+# sample: do not pool it with the original K=8 rows by rollout_id.
+
+experiment:
+  name: support_aware_geometry3k_k32_confirmation
+  objective: confirm_screening_support_states_before_bridge
+  step: 1b
+
+models:
+  student: ${DTOPD_MODEL_ROOT}/Qwen3-VL-4B-Instruct
+  teacher: ${DTOPD_MODEL_ROOT}/Qwen3-VL-32B-Instruct
+  shared_tokenizer_required: true
+
+data:
+  dataset_path: ${K32_COHORT_DIR}/cohort.parquet
+  num_prompts: 64
+
+diagnostic:
+  rollouts_per_prompt: 32
+  temperature: 0.7
+  top_p: 0.95
+  max_new_tokens: 4096
+  # Deliberately differs from the K=8 seed so K=32 is an independent sample.
+  seed: 20260804
+  response_format: legacy_answer
+  bootstrap_seed: 20260804
+  bootstrap_resamples: 10000
+  # K=32 means 33 sequences including greedy.  Bounded chunks prevent a
+  # 33x4096 padded student forward and an overlong synchronous teacher request.
+  teacher_score_chunk_size: 4
+  student_score_chunk_size: 4
+
+teacher:
+  url: http://127.0.0.1:18080
+  # Multiple student shards may queue behind the synchronous teacher service.
+  timeout_seconds: 1800
+
+output:
+  root: ${DTOPD_OUTPUT_ROOT}
+
+hardware:
+  student_gpu: cuda
+  dtype: bfloat16
+
+# Statistical gates remain visible in every summary.  The overnight launcher
+# uses --exit-zero-on-complete because a scientific gate failure is a result,
+# whereas token/hash/coverage/preflight failures remain fatal.
+gates:
+  tokenizer_alignment: true
+  zero_missing_images: true
+  finite_scores: true
+  malformed_rate_max: 0.10
+  duplicate_rate_max: 0.25
+  min_correct_tails: 20
+  teacher_gap_auc_min: 0.60
+  correct_tail_rank1_above_random: true
+  truncation_rate_max: 0.15

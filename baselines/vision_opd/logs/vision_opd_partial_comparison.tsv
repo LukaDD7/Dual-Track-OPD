@@ -1,0 +1,4 @@
+benchmark	qwen35_4b_base	vision_opd_4b	delta
+vstar	84.29	88.48	4.19
+mme-realworld	64.04	74.56	10.52
+mme-realworld-cn	64.04	70.26	6.22

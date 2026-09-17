@@ -1,0 +1,39 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Codex <codex@localhost>
+Date: 2026-09-10
+Subject: [PATCH] fix(charxiv): cast prediction to string before replacement
+
+CharXiv scoring builds a grading prompt with:
+
+    line["grading_query"].replace("{PREDICTION}", line["prediction"])
+
+Some model predictions are stored as numeric values (or NaN). Python then
+raises:
+
+    TypeError: replace() argument 2 must be str, not float
+
+Cast the prediction through str() before replacement so the judge can score
+already-generated predictions without rerunning inference.
+
+Applied to VLMEvalKit commit ce95c4d14829b8ed688fdfaea210c4bb510e1a35.
+---
+ vlmeval/dataset/charxiv.py | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/vlmeval/dataset/charxiv.py b/vlmeval/dataset/charxiv.py
+index 0000000..0000000 100644
+--- a/vlmeval/dataset/charxiv.py
++++ b/vlmeval/dataset/charxiv.py
+@@ -25,7 +25,7 @@ def auxeval(judge_model: Any, line: pd.Series, **kwargs: Any) -> Dict[str, Any]:
+     Returns:
+         Dict containing evaluation results with extract_answer and score
+     """
+     failure_result = {"extracted_answer": "Failed to parse response", "score": 0.0}
+-    prompt = line["grading_query"].replace("{PREDICTION}", line["prediction"])
++    prompt = line["grading_query"].replace("{PREDICTION}", str(line["prediction"]))
+ 
+     retry = kwargs.get("retry", 10)
+ 
+-- 
+2.47.0
+

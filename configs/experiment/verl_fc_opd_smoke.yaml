@@ -1,0 +1,89 @@
+# verl VA-OPD one-step smoke config (reference only).
+# The actual run script uses verl's ppo_trainer config + CLI overrides.
+# This file documents the full config for reference.
+
+algorithm:
+  adv_estimator: grpo
+  use_kl_in_reward: false
+  fc_opd:
+    post_rollout_hook: dual_track_opd.fc_opd.verl_post_rollout_hook.fc_opd_post_rollout_hook
+    compute_hook_loss: false
+    teacher_url: http://127.0.0.1:18080
+    conditions: [full, degraded]
+    loss_coef: 1.0
+    loss_mode: va_opd
+    renormalize_topk: true
+    include_tail: true
+
+data:
+  train_files: /inspire/hdd/global_user/mengweicheng-240108120092/lzy/fc-opd-storage/outputs/fc_opd/verl_smoke/train.parquet
+  val_files: /inspire/hdd/global_user/mengweicheng-240108120092/lzy/fc-opd-storage/outputs/fc_opd/verl_smoke/train.parquet
+  custom_cls:
+    path: dual_track_opd.fc_opd.verl_dataset
+    name: FCOPDDataset
+  train_batch_size: 2
+  max_prompt_length: 1024
+  max_response_length: 512
+  filter_overlong_prompts: false
+  truncation: error
+  image_key: images
+
+reward:
+  custom_reward_function:
+    path: file:///inspire/hdd/global_user/mengweicheng-240108120092/lzy/projects/Dual-Track-OPD/src/dual_track_opd/fc_opd/smoke_reward.py
+    name: compute_score
+
+# Required by verl's migrate_legacy_reward_impl; reward_model is a top-level key.
+reward_model:
+  enable: false
+  num_workers: null
+  reward_manager: null
+  reward_loop_source: null
+  reward_loop_module_path: null
+  reward_loop_class_name: null
+  model:
+    path: null
+
+actor_rollout_ref:
+  model:
+    path: /inspire/hdd/global_user/mengweicheng-240108120092/lzy/models/Qwen3-VL-4B-Instruct
+    use_remove_padding: false
+    use_fused_kernels: false  # FC-OPD needs live logits
+    enable_gradient_checkpointing: true
+    override_config:
+      attn_implementation: sdpa
+  actor:
+    optim:
+      lr: 2e-6
+    ppo_mini_batch_size: 16
+    ppo_micro_batch_size_per_gpu: 1
+    use_kl_loss: false
+    fsdp_config:
+      param_offload: false
+      optimizer_offload: false
+  rollout:
+    name: vllm
+    tensor_model_parallel_size: 1
+    gpu_memory_utilization: 0.3
+    max_model_len: 2048
+    n: 8
+    free_cache_engine: true
+    enforce_eager: true
+    log_prob_micro_batch_size_per_gpu: 2
+    agent:
+      num_workers: 2
+  ref:
+    fsdp_config:
+      param_offload: true
+
+trainer:
+  critic_warmup: 0
+  logger: '["console"]'
+  project_name: verl_fc_opd_smoke
+  experiment_name: fc_opd_one_step
+  n_gpus_per_node: 1
+  nnodes: 1
+  save_freq: -1
+  test_freq: -1
+  total_epochs: 1
+  val_before_train: false

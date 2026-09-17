@@ -1,0 +1,46 @@
+# Reproducible runtime for verl e003163181731412595257a72ec173071efb125f on CUDA 13.2.
+# Linux x86_64, Python 3.12, NVIDIA driver 595+ (R595/H200).
+#
+# vLLM 0.25.1 is source-built against torch 2.13+cu132 to avoid the libtorch
+# ABI mismatch that quarantined the 2026-07-21 attempt.  vLLM 0.25.1 has native
+# CUDA 13 support: nvidia-cutlass-dsl[cu13], humming-kernels[cu13].
+#
+# vLLM 0.25.1 declares torch==2.11.0 in its wheel metadata.  We override that
+# with torch 2.13 below — pip respects constraints over requirements during
+# dependency resolution.  The source build compiles vLLM's C++ extensions
+# against the installed torch 2.13, so there is no ABI mismatch at runtime.
+#
+# verls setup.py declares vllm>=0.8.5,<=0.12.0 as pip metadata only; the
+# editable install (--no-deps) bypasses this.  API compatibility for vLLM 0.25.x
+# is handled by the LoRA import patch in the setup script.
+#
+# Strategy (clean, no force-reinstall):
+#   1. conda create python=3.12
+#   2. pip install torch==2.13.0 torchvision==0.28.0 --index-url cu132
+#   3. Source-build vLLM 0.25.1 wheel against torch 2.13 + conda CUDA 13.2
+#   4. pip install --constraint this_file -r verl/requirements.txt + local wheel
+#   5. pip install --force-reinstall --no-deps <local vllm wheel>  (idempotent)
+#   6. pip install --no-build-isolation flash-attn==2.8.3
+#   7. pip install --no-deps -e verl; pip install --no-deps -e project
+#   8. pip check
+#
+# vLLM 0.25.1 requires transformers>=5.5.3 (per PyPI metadata).  We pin 5.14.1
+# which is a known-good combination from the 2026-07-21 attempt.
+torch==2.13.0
+torchvision==0.28.0
+vllm==0.25.1
+transformers==5.14.1
+tensordict==0.10.0
+flashinfer-python==0.6.13
+flash-attn==2.8.3
+numpy==2.2.6
+pyarrow==22.0.0
+pandas==2.3.3
+ray==2.53.0
+datasets==4.4.2
+accelerate==1.12.0
+peft==0.18.0
+qwen-vl-utils==0.0.14
+# cmake >= 4.0 enables CMP0146=NEW which removes FindCUDA module required by
+# torch's Caffe2 CMake config during vLLM source build.
+cmake<4.0

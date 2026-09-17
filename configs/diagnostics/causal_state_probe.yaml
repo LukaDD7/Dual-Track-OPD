@@ -1,0 +1,86 @@
+# Phase-I frozen-policy causal state localization.  No weights are updated.
+
+experiment:
+  name: causal_state_probe_geometry3k_k32
+  objective: localize_actionable_teacher_supervision_on_fixed_student_trajectories
+
+models:
+  student: ${DTOPD_MODEL_ROOT}/Qwen3-VL-4B-Instruct
+  teacher: ${DTOPD_MODEL_ROOT}/Qwen3-VL-32B-Instruct
+  shared_tokenizer_required: true
+
+data:
+  k32_run_dir: ${DTOPD_OUTPUT_ROOT}/support_aware_opd/diag_full_k32_20260804_merged
+  cohort_dir: ${DTOPD_OUTPUT_ROOT}/support_aware_opd/k32_cohort_20260804
+  proposal_dir: ${DTOPD_OUTPUT_ROOT}/support_aware_opd/proposal_feasibility_20260805_merged
+  response_format: legacy_answer
+
+selection:
+  # Keep correct and wrong native trajectories separate to expose premature
+  # visual disengagement without selection on successful rollouts only.
+  trajectory_outcomes: [correct, wrong]
+  max_trajectories_per_outcome: 1
+
+features:
+  visual_js: true
+  visual_continuation: true
+  teacher_relay: true
+  teacher_transport: true
+  answer_leakage: true
+  student_teacher_reference: true
+  teacher_path_support: true
+
+visual:
+  degraded_mode: blur_sigma_2
+  null_value: 255
+  js_chunk_size: 64
+
+candidates:
+  windows: [8, 16, 32, 64]
+  topk_high: 1
+  topk_drop: 2
+  fixed_positions: [0.20, 0.50, 0.80]
+  min_candidates: 3
+  max_candidates: 6
+  nms_radius: 16
+  snap_radius: 12
+
+continuation:
+  k: 8
+  max_new_tokens: 2048
+
+relay:
+  lengths: [32, 64, 128]
+  k: 8
+
+transport:
+  k: 8
+
+leakage:
+  k: 8
+  max_new_tokens: 64
+
+teacher_path:
+  window: 32
+  top_k: 3
+
+generation:
+  temperature: 0.7
+  top_p: 0.95
+  seed: 20260808
+
+analysis:
+  posterior: jeffreys_beta_half_half
+  posterior_draws: 20000
+  min_mean_gain: 0.20
+  min_posterior_probability: 0.90
+  max_low_gain: 0.10
+
+hardware:
+  # With CUDA_VISIBLE_DEVICES=<student>,<teacher>, these are logical indices.
+  student_device: cuda:0
+  teacher_device: cuda:1
+  dtype: bfloat16
+
+output:
+  dir: ${DTOPD_OUTPUT_ROOT}/support_aware_opd/causal_state_probe_20260808

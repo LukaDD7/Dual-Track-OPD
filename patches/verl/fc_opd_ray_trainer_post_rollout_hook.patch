@@ -1,0 +1,26 @@
+--- a/verl/trainer/ppo/ray_trainer.py
++++ b/verl/trainer/ppo/ray_trainer.py
+@@ -1360,6 +1360,23 @@
+ 
+                     if "response_mask" not in batch.batch.keys():
+                         batch.batch["response_mask"] = compute_response_mask(batch)
++
++                    fc_opd_hook_fqn = self.config.algorithm.get("fc_opd", {}).get("post_rollout_hook", None)
++                    if fc_opd_hook_fqn:
++                        with marked_timer("fc_opd", timing_raw, color="magenta"):
++                            fc_opd_hook = load_class_from_fqn(fc_opd_hook_fqn, "FC-OPD post-rollout hook")
++                            fc_opd_result = fc_opd_hook(
++                                batch=batch,
++                                tokenizer=self.tokenizer,
++                                processor=getattr(self, "processor", None),
++                                config=self.config,
++                                global_steps=self.global_steps,
++                            )
++                            if isinstance(fc_opd_result, tuple):
++                                batch, fc_opd_metrics = fc_opd_result
++                                metrics.update(fc_opd_metrics)
++                            else:
++                                batch = fc_opd_result
+                     # Balance the number of valid tokens across DP ranks.
+                     # NOTE: This usually changes the order of data in the `batch`,
+                     # which won't affect the advantage calculation (since it's based on uid),

@@ -1,0 +1,189 @@
+From ce0adf93736f36620d30d02e3ea4fdf9c48d2dd8 Mon Sep 17 00:00:00 2001
+From: LukaDD7 <LukaDD7@users.noreply.github.com>
+Date: Fri, 10 Jul 2026 02:01:28 +0000
+Subject: [PATCH 1/5] fix: add no-op Profiler class for GKD recipe backward
+ compat
+
+The GKD recipe (recipe/gkd/megatron/megatron_workers.py) imports
+'Profiler' which was renamed to 'DistProfiler' in this verl version.
+All Profiler usage in the recipe is already commented out, so a
+no-op class prevents ImportError without side effects.
+---
+ verl/utils/profiler/profile.py | 25 +++++++++++++++++++++++++
+ 1 file changed, 25 insertions(+)
+
+diff --git a/verl/utils/profiler/profile.py b/verl/utils/profiler/profile.py
+index d9890b2c..c0a82c47 100644
+--- a/verl/utils/profiler/profile.py
++++ b/verl/utils/profiler/profile.py
+@@ -308,3 +308,28 @@ class DistProfilerExtension:
+     def stop_profile(self) -> None:
+         """Stop profiling for the current rank in the current training step."""
+         self.profiler.stop()
++
++
++# Backward-compat: GKD recipe references "Profiler" which was renamed
++# to "DistProfiler" in newer verl.  All Profiler usage in the GKD recipe
++# is commented out; this no-op class prevents ImportError.
++class Profiler:
++    """No-op profiler for backward compatibility with GKD recipe."""
++
++    def __init__(self, *args, **kwargs):
++        pass
++
++    def start(self, *args, **kwargs):
++        pass
++
++    def stop(self, *args, **kwargs):
++        pass
++
++    def step(self, *args, **kwargs):
++        pass
++
++    def stop_and_save(self, *args, **kwargs):
++        pass
++
++    def stop_trace(self, *args, **kwargs):
++        pass
+-- 
+2.43.0
+
+
+From 089b01aaaf81575ea7868b142440842699b33bfe Mon Sep 17 00:00:00 2001
+From: LukaDD7 <LukaDD7@users.noreply.github.com>
+Date: Fri, 10 Jul 2026 02:13:33 +0000
+Subject: [PATCH 2/5] fix: add update_weights_bucket_megabytes to RolloutConfig
+ for GKD compat
+
+GKD recipe accesses self.config.rollout.update_weights_bucket_megabytes
+directly, but this verl version nests it under checkpoint_engine.
+Added a flat field so both access patterns work.
+---
+ verl/workers/config/rollout.py | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/verl/workers/config/rollout.py b/verl/workers/config/rollout.py
+index fa8b9573..9217f006 100644
+--- a/verl/workers/config/rollout.py
++++ b/verl/workers/config/rollout.py
+@@ -251,6 +251,9 @@ class RolloutConfig(BaseConfig):
+     # loads this class instead of the built-in CheckpointEngineManager.
+     checkpoint_manager_class: Optional[str] = None
+ 
++    # GKD recipe backward-compat: accessed directly as self.config.rollout.update_weights_bucket_megabytes
++    update_weights_bucket_megabytes: int = 512
++
+     # Checkpoint Engine config for update weights from trainer to rollout
+     checkpoint_engine: CheckpointEngineConfig = field(default_factory=CheckpointEngineConfig)
+ 
+-- 
+2.43.0
+
+
+From 928e862d15a395775802dad083c7e18f6b0e00c1 Mon Sep 17 00:00:00 2001
+From: LukaDD7 <LukaDD7@users.noreply.github.com>
+Date: Fri, 10 Jul 2026 02:27:30 +0000
+Subject: [PATCH 3/5] fix: pass dataclass_type to omega_conf_to_dataclass for
+ model/rollout
+
+omega_conf_to_dataclass() requires either _target_ in the config
+or an explicit dataclass_type. The model config from GKD recipe
+doesn't include _target_, causing AssertionError. Pass the type
+explicitly for both rollout and model config creation.
+---
+ verl/workers/megatron_workers.py | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/verl/workers/megatron_workers.py b/verl/workers/megatron_workers.py
+index 6693df70..4f0303c8 100644
+--- a/verl/workers/megatron_workers.py
++++ b/verl/workers/megatron_workers.py
+@@ -533,8 +533,8 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
+         from torch.distributed.device_mesh import init_device_mesh
+ 
+         # 1. parse rollout and huggingface model config
+-        rollout_config: RolloutConfig = omega_conf_to_dataclass(self.config.rollout)
+-        model_config: HFModelConfig = omega_conf_to_dataclass(self.config.model)
++        rollout_config: RolloutConfig = omega_conf_to_dataclass(self.config.rollout, dataclass_type=RolloutConfig)
++        model_config: HFModelConfig = omega_conf_to_dataclass(self.config.model, dataclass_type=HFModelConfig)
+ 
+         # 2. build rollout device mesh
+         infer_tp = self.config.rollout.tensor_model_parallel_size * self.config.rollout.data_parallel_size
+-- 
+2.43.0
+
+
+From 1995ea28707c8956d9a34e64fa5bf134a2c92a46 Mon Sep 17 00:00:00 2001
+From: LukaDD7 <LukaDD7@users.noreply.github.com>
+Date: Fri, 10 Jul 2026 02:32:08 +0000
+Subject: [PATCH 4/5] fix: safe access to router_replay when actor config is
+ plain dict
+
+GKD recipe's config provides actor as a plain dict (no router_replay),
+but base MegatronWorker init expects it as a structured config.
+Use .get() for dict or getattr() for struct to avoid crash.
+---
+ verl/workers/megatron_workers.py | 5 +++--
+ 1 file changed, 3 insertions(+), 2 deletions(-)
+
+diff --git a/verl/workers/megatron_workers.py b/verl/workers/megatron_workers.py
+index 4f0303c8..d5fcef30 100644
+--- a/verl/workers/megatron_workers.py
++++ b/verl/workers/megatron_workers.py
+@@ -325,8 +325,9 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
+ 
+         self.enable_routing_replay = False
+         if self._is_actor:
+-            self.router_replay = self.config.actor.router_replay
+-            self.enable_routing_replay = self.router_replay.mode != "disabled"
++            self.router_replay = self.config.actor.get("router_replay", None) if isinstance(self.config.actor, dict) else getattr(self.config.actor, "router_replay", None)
++            if self.router_replay is not None:
++                self.enable_routing_replay = self.router_replay.mode != "disabled"
+ 
+         if self.enable_routing_replay:
+             apply_router_replay_patch()
+-- 
+2.43.0
+
+
+From 609f4f1bf66c9f0538a2ceeb269b39707c6c539e Mon Sep 17 00:00:00 2001
+From: LukaDD7 <LukaDD7@users.noreply.github.com>
+Date: Fri, 10 Jul 2026 03:17:04 +0000
+Subject: [PATCH 5/5] =?UTF-8?q?fix:=20safe=20access=20to=20rollout.n=20?=
+ =?UTF-8?q?=E2=80=94=20use=20.get()=20for=20dict/config=20compat?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+GKD config YAML doesn't include n in the rollout section
+(only in val_kwargs). Use dict.get() or getattr() with
+default=1 for backward compat.
+---
+ recipe                           | 2 +-
+ verl/workers/megatron_workers.py | 3 ++-
+ 2 files changed, 3 insertions(+), 2 deletions(-)
+
+diff --git a/recipe b/recipe
+index ba246418..4af521c7 160000
+--- a/recipe
++++ b/recipe
+@@ -1 +1 @@
+-Subproject commit ba246418f4de12b845a09bba975f1a5242adc898
++Subproject commit 4af521c7ff608c9a249ebe580cff559c123fc0e6
+diff --git a/verl/workers/megatron_workers.py b/verl/workers/megatron_workers.py
+index d5fcef30..702734f9 100644
+--- a/verl/workers/megatron_workers.py
++++ b/verl/workers/megatron_workers.py
+@@ -372,7 +372,8 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
+ 
+         # normalize config
+         if self._is_actor:
+-            self.config.actor.ppo_mini_batch_size *= self.config.rollout.n
++            _rollout_n = self.config.rollout.get("n", 1) if isinstance(self.config.rollout, dict) else getattr(self.config.rollout, "n", 1)
++            self.config.actor.ppo_mini_batch_size *= _rollout_n
+             self.config.actor.ppo_mini_batch_size //= mpu.get_data_parallel_world_size()
+             if self.config.actor.get("ppo_micro_batch_size", None):
+                 self.config.actor.ppo_micro_batch_size //= mpu.get_data_parallel_world_size()
+-- 
+2.43.0
+

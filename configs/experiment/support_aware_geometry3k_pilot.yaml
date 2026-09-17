@@ -1,0 +1,68 @@
+# Support-Aware SFT-RL-OPD — Step 1 Frozen-Policy Diagnostic
+#
+# Usage:
+#   smoke: 8 prompts × 2 rollouts (validate pipeline)
+#   full:  128 prompts × 8 rollouts (acceptance-gated diagnostic)
+#
+#   CUDA_VISIBLE_DEVICES=1 \
+#   python -m dual_track_opd.support_aware.diagnostic \
+#       --config configs/experiment/support_aware_geometry3k_pilot.yaml \
+#       --mode smoke
+#
+# Requires teacher service running on GPU 0:
+#   FC_OPD_TEACHER_MODEL="${DTOPD_MODEL_ROOT}/Qwen3-VL-32B-Instruct" \
+#   CUDA_VISIBLE_DEVICES=0 bash scripts/hpc/start_fc_teacher.sh
+
+experiment:
+  name: support_aware_geometry3k_pilot
+  objective: frozen_policy_support_diagnostic
+  step: 1
+  description: >
+    Generate K=8 rollouts from frozen Qwen3-VL-4B-Instruct, teacher/student
+    force-score each, classify prompts by support state, and test whether
+    teacher_gap ranks correct-tail responses above wrong modes.
+
+models:
+  student: ${DTOPD_MODEL_ROOT}/Qwen3-VL-4B-Instruct
+  teacher: ${DTOPD_MODEL_ROOT}/Qwen3-VL-32B-Instruct
+  shared_tokenizer_required: true
+
+data:
+  dataset_path: /inspire/hdd/global_user/mengweicheng-240108120092/lzy/fc-opd-storage/outputs/fc_opd/geometry3k_full/train.parquet
+  num_prompts: 128
+  validation_size: 200
+
+diagnostic:
+  rollouts_per_prompt: 8
+  temperature: 0.7
+  top_p: 0.95
+  max_new_tokens: 4096
+  seed: 42
+  # Preserve the prompt contract of the already-running 4096-token shards.
+  # New structured-v2 runs must use a new run_id rather than resume this one.
+  response_format: legacy_answer
+  bootstrap_seed: 42
+  bootstrap_resamples: 10000
+
+teacher:
+  url: http://127.0.0.1:18080
+
+output:
+  root: ${DTOPD_OUTPUT_ROOT}
+
+hardware:
+  student_gpu: 1
+  teacher_gpu: 0
+  dtype: bfloat16
+
+gates:
+  tokenizer_alignment: true
+  zero_missing_images: true
+  finite_scores: true
+  malformed_rate_max: 0.10
+  duplicate_rate_max: 0.25
+  # Signal gates (full mode only):
+  min_correct_tails: 20
+  teacher_gap_auc_min: 0.60
+  correct_tail_rank1_above_random: true
+  truncation_rate_max: 0.15
