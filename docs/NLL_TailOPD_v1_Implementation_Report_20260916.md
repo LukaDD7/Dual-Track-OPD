@@ -83,6 +83,9 @@ The patch changes:
 - `verl/trainer/ppo/ray_trainer.py`
   - Computes weights once on the complete global batch after old log-probs are
     available and before actor update.
+- `verl/trainer/ppo/v1/trainer_base.py`
+  - Computes weights after old log-probs and writes the scales to the v1
+    TransferQueue dataflow before advantage and actor update.
 - `verl/trainer/distillation/losses.py`
   - Applies detached `K*w` to the existing per-token OPD estimator.
 - `verl/utils/reward_score/__init__.py`
@@ -103,6 +106,7 @@ and the existing OPD path is unchanged.
   stored patch.
 - Hydra `--cfg job` parse check: passed with `algorithm.tail_opd.enabled=true`.
 - Backend reward dispatcher syntax check: passed.
+- v1 trainer syntax check: passed.
 - TailOPD and Vanilla OPD dry-runs: passed.
 - Provenance manifests record repo/backend Git state, patch hash, dataset
   hashes, model paths, resolved config, command, and output paths.

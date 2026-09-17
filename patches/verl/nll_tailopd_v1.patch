@@ -245,6 +245,74 @@
                      if self.use_reference_policy:
                          # compute reference log_prob
                          with marked_timer(str(Role.RefPolicy), timing_raw, color="olive"):
+--- a/verl/trainer/ppo/v1/trainer_base.py
++++ b/verl/trainer/ppo/v1/trainer_base.py
+@@ -124,6 +124,10 @@
+
+     def __init__(self, config: DictConfig):
+         self.config = config
++        self.tail_opd_config = self.config.algorithm.get("tail_opd", None)
++        self.tail_opd_enabled = bool(
++            self.tail_opd_config is not None and getattr(self.tail_opd_config, "enabled", False)
++        )
+         self.use_critic = need_critic(self.config)
+         self.use_reference_policy = need_reference_policy(self.config)
+         self.use_teacher_policy = need_teacher_policy(self.config)
+@@ -559,6 +563,12 @@
+         with marked_timer("old_log_prob", timing_raw, color="blue"):
+             batch = self._compute_old_log_prob(batch, metrics=metrics)
+
++        # 4.1 NLL-TailOPD v1: reweight complete sibling-rollout groups after
++        # old-policy log-probs are available and before any advantage/update.
++        if self.tail_opd_enabled:
++            with marked_timer("tail_opd", timing_raw, color="purple"):
++                batch = self._compute_tail_opd_weights(batch, metrics=metrics)
++
+         # 5. [OPTIONAL] compute ref_log_prob
+         if self.use_reference_policy:
+             with marked_timer("ref", timing_raw, color="olive"):
+@@ -1537,6 +1547,41 @@
+
+         return batch
+
++    def _compute_tail_opd_weights(self, batch: KVBatchMeta, metrics: dict) -> KVBatchMeta:
++        """Compute and persist NLL-TailOPD scales for the complete global batch."""
++        from dual_track_opd.tail_opd import compute_diagnostics, compute_nll_tail_rollout_weights
++
++        data = tq.kv_batch_get(
++            keys=batch.keys,
++            partition_id=batch.partition_id,
++            select_fields=["uid", "old_log_probs", "response_mask"],
++        )
++        data = DataProto(batch=data.to_padded_tensor())
++        uids = np.array(data.batch.pop("uid").tolist(), dtype=object)
++        old_log_probs = data.batch["old_log_probs"].detach()
++        response_mask = data.batch["response_mask"].detach()
++        if old_log_probs.shape != response_mask.shape:
++            raise ValueError(
++                f"old_log_probs shape {tuple(old_log_probs.shape)} does not match "
++                f"response_mask shape {tuple(response_mask.shape)}"
++            )
++
++        result = compute_nll_tail_rollout_weights(
++            old_log_probs=old_log_probs,
++            response_mask=response_mask,
++            group_ids=uids,
++            temperature=float(self.tail_opd_config.temperature),
++            eps=float(self.tail_opd_config.eps),
++        )
++        tail_opd_fields = TensorDict(
++            {"tail_opd_scales": result.scales.to(dtype=old_log_probs.dtype)}, batch_size=len(batch)
++        )
++        batch = tq.kv_batch_put(
++            keys=batch.keys, partition_id=batch.partition_id, fields=tail_opd_fields
++        )
++        metrics.update(compute_diagnostics(result, response_mask, eps=float(self.tail_opd_config.eps)))
++        return batch
++
+     def _compute_ref_log_prob(self, batch: KVBatchMeta, metrics: dict) -> KVBatchMeta:
+         """Compute the reference log prob of the batch."""
+         # 1. compute log probs
 --- a/verl/utils/reward_score/__init__.py
 +++ b/verl/utils/reward_score/__init__.py
 @@ -86,7 +86,7 @@
