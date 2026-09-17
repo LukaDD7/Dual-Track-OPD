@@ -12,8 +12,8 @@ environment:
   python: /inspire/hdd/global_user/mengweicheng-240108120092/lzy/envs/va-opd-qwen35-v090-cu132-r595-v1/bin/python
 
 paths:
-  student_model: /inspire/hdd/global_user/mengweicheng-240108120092/lzy/models/Qwen3.5-4B
-  teacher_model: /inspire/hdd/global_user/mengweicheng-240108120092/lzy/models/qwen3.6-35B-A3B
+  student_model: /inspire/hdd/global_user/mengweicheng-240108120092/lzy/models/Qwen3-VL-2B-Instruct
+  teacher_model: /inspire/hdd/global_user/mengweicheng-240108120092/lzy/models/Qwen3-VL-8B-Instruct
   train_file: /inspire/hdd/global_user/mengweicheng-240108120092/lzy/fc-opd-storage/outputs/fc_opd/geometry3k_full/train.parquet
   val_file: /inspire/hdd/global_user/mengweicheng-240108120092/lzy/fc-opd-storage/outputs/fc_opd/geometry3k_full/train_val200.parquet
   output_root: /inspire/hdd/global_user/mengweicheng-240108120092/lzy/fc-opd-storage/runs/nll_tailopd_v1
@@ -28,6 +28,15 @@ training:
   distillation_loss_mode: k1
   use_policy_gradient: true
   use_task_rewards: false
+
+hardware:
+  ngpus_per_node: 2
+  teacher_world_size: 2
+  teacher_tp: 2
+  teacher_ep: 1
+  rollout_tp: 1
+  rollout_num_workers: 2
+  visible_gpus: 0,1,2,3
 
 tail_opd:
   enabled_by_run:
@@ -46,6 +55,7 @@ stages:
   smoke:
     total_epochs: 1
     total_steps: 3
+    train_batch_size: 4
     eval_frequency: 1000000
     checkpoint_frequency: 1000000
   formal:

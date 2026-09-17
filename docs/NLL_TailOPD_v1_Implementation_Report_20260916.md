@@ -119,6 +119,14 @@ bash scripts/hpc/apply_nll_tailopd_v1_patch.sh
   --run tail_opd --stage smoke
 ```
 
+Smoke hardware:
+
+```text
+4 total GPUs = 2 student/rollout GPUs + 2 teacher GPUs
+student = Qwen3-VL-2B-Instruct
+teacher = Qwen3-VL-8B-Instruct
+```
+
 3-step Vanilla OPD control:
 
 ```bash
@@ -139,10 +147,11 @@ Formal Geometry3K A/B:
   --run tail_opd --stage formal
 ```
 
-The default teacher in the experiment config is the local 35B checkpoint:
+The default models in the experiment config are:
 
 ```text
-/inspire/hdd/global_user/mengweicheng-240108120092/lzy/models/qwen3.6-35B-A3B
+/inspire/hdd/global_user/mengweicheng-240108120092/lzy/models/Qwen3-VL-2B-Instruct
+/inspire/hdd/global_user/mengweicheng-240108120092/lzy/models/Qwen3-VL-8B-Instruct
 ```
 
 Override it in the YAML before formal runs if a different pinned teacher is
@@ -162,3 +171,49 @@ required.
 
 Do not add correctness routing, teacher compatibility, token-level weighting, or
 joint OPD+RL while validating V1.
+
+## Code map and chain checks
+
+Main entry:
+
+```text
+scripts/hpc/launch_nll_tailopd_v1.py
+```
+
+Layered path:
+
+```text
+YAML config
+  -> scripts/hpc/launch_nll_tailopd_v1.py
+  -> external verl launcher
+  -> RayPPOTrainer
+  -> distillation loss
+```
+
+Key code locations:
+
+- `src/dual_track_opd/tail_opd/weights.py`
+  - Core NLL, z-score, softmax, and scale math.
+- `scripts/hpc/launch_nll_tailopd_v1.py`
+  - Main entry, environment assembly, provenance, and stage switching.
+- `verl/trainer/ppo/ray_trainer.py`
+  - Computes weights after old log-probs and before actor update.
+- `verl/trainer/distillation/losses.py`
+  - Applies `K*w` to the existing OPD estimator.
+
+Chain checks:
+
+```bash
+/inspire/hdd/global_user/mengweicheng-240108120092/lzy/envs/dtopd-dev/bin/python \
+  -m pytest -q tests/tail_opd/test_weights.py
+
+bash scripts/hpc/apply_nll_tailopd_v1_patch.sh
+
+/inspire/hdd/global_user/mengweicheng-240108120092/lzy/envs/dtopd-dev/bin/python \
+  scripts/hpc/launch_nll_tailopd_v1.py \
+  --run tail_opd --stage smoke --dry-run
+
+/inspire/hdd/global_user/mengweicheng-240108120092/lzy/envs/dtopd-dev/bin/python \
+  scripts/hpc/launch_nll_tailopd_v1.py \
+  --run tail_opd --stage smoke
+```

@@ -87,14 +87,26 @@ def validate_inputs(config: dict[str, Any], run_name: str) -> None:
         raise ValueError("NLL-TailOPD requires rollout_n >= 2 for within-prompt normalization")
     if config["training"]["loss_agg_mode"] != "seq-mean-token-mean":
         raise ValueError("TailOPD v1 requires loss_agg_mode=seq-mean-token-mean")
+    hardware = config.get("hardware", {})
+    actor_gpus = int(hardware.get("ngpus_per_node", 0))
+    teacher_gpus = int(hardware.get("teacher_world_size", 0))
+    visible_gpu_count = len(str(hardware.get("visible_gpus", "")).split(","))
+    if actor_gpus + teacher_gpus != 4:
+        raise ValueError(
+            f"TailOPD v1 smoke expects 4 total GPUs; got actor={actor_gpus}, teacher={teacher_gpus}"
+        )
+    if visible_gpu_count != 4:
+        raise ValueError(f"TailOPD v1 smoke expects 4 visible GPUs, got {visible_gpu_count}")
 
 
 def build_environment(config: dict[str, Any], run_name: str, stage: str) -> dict[str, str]:
     training = config["training"]
     stage_config = config["stages"][stage]
+    train_batch_size = stage_config.get("train_batch_size", training["train_batch_size"])
     paths = config["paths"]
     tail_enabled = bool(config["runs"][run_name]["tail_opd_enabled"])
     tail = config["tail_opd"]
+    hardware = config["hardware"]
 
     env = os.environ.copy()
     python_bin = Path(config["environment"]["python"])
@@ -107,7 +119,14 @@ def build_environment(config: dict[str, Any], run_name: str, stage: str) -> dict
             "TRAIN_FILE": str(paths["train_file"]),
             "VAL_FILE": str(paths["val_file"]),
             "ROLLOUT_N": str(training["rollout_n"]),
-            "TRAIN_BATCH_SIZE": str(training["train_batch_size"]),
+            "TRAIN_BATCH_SIZE": str(train_batch_size),
+            "NGPUS_PER_NODE": str(hardware["ngpus_per_node"]),
+            "TEACHER_WORLD_SIZE": str(hardware["teacher_world_size"]),
+            "TEACHER_TP": str(hardware["teacher_tp"]),
+            "TEACHER_EP": str(hardware["teacher_ep"]),
+            "ROLLOUT_TP": str(hardware["rollout_tp"]),
+            "ROLLOUT_NUM_WORKERS": str(hardware["rollout_num_workers"]),
+            "CUDA_VISIBLE_DEVICES": str(hardware["visible_gpus"]),
             "TOTAL_EPOCHS": str(stage_config["total_epochs"]),
             "TEST_FREQ": str(stage_config["eval_frequency"]),
             "SAVE_FREQ": str(stage_config["checkpoint_frequency"]),
@@ -213,7 +232,9 @@ def main() -> int:
                 "SAVE_FREQ", "ACTOR_LOSS_AGG_MODE", "DISTILLATION_LOSS_MODE",
                 "USE_POLICY_GRADIENT", "USE_TASK_REWARDS", "TAIL_OPD_ENABLED",
                 "TAIL_OPD_TEMPERATURE", "TAIL_OPD_EPS", "PROJECT_NAME",
-                "EXPERIMENT_NAME", "PYTHON_BIN",
+                "EXPERIMENT_NAME", "PYTHON_BIN", "NGPUS_PER_NODE",
+                "TEACHER_WORLD_SIZE", "TEACHER_TP", "TEACHER_EP",
+                "ROLLOUT_TP", "ROLLOUT_NUM_WORKERS", "CUDA_VISIBLE_DEVICES",
             }
         },
         "raw_output_path": str(run_dir),
