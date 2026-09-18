@@ -14,6 +14,7 @@ models:
     available public Qwen3-VL Instruct student is Qwen3-VL-2B-Instruct.
 
 backend:
+  contract: configs/backend/verl_qwen35_v090_cu132.yaml
   root: /inspire/hdd/global_user/mengweicheng-240108120092/lzy/fc-opd-storage/backends/verl-qwen35-v090-cu132
   launcher: examples/on_policy_distillation_trainer/run_qwen3_5_4b_fsdp.sh
   patch: patches/verl/nll_tailopd_v1.patch

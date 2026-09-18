@@ -61,6 +61,42 @@ def _pearson(x: torch.Tensor, y: torch.Tensor) -> float:
     return (x_centered * y_centered).sum().div(denominator).item()
 
 
+def validate_fixed_group_size(
+    group_ids: Sequence[Hashable] | torch.Tensor,
+    expected_group_size: int,
+) -> None:
+    """Fail fast when an integration batch has incomplete sibling groups.
+
+    The core TailOPD weighting utility intentionally supports arbitrary group
+    sizes. Formal TailOPD v1 runs do not: their integration layer must call
+    this helper with the configured ``ROLLOUT_N`` before applying weights.
+    """
+    if isinstance(expected_group_size, bool) or not isinstance(expected_group_size, int):
+        raise ValueError("expected_group_size must be an integer")
+    if expected_group_size <= 0:
+        raise ValueError(f"expected_group_size must be positive, got {expected_group_size}")
+
+    ids = _as_group_ids(group_ids)
+    if not ids:
+        raise ValueError("group_ids must contain at least one rollout")
+
+    groups: dict[Hashable, int] = defaultdict(int)
+    for group_id in ids:
+        groups[group_id] += 1
+
+    mismatches = {
+        group_id: actual_size
+        for group_id, actual_size in groups.items()
+        if actual_size != expected_group_size
+    }
+    if mismatches:
+        details = ", ".join(f"{group_id!r}={size}" for group_id, size in mismatches.items())
+        raise ValueError(
+            f"expected every rollout group to contain {expected_group_size} siblings; "
+            f"mismatched groups: {details}"
+        )
+
+
 def compute_nll_tail_rollout_weights(
     old_log_probs: torch.Tensor,
     response_mask: torch.Tensor,
@@ -201,6 +237,11 @@ def compute_diagnostics(
     quantiles = torch.quantile(scores, torch.tensor([0.1, 0.5, 0.9], device=scores.device))
     effective_rollouts = sum((1.0 / weights[indices].pow(2).sum()).item() for indices in grouped.values())
     effective_rollouts /= group_count
+    group_entropies = [
+        -(weights[indices] * weights[indices].clamp_min(1e-12).log()).sum()
+        for indices in grouped.values()
+    ]
+    weight_entropy = torch.stack(group_entropies).mean().item()
 
     diagnostics = {
         f"{prefix}/nll_mean": scores.mean().item(),
@@ -210,7 +251,7 @@ def compute_diagnostics(
         f"{prefix}/nll_p90": quantiles[2].item(),
         f"{prefix}/weight_min": weights.min().item(),
         f"{prefix}/weight_max": weights.max().item(),
-        f"{prefix}/weight_entropy": (-(weights * weights.clamp_min(1e-12).log()).sum()).item(),
+        f"{prefix}/weight_entropy": weight_entropy,
         f"{prefix}/effective_rollouts": effective_rollouts,
         f"{prefix}/near_zero_std_group_fraction": near_zero_std / group_count,
         f"{prefix}/nll_length_correlation": _pearson(scores, lengths),

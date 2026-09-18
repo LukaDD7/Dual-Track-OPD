@@ -1,0 +1,57 @@
+schema_version: 1
+name: verl-qwen35-v090-cu132
+verification_status: TO_BE_CONFIRMED_ON_SERVER
+
+upstream:
+  repo: https://github.com/verl-project/verl.git
+  nominal_base_commit: 483b8a009ba3a97563edee3a19887e4862b8094a
+
+runtime:
+  python_env: /inspire/hdd/global_user/mengweicheng-240108120092/lzy/envs/va-opd-qwen35-v090-cu132-r595-v1
+  external_backend_path: /inspire/hdd/global_user/mengweicheng-240108120092/lzy/fc-opd-storage/backends/verl-qwen35-v090-cu132
+
+experiment:
+  config: configs/experiment/nll_tailopd_geometry3k_v1.yaml
+
+patch_stack:
+  status: TO_BE_CONFIRMED_ON_SERVER
+  ordered_patches: null
+  tail_opd_patch: patches/verl/nll_tailopd_v1.patch
+
+required_invariants:
+  - id: TAIL-01
+    description: weights sum to one within each uid group
+  - id: TAIL-02
+    description: uniform group scores produce weights=1/K and scale=1
+  - id: TAIL-03
+    description: scores, weights, and K*w scales are detached
+  - id: TAIL-04
+    description: padding tokens cannot change rollout NLL scores
+  - id: TAIL-05
+    description: every integration uid group has exactly configured ROLLOUT_N siblings
+  - id: TAIL-06
+    description: v1 has no correctness routing, token weighting, or teacher gating
+
+required_smoke_checks:
+  - id: SMOKE-01
+    description: observed group size equals configured ROLLOUT_N
+  - id: SMOKE-02
+    description: tail_opd/nll_std is finite and positive on a nonuniform batch
+  - id: SMOKE-03
+    description: tail_opd/scale_mean is approximately one
+  - id: SMOKE-04
+    description: tail_opd weights and scales are finite and within expected bounds
+  - id: SMOKE-05
+    description: distillation loss and actor grad norm are finite, with grad norm positive
+  - id: SMOKE-06
+    description: three optimizer steps complete and the expected checkpoint exists
+
+server_audit:
+  required: true
+  checks:
+    - current backend HEAD and full git status
+    - diff relative to nominal base commit
+    - ordered patch-stack reconstruction from a pristine worktree
+    - unexplained dirty diffs
+    - TailOPD backend integration contract
+    - three-step GPU semantic smoke
