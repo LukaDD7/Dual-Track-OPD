@@ -13,6 +13,9 @@ import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONTRACT = REPO_ROOT / "configs/backend/verl_qwen35_v090_cu132.yaml"
+PENDING_STATUS = "TO_BE_CONFIRMED_ON_SERVER"
+VERIFIED_STATUS = "VERIFIED_ON_SERVER"
+VALID_STATUSES = {PENDING_STATUS, VERIFIED_STATUS}
 
 
 class ContractError(ValueError):
@@ -63,6 +66,101 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _validate_hex(value: Any, length: int, label: str) -> str:
+    if (
+        not isinstance(value, str)
+        or len(value) != length
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise ContractError(f"{label} must be a {length}-character lowercase hexadecimal value")
+    return value
+
+
+def _validate_patch_stack(
+    patch_stack: dict[str, Any],
+    status: str,
+    tail_opd_patch: str,
+    repo_root: Path,
+) -> dict[str, Any]:
+    patch_status = _nonempty_string(patch_stack, "status", "patch_stack")
+    if patch_status not in VALID_STATUSES:
+        raise ContractError(f"unsupported patch_stack.status: {patch_status}")
+    if patch_status != status:
+        raise ContractError("verification_status and patch_stack.status must match")
+
+    ordered_patches = patch_stack.get("ordered_patches")
+    reconstruction = patch_stack.get("reconstruction_evidence")
+    if status == PENDING_STATUS:
+        if ordered_patches is not None:
+            raise ContractError("pending contract requires patch_stack.ordered_patches=null")
+        if reconstruction is not None:
+            raise ContractError("pending contract requires patch_stack.reconstruction_evidence=null")
+        return {"verified_patch_count": 0, "audit_report": None}
+
+    if not isinstance(ordered_patches, list) or not ordered_patches:
+        raise ContractError("verified contract requires a non-empty patch_stack.ordered_patches list")
+
+    verified_paths: list[str] = []
+    for index, entry in enumerate(ordered_patches):
+        label = f"patch_stack.ordered_patches[{index}]"
+        if not isinstance(entry, dict):
+            raise ContractError(f"{label} must be a mapping with path and sha256")
+        path_value = _nonempty_string(entry, "path", label)
+        expected_sha256 = _validate_hex(entry.get("sha256"), 64, f"{label}.sha256")
+        patch_path = _repo_path(repo_root, path_value, f"{label}.path")
+        if not patch_path.is_file():
+            raise ContractError(f"verified patch does not exist: {patch_path}")
+        actual_sha256 = _sha256(patch_path)
+        if actual_sha256 != expected_sha256:
+            raise ContractError(
+                f"{label}.sha256 does not match {path_value}: "
+                f"expected {expected_sha256}, got {actual_sha256}"
+            )
+        verified_paths.append(path_value)
+
+    if tail_opd_patch not in verified_paths:
+        raise ContractError("verified ordered patch stack does not include tail_opd_patch")
+
+    if not isinstance(reconstruction, dict):
+        raise ContractError("verified contract requires patch_stack.reconstruction_evidence")
+    audit_value = _nonempty_string(reconstruction, "audit_report", "reconstruction_evidence")
+    audit_path = _repo_path(repo_root, audit_value, "reconstruction_evidence.audit_report")
+    if not audit_path.is_file():
+        raise ContractError(f"reconstruction audit report does not exist: {audit_path}")
+    audit_sha256 = _validate_hex(
+        reconstruction.get("audit_report_sha256"),
+        64,
+        "reconstruction_evidence.audit_report_sha256",
+    )
+    if _sha256(audit_path) != audit_sha256:
+        raise ContractError("reconstruction audit report SHA-256 does not match")
+
+    _validate_hex(
+        reconstruction.get("active_backend_head"),
+        40,
+        "reconstruction_evidence.active_backend_head",
+    )
+    active_tree = _validate_hex(
+        reconstruction.get("active_backend_tree"),
+        40,
+        "reconstruction_evidence.active_backend_tree",
+    )
+    reconstructed_tree = _validate_hex(
+        reconstruction.get("reconstructed_backend_tree"),
+        40,
+        "reconstruction_evidence.reconstructed_backend_tree",
+    )
+    if active_tree != reconstructed_tree:
+        raise ContractError("active and reconstructed backend tree SHAs do not match")
+    if reconstruction.get("clean_reconstruction_diff") is not True:
+        raise ContractError("verified reconstruction requires clean_reconstruction_diff=true")
+
+    return {
+        "verified_patch_count": len(verified_paths),
+        "audit_report": audit_value,
+    }
+
+
 def verify_contract(contract_path: Path, repo_root: Path = REPO_ROOT) -> dict[str, Any]:
     """Return locally verified contract facts or raise ``ContractError``."""
     contract = _load_mapping(contract_path, "backend contract")
@@ -70,14 +168,13 @@ def verify_contract(contract_path: Path, repo_root: Path = REPO_ROOT) -> dict[st
         raise ContractError("contract schema_version must equal 1")
     name = _nonempty_string(contract, "name", "contract")
     status = _nonempty_string(contract, "verification_status", "contract")
-    if status != "TO_BE_CONFIRMED_ON_SERVER":
-        raise ContractError("verification_status must remain TO_BE_CONFIRMED_ON_SERVER before audit")
+    if status not in VALID_STATUSES:
+        raise ContractError(f"unsupported verification_status: {status}")
 
     upstream = _mapping(contract, "upstream")
     _nonempty_string(upstream, "repo", "upstream")
     base_commit = _nonempty_string(upstream, "nominal_base_commit", "upstream")
-    if len(base_commit) != 40 or any(character not in "0123456789abcdef" for character in base_commit):
-        raise ContractError("upstream.nominal_base_commit must be a 40-character lowercase Git SHA")
+    _validate_hex(base_commit, 40, "upstream.nominal_base_commit")
 
     runtime = _mapping(contract, "runtime")
     python_env = _nonempty_string(runtime, "python_env", "runtime")
@@ -89,14 +186,16 @@ def verify_contract(contract_path: Path, repo_root: Path = REPO_ROOT) -> dict[st
     experiment = _load_mapping(experiment_path, "experiment config")
 
     patch_stack = _mapping(contract, "patch_stack")
-    if patch_stack.get("status") != "TO_BE_CONFIRMED_ON_SERVER":
-        raise ContractError("patch_stack.status must be TO_BE_CONFIRMED_ON_SERVER before audit")
-    if patch_stack.get("ordered_patches") is not None:
-        raise ContractError("patch_stack.ordered_patches must remain null until the server audit")
     patch_value = _nonempty_string(patch_stack, "tail_opd_patch", "patch_stack")
     patch_path = _repo_path(repo_root, patch_value, "patch_stack.tail_opd_patch")
     if not patch_path.is_file():
         raise ContractError(f"TailOPD patch does not exist: {patch_path}")
+    patch_stack_result = _validate_patch_stack(
+        patch_stack,
+        status,
+        patch_value,
+        repo_root,
+    )
 
     invariants = contract.get("required_invariants")
     smoke_checks = contract.get("required_smoke_checks")
@@ -129,11 +228,13 @@ def verify_contract(contract_path: Path, repo_root: Path = REPO_ROOT) -> dict[st
 
     return {
         "name": name,
+        "verification_status": status,
         "nominal_base_commit": base_commit,
         "patch_path": patch_value,
         "patch_sha256": _sha256(patch_path),
         "experiment_path": experiment_value,
         "rollout_n": rollout_n,
+        **patch_stack_result,
     }
 
 
@@ -155,10 +256,17 @@ def main() -> int:
         "PASS: experiment config references the contract, patch, backend path, "
         f"runtime environment, and rollout_n={result['rollout_n']}"
     )
-    print(
-        "SKIP: requires active backend worktree: current HEAD/status, diff from nominal base, "
-        "ordered patch stack, unexplained diffs, backend integration test, and GPU smoke"
-    )
+    if result["verification_status"] == PENDING_STATUS:
+        print(
+            "SKIP: requires active backend worktree: current HEAD/status, diff from nominal base, "
+            "ordered patch stack, unexplained diffs, backend integration test, and GPU smoke"
+        )
+    else:
+        print(
+            "PASS: VERIFIED_ON_SERVER evidence includes "
+            f"{result['verified_patch_count']} hash-checked patches and matching backend tree SHAs"
+        )
+        print(f"PASS: reconstruction audit report: {result['audit_report']}")
     return 0
 
 

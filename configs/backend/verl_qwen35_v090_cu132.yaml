@@ -16,6 +16,7 @@ experiment:
 patch_stack:
   status: TO_BE_CONFIRMED_ON_SERVER
   ordered_patches: null
+  reconstruction_evidence: null
   tail_opd_patch: patches/verl/nll_tailopd_v1.patch
 
 required_invariants:

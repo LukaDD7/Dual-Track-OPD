@@ -133,8 +133,25 @@ verification_status: VERIFIED_ON_SERVER
 patch_stack:
   status: VERIFIED_ON_SERVER
   ordered_patches:
-    - <confirmed ordered patch paths>
+    - path: patches/verl/<first-confirmed-patch>.patch
+      sha256: <64-character-lowercase-sha256>
+    - path: patches/verl/nll_tailopd_v1.patch
+      sha256: <64-character-lowercase-sha256>
+  reconstruction_evidence:
+    audit_report: docs/<checked-in-server-audit-report>.md
+    audit_report_sha256: <64-character-lowercase-sha256>
+    active_backend_head: <40-character-git-commit>
+    active_backend_tree: <40-character-git-tree>
+    reconstructed_backend_tree: <same-40-character-git-tree>
+    clean_reconstruction_diff: true
 ```
+
+The local verifier accepts both contract states. In
+`TO_BE_CONFIRMED_ON_SERVER`, `ordered_patches` and
+`reconstruction_evidence` must both be `null` and the server checks are
+reported as `SKIP`. In `VERIFIED_ON_SERVER`, every ordered patch and the audit
+report are SHA-256 checked, both tree SHAs must match, and the clean-diff flag
+must be true.
 
 ### 3. Backend integration contract
 
