@@ -105,7 +105,7 @@ future:
   shared_rl_protocol:
     data: Geometry3K
     reward: geometry3k verifier
-    rollout_n: 4
+    rollout_n: 8
     optimizer: same across both arms
     benchmark_entry: scripts/sft_rl/run_sftrl_benchmarks.sh
     benchmark_note: evaluate exported HF checkpoints with the same benchmark suite
