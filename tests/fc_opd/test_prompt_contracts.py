@@ -63,3 +63,33 @@ def test_clean_geometry3k_question_rows_uses_versioned_builder():
     # 默认 v1 与旧行为一致
     out_v1 = clean_geometry3k_question_rows([{"question": "Find x."}], "v1")
     assert out_v1[0]["prompt"] == geometry3k_training_prompt("Find x.")
+
+
+def test_clean_geometry3k_question_rows_does_not_duplicate_source_placeholder():
+    row = {
+        "question": "<image>\nFind x.",
+        "images": [{"path": "one.png"}],
+    }
+
+    out = clean_geometry3k_question_rows([row], "v1")
+
+    assert out[0]["prompt"][0]["content"].count("<image>") == 1
+    assert out[0]["prompt"][0]["content"].startswith("<image>\nFind x.")
+
+
+def test_clean_geometry3k_question_rows_matches_multi_image_count():
+    row = {
+        "question": "<image><image>\nCompare the two figures.",
+        "images": [{"path": "one.png"}, {"path": "two.png"}],
+    }
+
+    out = clean_geometry3k_question_rows([row], "v1")
+
+    content = out[0]["prompt"][0]["content"]
+    assert content.count("<image>") == 2
+    assert content.startswith("<image><image>\nCompare the two figures.")
+
+
+def test_prompt_builders_reject_invalid_image_count():
+    with pytest.raises(ValueError, match="image_count"):
+        geometry3k_training_prompt("Find x.", image_count=0)

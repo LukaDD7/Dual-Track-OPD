@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 
-def geometry3k_training_prompt(question: str) -> list[dict[str, str]]:
+def geometry3k_training_prompt(question: str, *, image_count: int = 1) -> list[dict[str, str]]:
     """Return the canonical Qwen3-VL-Instruct image-question contract (v1).
 
     Qwen3-VL exposes reasoning behavior through the model variant and chat
@@ -16,13 +16,19 @@ def geometry3k_training_prompt(question: str) -> list[dict[str, str]]:
     question = str(question).strip()
     if not question:
         raise ValueError("Geometry3K question must be non-empty")
+    if image_count < 1:
+        raise ValueError("image_count must be at least one")
     return [{
         "role": "user",
-        "content": f"<image>\n{question}\n\nPut the final answer in \\boxed{{}}.",
+        "content": f"{'<image>' * image_count}\n{question}\n\nPut the final answer in \\boxed{{}}.",
     }]
 
 
-def geometry3k_training_prompt_boxed_only(question: str) -> list[dict[str, str]]:
+def geometry3k_training_prompt_boxed_only(
+    question: str,
+    *,
+    image_count: int = 1,
+) -> list[dict[str, str]]:
     """Concise-closing variant (v2, ``boxed_only``) for the truncation ablation.
 
     Same image-question contract as v1 with one changed variable: the closing
@@ -35,17 +41,23 @@ def geometry3k_training_prompt_boxed_only(question: str) -> list[dict[str, str]]
     question = str(question).strip()
     if not question:
         raise ValueError("Geometry3K question must be non-empty")
+    if image_count < 1:
+        raise ValueError("image_count must be at least one")
     return [{
         "role": "user",
         "content": (
-            f"<image>\n{question}\n\n"
+            f"{'<image>' * image_count}\n{question}\n\n"
             "Briefly reason. Then output your final answer as exactly one line: "
             "\\boxed{<answer>}. Stop immediately after that line; write nothing else."
         ),
     }]
 
 
-def geometry3k_training_prompt_answer_only(question: str) -> list[dict[str, str]]:
+def geometry3k_training_prompt_answer_only(
+    question: str,
+    *,
+    image_count: int = 1,
+) -> list[dict[str, str]]:
     """No-reasoning variant (v3, ``answer_only``) for the closing-behavior gate.
 
     This is a validation-only prompt ablation, not an approved training
@@ -57,10 +69,12 @@ def geometry3k_training_prompt_answer_only(question: str) -> list[dict[str, str]
     question = str(question).strip()
     if not question:
         raise ValueError("Geometry3K question must be non-empty")
+    if image_count < 1:
+        raise ValueError("image_count must be at least one")
     return [{
         "role": "user",
         "content": (
-            f"<image>\n{question}\n\n"
+            f"{'<image>' * image_count}\n{question}\n\n"
             "Return exactly one line and nothing else: "
             "\\boxed{<final answer>}. Do not show reasoning."
         ),
@@ -102,6 +116,26 @@ def clean_geometry3k_question_rows(rows, prompt_version: str = "v1"):
         row = dict(row)
         question = str(row.get("question", "")).strip()
         if question:
-            row["prompt"] = builder(question)
+            row["prompt"] = builder(
+                _remove_image_placeholders(question),
+                image_count=_row_image_count(row),
+            )
         out.append(row)
     return out
+
+
+def _remove_image_placeholders(question: str) -> str:
+    """Remove source placeholders; the canonical prompt owns all of them."""
+
+    return question.replace("<image>", "").strip()
+
+
+def _row_image_count(row: dict) -> int:
+    images = row.get("images")
+    if images is not None:
+        return len(images)
+    prompt = row.get("prompt")
+    if isinstance(prompt, list) and prompt:
+        content = prompt[0].get("content", "")
+        return str(content).count("<image>")
+    return 1
