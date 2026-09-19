@@ -45,6 +45,8 @@ NAME=""
 STEPS_EXPLICIT=false
 BATCH_EXPLICIT=false
 MODEL_EXPLICIT=false
+TRAIN_DATA_EXPLICIT=false
+VAL_DATA_EXPLICIT=false
 
 usage() {
     cat <<'EOF'
@@ -92,8 +94,8 @@ while [[ $# -gt 0 ]]; do
     --teacher-model) TEACHER_MODEL="${2:?missing teacher model}"; MODEL_EXPLICIT=true; shift 2 ;;
     --config-reference) CONFIG_REFERENCE_OVERRIDE="${2:?missing config reference}"; shift 2 ;;
         --source-data) SOURCE_DATA="${2:?missing source data}"; shift 2 ;;
-        --train-data) TRAIN_DATA="${2:?missing train data}"; PREPARE_DATA=false; shift 2 ;;
-        --val-data) VAL_DATA="${2:?missing val data}"; PREPARE_DATA=false; shift 2 ;;
+    --train-data) TRAIN_DATA="${2:?missing train data}"; PREPARE_DATA=false; TRAIN_DATA_EXPLICIT=true; shift 2 ;;
+    --val-data) VAL_DATA="${2:?missing val data}"; PREPARE_DATA=false; VAL_DATA_EXPLICIT=true; shift 2 ;;
         --steps) TOTAL_STEPS="${2:?missing step count}"; STEPS_EXPLICIT=true; shift 2 ;;
         --batch-size) PROMPT_BATCH_SIZE="${2:?missing batch size}"; BATCH_EXPLICIT=true; shift 2 ;;
         --name) NAME="_${2:?missing name}"; shift 2 ;;
@@ -130,9 +132,15 @@ case "${PROFILE}" in
                 STUDENT_MODEL="${VA_OPD_STUDENT_MODEL:-${HPC_ROOT}/models/Qwen3-VL-2B-Instruct}"
                 TEACHER_MODEL="${VA_OPD_TEACHER_MODEL:-${HPC_ROOT}/models/Qwen3-VL-8B-Instruct}"
             fi
-            TRAIN_DATA="${GEOMETRY3K_VA_OPD_PAPER_TRAIN:-${HPC_ROOT}/fc-opd-storage/outputs/fc_opd/geometry3k_va_paper/train.parquet}"
-            VAL_DATA="${GEOMETRY3K_VA_OPD_PAPER_VAL:-${HPC_ROOT}/fc-opd-storage/outputs/fc_opd/geometry3k_va_paper/val_monitor.parquet}"
-            PREPARE_DATA=false
+            if ! ${TRAIN_DATA_EXPLICIT}; then
+                TRAIN_DATA="${GEOMETRY3K_VA_OPD_PAPER_TRAIN:-${HPC_ROOT}/fc-opd-storage/outputs/fc_opd/geometry3k_va_paper/train.parquet}"
+            fi
+            if ! ${VAL_DATA_EXPLICIT}; then
+                VAL_DATA="${GEOMETRY3K_VA_OPD_PAPER_VAL:-${HPC_ROOT}/fc-opd-storage/outputs/fc_opd/geometry3k_va_paper/val_monitor.parquet}"
+            fi
+            if ! ${TRAIN_DATA_EXPLICIT} && ! ${VAL_DATA_EXPLICIT}; then
+                PREPARE_DATA=false
+            fi
             CONFIG_REFERENCE="${REPO_ROOT}/configs/experiment/qwen3vl_8b_2b_geometry3k_va_opd_paper.yaml"
         fi
         ;;

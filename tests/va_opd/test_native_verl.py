@@ -35,6 +35,52 @@ def test_build_degraded_multimodal_uses_prepared_same_size_image(tmp_path):
     assert output["videos"] is None
 
 
+def test_build_degraded_multimodal_replaces_every_image_in_order(tmp_path):
+    full_one = tmp_path / "full-one.png"
+    full_two = tmp_path / "full-two.png"
+    degraded_one = tmp_path / "degraded-one.png"
+    degraded_two = tmp_path / "degraded-two.png"
+    Image.new("RGB", (20, 10), "red").save(full_one)
+    Image.new("RGB", (15, 15), "blue").save(full_two)
+    Image.new("RGB", (20, 10), "black").save(degraded_one)
+    Image.new("RGB", (15, 15), "white").save(degraded_two)
+
+    output = build_degraded_multi_modal_data(
+        {"images": [Image.open(full_one), Image.open(full_two)]},
+        {
+            "condition_inputs": {
+                "full_images": [{"path": str(full_one)}, {"path": str(full_two)}],
+                "degraded_images": [
+                    {"path": str(degraded_one)},
+                    {"path": str(degraded_two)},
+                ],
+            }
+        },
+    )
+
+    assert [image.size for image in output["images"]] == [(20, 10), (15, 15)]
+    assert output["images"][0].getpixel((0, 0)) == (0, 0, 0)
+    assert output["images"][1].getpixel((0, 0)) == (255, 255, 255)
+
+
+def test_build_degraded_multimodal_rejects_pair_count_mismatch(tmp_path):
+    full = tmp_path / "full.png"
+    degraded = tmp_path / "degraded.png"
+    Image.new("RGB", (20, 10), "red").save(full)
+    Image.new("RGB", (20, 10), "black").save(degraded)
+
+    with pytest.raises(ValueError, match="image count must match"):
+        build_degraded_multi_modal_data(
+            {"images": [Image.open(full), Image.open(full)]},
+            {
+                "condition_inputs": {
+                    "full_images": [{"path": str(full)}, {"path": str(full)}],
+                    "degraded_images": [{"path": str(degraded)}],
+                }
+            },
+        )
+
+
 def test_build_degraded_multimodal_rejects_dimension_drift(tmp_path):
     full_path = tmp_path / "full.png"
     degraded_path = tmp_path / "wrong.png"

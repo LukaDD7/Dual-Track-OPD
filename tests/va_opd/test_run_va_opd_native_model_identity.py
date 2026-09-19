@@ -57,6 +57,14 @@ def test_cli_models_survive_paper_profile(monkeypatch, tmp_path):
     assert "if ! ${MODEL_EXPLICIT}; then" in script_text
 
 
+def test_cli_data_paths_survive_paper_profile():
+    script_text = SCRIPT.read_text(encoding="utf-8")
+    assert "TRAIN_DATA_EXPLICIT=true" in script_text
+    assert "VAL_DATA_EXPLICIT=true" in script_text
+    assert "if ! ${TRAIN_DATA_EXPLICIT}; then" in script_text
+    assert "if ! ${VAL_DATA_EXPLICIT}; then" in script_text
+
+
 def test_paper_profile_defaults_to_8b_teacher_2b_student():
     script_text = SCRIPT.read_text(encoding="utf-8")
     assert "Qwen3-VL-2B-Instruct" in script_text

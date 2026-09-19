@@ -20,7 +20,7 @@ def build_degraded_multi_modal_data(
     multi_modal_data: Mapping[str, Any] | None,
     sample_fields: Mapping[str, Any] | None,
 ) -> dict[str, Any]:
-    """Replace the single full-resolution image with its prepared 10% image.
+    """Replace full-resolution images with their prepared 10% images.
 
     The prepared dataset is the source of truth.  Runtime degradation is not a
     fallback because it can change image dimensions, interpolation, or visual
@@ -30,8 +30,8 @@ def build_degraded_multi_modal_data(
     source = dict(multi_modal_data or {})
     images = source.get("images")
     image_items = _as_items(images)
-    if len(image_items) != 1:
-        raise ValueError(f"VA-OPD currently requires exactly one image per sample, got {len(image_items)}")
+    if not image_items:
+        raise ValueError("VA-OPD requires at least one image per sample")
 
     extra_info = _as_mapping((sample_fields or {}).get("extra_info"))
     condition_inputs = _as_mapping(
@@ -39,36 +39,59 @@ def build_degraded_multi_modal_data(
         or extra_info.get("condition_inputs")
         or extra_info.get("fc_opd_condition_inputs")
     )
-    full = _as_mapping(condition_inputs.get("full_image"))
-    full_path = Path(str(full.get("path", ""))).expanduser()
-    degraded = _as_mapping(condition_inputs.get("degraded_image"))
-    degraded_path = Path(str(degraded.get("path", ""))).expanduser()
-    if not full_path.is_file():
-        raise FileNotFoundError(f"prepared VA-OPD full image is missing: {full_path}")
-    if not degraded_path.is_file():
-        raise FileNotFoundError(f"prepared VA-OPD degraded image is missing: {degraded_path}")
-
     from PIL import Image
 
-    with Image.open(full_path) as handle:
-        stored_full_size = handle.size
-    with Image.open(degraded_path) as handle:
-        degraded_image = handle.convert("RGB").copy()
-    if degraded_image.size != stored_full_size:
+    full_entries = _as_items(condition_inputs.get("full_images"))
+    degraded_entries = _as_items(condition_inputs.get("degraded_images"))
+    # Backward compatibility with the original single-image Geometry3K schema.
+    if not full_entries:
+        full_entries = [condition_inputs.get("full_image")]
+    if not degraded_entries:
+        degraded_entries = [condition_inputs.get("degraded_image")]
+    full_entries = [_as_mapping(entry) for entry in full_entries]
+    degraded_entries = [_as_mapping(entry) for entry in degraded_entries]
+    if len(full_entries) != len(image_items) or len(degraded_entries) != len(image_items):
         raise ValueError(
-            "prepared degraded image dimensions differ from the prepared full image: "
-            f"full={stored_full_size}, degraded={degraded_image.size}, path={degraded_path}"
+            "VA-OPD image count must match full/degraded condition inputs: "
+            f"runtime={len(image_items)}, full={len(full_entries)}, degraded={len(degraded_entries)}"
         )
 
-    original_size = _image_size(image_items[0])
-    if original_size is not None and degraded_image.size != original_size:
+    full_sizes = []
+    for entry in full_entries:
+        full_path = Path(str(entry.get("path", ""))).expanduser()
+        if not full_path.is_file():
+            raise FileNotFoundError(f"prepared VA-OPD full image is missing: {full_path}")
+        with Image.open(full_path) as handle:
+            full_sizes.append(handle.size)
+
+    degraded_images = []
+    for index, entry in enumerate(degraded_entries):
+        degraded_path = Path(str(entry.get("path", ""))).expanduser()
+        if not degraded_path.is_file():
+            raise FileNotFoundError(f"prepared VA-OPD degraded image is missing: {degraded_path}")
+        with Image.open(degraded_path) as handle:
+            degraded_image = handle.convert("RGB").copy()
+        if degraded_image.size != full_sizes[index]:
+            raise ValueError(
+                "prepared degraded image dimensions differ from the prepared full image: "
+                f"full={full_sizes[index]}, degraded={degraded_image.size}, path={degraded_path}"
+            )
+        degraded_images.append(degraded_image)
+
+    runtime_sizes = [_image_size(item) for item in image_items]
+    for index, (degraded_image, original_size) in enumerate(zip(degraded_images, runtime_sizes)):
+        if original_size is None or degraded_image.size == original_size:
+            continue
         # vLLM may resize the full image before returning it to the agent loop.
         # The persisted image pair remains the provenance source, but the teacher
         # must consume the same runtime dimensions for both conditions so the
         # visual token count and sequence alignment stay unchanged.
-        degraded_image = degraded_image.resize(original_size, Image.Resampling.NEAREST)
+        degraded_images[index] = degraded_image.resize(original_size, Image.Resampling.NEAREST)
 
-    source["images"] = _replace_single(images, degraded_image)
+    if len(degraded_images) == 1:
+        source["images"] = _replace_single(images, degraded_images[0])
+    else:
+        source["images"] = degraded_images
     return source
 
 
@@ -307,6 +330,8 @@ def _as_mapping(value: Any) -> dict[str, Any]:
 def _as_items(value: Any) -> list[Any]:
     if value is None:
         return []
+    if hasattr(value, "tolist"):
+        value = value.tolist()
     if isinstance(value, (list, tuple)):
         return list(value)
     return [value]

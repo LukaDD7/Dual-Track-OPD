@@ -214,3 +214,8 @@ every 25 steps so checkpoint selection can use the entire validation curve.
   pinned verl backend patch:
   `patches/verl/va_opd_native_e0031631.patch`.
 - Run manifests, raw logs, checkpoints, and model weights remain outside Git.
+
+For the ViRL39K project-domain scaling run, use
+`docs/va_opd_32b_8b_virl39k_runbook_20260919.md` and
+`scripts/hpc/run_va_opd_32b_teacher_8b_student_virl39k.sh`; do not mix its
+results with this controlled Geometry3K run.

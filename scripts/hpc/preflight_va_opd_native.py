@@ -145,27 +145,49 @@ def dataset_summary(path: Path, *, audit_all_images: bool) -> dict[str, Any]:
 
     rows = range(len(frame)) if audit_all_images else range(min(8, len(frame)))
     degraded_modes: set[str] = set()
+    image_rows = 0
+    image_count = 0
+    multi_image_rows = 0
     for row_index in rows:
         row = frame.iloc[row_index]
         condition_inputs = mapping(row["condition_inputs"])
-        full = mapping(condition_inputs.get("full_image"))
-        degraded = mapping(condition_inputs.get("degraded_image"))
-        full_path = Path(str(full.get("path", ""))).expanduser()
-        degraded_path = Path(str(degraded.get("path", ""))).expanduser()
-        if not full_path.is_file() or not degraded_path.is_file():
-            raise FileNotFoundError(
-                f"row {row_index} image pair is missing: full={full_path}, degraded={degraded_path}"
+        full_entries = condition_inputs.get("full_images")
+        degraded_entries = condition_inputs.get("degraded_images")
+        if full_entries is None:
+            full_entries = [condition_inputs.get("full_image")]
+        if degraded_entries is None:
+            degraded_entries = [condition_inputs.get("degraded_image")]
+        full_entries = _as_entries(full_entries)
+        degraded_entries = _as_entries(degraded_entries)
+        if len(full_entries) != len(degraded_entries) or not full_entries:
+            raise ValueError(
+                f"row {row_index} has incomplete full/degraded image pairs: "
+                f"full={len(full_entries)}, degraded={len(degraded_entries)}"
             )
-        with Image.open(full_path) as full_image, Image.open(degraded_path) as degraded_image:
-            if full_image.size != degraded_image.size:
-                raise ValueError(
-                    f"row {row_index} image dimensions differ: full={full_image.size}, degraded={degraded_image.size}"
+        image_rows += 1
+        image_count += len(full_entries)
+        multi_image_rows += int(len(full_entries) > 1)
+        for image_index, (full, degraded) in enumerate(zip(full_entries, degraded_entries)):
+            full = mapping(full)
+            degraded = mapping(degraded)
+            full_path = Path(str(full.get("path", ""))).expanduser()
+            degraded_path = Path(str(degraded.get("path", ""))).expanduser()
+            if not full_path.is_file() or not degraded_path.is_file():
+                raise FileNotFoundError(
+                    f"row {row_index} image pair {image_index} is missing: "
+                    f"full={full_path}, degraded={degraded_path}"
                 )
-        transform = mapping(degraded.get("transform"))
-        source_transform = mapping(transform.get("source_transform"))
-        mode = str(transform.get("degraded_mode") or source_transform.get("degraded_mode") or "")
-        if mode:
-            degraded_modes.add(mode)
+            with Image.open(full_path) as full_image, Image.open(degraded_path) as degraded_image:
+                if full_image.size != degraded_image.size:
+                    raise ValueError(
+                        f"row {row_index} image {image_index} dimensions differ: "
+                        f"full={full_image.size}, degraded={degraded_image.size}"
+                    )
+            transform = mapping(degraded.get("transform"))
+            source_transform = mapping(transform.get("source_transform"))
+            mode = str(transform.get("degraded_mode") or source_transform.get("degraded_mode") or "")
+            if mode:
+                degraded_modes.add(mode)
     if degraded_modes and degraded_modes != {"lowres_10pct_nearest"}:
         raise ValueError(f"unexpected degradation modes in {path}: {sorted(degraded_modes)}")
 
@@ -175,10 +197,23 @@ def dataset_summary(path: Path, *, audit_all_images: bool) -> dict[str, Any]:
         "columns": sorted(frame.columns.tolist()),
         "sha256": sha256_file(path),
         "image_rows_audited": len(list(rows)),
+        "image_pairs_audited": image_count,
+        "multi_image_rows_audited": multi_image_rows,
+        "multi_image_extra_images_audited": image_count - image_rows,
         "degraded_modes": sorted(degraded_modes),
         "first_sample_uid": str(frame.iloc[0]["sample_uid"]),
         "last_sample_uid": str(frame.iloc[-1]["sample_uid"]),
     }
+
+
+def _as_entries(value: Any) -> list[Any]:
+    if value is None:
+        return []
+    if hasattr(value, "tolist"):
+        value = value.tolist()
+    if isinstance(value, (list, tuple)):
+        return list(value)
+    return [value]
 
 
 def package_version(name: str) -> str | None:
@@ -225,8 +260,8 @@ def main() -> None:
         )
     if args.teacher_gpus % args.teacher_tp:
         raise ValueError("teacher GPU pool must be divisible by teacher tensor parallel size")
-    if args.rollout_n != 4:
-        raise ValueError("paper-faithful OPD/VA-OPD comparison requires K=4")
+    if args.rollout_n not in (4, 8):
+        raise ValueError("OPD/VA-OPD rollout count must be K=4 (paper primary) or K=8 (project scaling)")
     if args.prompt_batch_size % args.actor_gpus:
         raise ValueError("prompt batch size must be divisible by actor GPU count")
     if args.max_prompt_length < 1 or args.max_response_length < 2:
