@@ -44,6 +44,7 @@ KEEPALIVE_AFTER_SUCCESS=false
 NAME=""
 STEPS_EXPLICIT=false
 BATCH_EXPLICIT=false
+MODEL_EXPLICIT=false
 
 usage() {
     cat <<'EOF'
@@ -85,8 +86,8 @@ while [[ $# -gt 0 ]]; do
         --actor-gpus) ACTOR_GPUS="${2:?missing actor GPU count}"; shift 2 ;;
         --teacher-gpus) TEACHER_GPUS="${2:?missing teacher GPU count}"; shift 2 ;;
         --teacher-tp) TEACHER_TP="${2:?missing teacher TP}"; shift 2 ;;
-    --student-model) STUDENT_MODEL="${2:?missing student model}"; shift 2 ;;
-    --teacher-model) TEACHER_MODEL="${2:?missing teacher model}"; shift 2 ;;
+    --student-model) STUDENT_MODEL="${2:?missing student model}"; MODEL_EXPLICIT=true; shift 2 ;;
+    --teacher-model) TEACHER_MODEL="${2:?missing teacher model}"; MODEL_EXPLICIT=true; shift 2 ;;
     --config-reference) CONFIG_REFERENCE_OVERRIDE="${2:?missing config reference}"; shift 2 ;;
         --source-data) SOURCE_DATA="${2:?missing source data}"; shift 2 ;;
         --train-data) TRAIN_DATA="${2:?missing train data}"; PREPARE_DATA=false; shift 2 ;;
@@ -123,8 +124,10 @@ case "${PROFILE}" in
         TEST_FREQ="${TEST_FREQ_OVERRIDE:-25}"
         AUDIT_ALL_IMAGES=true
         if [[ "${PROFILE}" == "paper" ]]; then
-            STUDENT_MODEL="${VA_OPD_STUDENT_MODEL:-${HPC_ROOT}/models/Qwen3-VL-2B-Instruct}"
-            TEACHER_MODEL="${VA_OPD_TEACHER_MODEL:-${HPC_ROOT}/models/Qwen3-VL-8B-Instruct}"
+            if ! ${MODEL_EXPLICIT}; then
+                STUDENT_MODEL="${VA_OPD_STUDENT_MODEL:-${HPC_ROOT}/models/Qwen3-VL-2B-Instruct}"
+                TEACHER_MODEL="${VA_OPD_TEACHER_MODEL:-${HPC_ROOT}/models/Qwen3-VL-8B-Instruct}"
+            fi
             TRAIN_DATA="${GEOMETRY3K_VA_OPD_PAPER_TRAIN:-${HPC_ROOT}/fc-opd-storage/outputs/fc_opd/geometry3k_va_paper/train.parquet}"
             VAL_DATA="${GEOMETRY3K_VA_OPD_PAPER_VAL:-${HPC_ROOT}/fc-opd-storage/outputs/fc_opd/geometry3k_va_paper/val_monitor.parquet}"
             PREPARE_DATA=false
