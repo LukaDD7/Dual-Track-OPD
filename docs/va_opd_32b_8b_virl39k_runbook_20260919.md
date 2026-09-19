@@ -57,6 +57,9 @@ Conversion policy:
 - Validation monitor: 500 rows, stratified by source.
 - The monitor overlaps training by default. It is an operational monitor, not
   a held-out paper validation set, and it does not reduce the train pool.
+- The validation scorer must support every retained GT type. The current
+  gold-in-boxed contract audit is 0 failures over all 38,348 train rows and
+  all 500 validation rows.
 - Multi-image samples are preserved. Every image receives its own prepared
   degraded counterpart.
 - Full image paths reference the stable original ViRL image tree; only
@@ -182,3 +185,8 @@ second Ray-based VA-OPD/OPD launcher on the same host while this run is active.
 Checkpoints must be selected from the validation curve, not merely by final
 step. Because all checkpoints are retained, retain the best-val step and the
 final step when pruning disk usage.
+
+Before using any validation curve produced before commit `0507801`'s follow-up
+scorer fix, regenerate it with the fixed scorer; older curves undercount
+yes/no and numeric-expression answers and must not be used for checkpoint
+selection.
