@@ -23,6 +23,7 @@ TEACHER_TP="${VA_OPD_TEACHER_TP:-2}"
 RUN_ID="${VA_OPD_RUN_ID:-qwen3vl_32b_teacher_8b_student_va_opd_full5e_v1}"
 SAVE_FREQ="${VA_OPD_SAVE_FREQ:-50}"
 TEST_FREQ="${VA_OPD_TEST_FREQ:-25}"
+ROLLOUT_N="${VA_OPD_ROLLOUT_N:-8}"
 RESUME_ARG=()
 if [[ "${VA_OPD_RESUME:-0}" == "1" ]]; then
   RESUME_ARG=(--resume)
@@ -41,6 +42,7 @@ Environment overrides:
   VA_OPD_RUN_ID         default qwen3vl_32b_teacher_8b_student_va_opd_full5e_v1
   VA_OPD_SAVE_FREQ      default 50
   VA_OPD_TEST_FREQ      default 25
+  VA_OPD_ROLLOUT_N      default 8
   VA_OPD_RESUME=1       enable resume
 
 The model paths and config are intentionally not exposed as loose CLI flags
@@ -103,6 +105,7 @@ exec bash "${REPO_ROOT}/scripts/hpc/run_va_opd_native.sh" \
   --actor-gpus "${ACTOR_GPUS}" \
   --teacher-gpus "${TEACHER_GPUS}" \
   --teacher-tp "${TEACHER_TP}" \
+  --rollout-n "${ROLLOUT_N}" \
   --student-model "${STUDENT_MODEL}" \
   --teacher-model "${TEACHER_MODEL}" \
   --config-reference "${CONFIG_REFERENCE}" \

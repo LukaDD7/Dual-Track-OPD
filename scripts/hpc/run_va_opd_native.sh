@@ -57,6 +57,7 @@ Usage: bash scripts/hpc/run_va_opd_native.sh [options]
   --actor-gpus N               FSDP/rollout pool size (default: 4)
   --teacher-gpus N             Native teacher pool size (default: 2)
   --teacher-tp N               GPUs per teacher replica (default: 2)
+  --rollout-n N                Rollouts per prompt (default: 4)
   --student-model PATH
   --teacher-model PATH
   --config-reference PATH
@@ -86,6 +87,7 @@ while [[ $# -gt 0 ]]; do
         --actor-gpus) ACTOR_GPUS="${2:?missing actor GPU count}"; shift 2 ;;
         --teacher-gpus) TEACHER_GPUS="${2:?missing teacher GPU count}"; shift 2 ;;
         --teacher-tp) TEACHER_TP="${2:?missing teacher TP}"; shift 2 ;;
+        --rollout-n) ROLLOUT_N="${2:?missing rollout count}"; shift 2 ;;
     --student-model) STUDENT_MODEL="${2:?missing student model}"; MODEL_EXPLICIT=true; shift 2 ;;
     --teacher-model) TEACHER_MODEL="${2:?missing teacher model}"; MODEL_EXPLICIT=true; shift 2 ;;
     --config-reference) CONFIG_REFERENCE_OVERRIDE="${2:?missing config reference}"; shift 2 ;;

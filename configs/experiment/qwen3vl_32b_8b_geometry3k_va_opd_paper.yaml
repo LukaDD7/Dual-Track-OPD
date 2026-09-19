@@ -34,7 +34,7 @@ distillation:
 
 visual_advantage:
   rectification: positive
-  rollouts_per_prompt: 4
+  rollouts_per_prompt: 8
   rollout_standard_deviation: population
   rollout_temperature: 1.0
   high_token_fraction: 0.20
