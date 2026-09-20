@@ -1,0 +1,87 @@
+experiment:
+  name: qwen3vl_32b_8b_virl39k_va_opd_paper_k4
+  objective: va_opd
+  paper: arxiv:2605.21924
+  paper_setting: paper_training_contract_on_project_models
+  backend_commit: e003163181731412595257a72ec173071efb125f
+  backend_patch: patches/verl/va_opd_native_e0031631.patch
+
+models:
+  student: ${DTOPD_ROOT}/models/Qwen3-VL-8B-Instruct
+  teacher: ${DTOPD_ROOT}/models/Qwen3-VL-32B-Instruct
+  student_source: modelscope/Qwen/Qwen3-VL-8B-Instruct
+  teacher_source: modelscope/Qwen/Qwen3-VL-32B-Instruct
+  shared_tokenizer_required: true
+
+data:
+  source: ${DTOPD_ROOT}/dataset/ViRL39K/39Krelease.parquet
+  image_root: ${DTOPD_ROOT}/dataset/ViRL39K
+  prepared_root: ${DTOPD_ROOT}/fc-opd-storage/outputs/fc_opd/virl39k_va_opd
+  converter: scripts/gen_virl39k_va_opd_parquet.py
+  source_rows: 38870
+  expected_train_rows: 38348
+  validation_purpose: overlap_monitor_only
+  validation_rows: 500
+  gt_filter: letter_yesno_pure_number_has_number
+  degradation: lowres_10pct_nearest
+  preserve_multi_image_samples: true
+  require_paired_image_dimensions: true
+
+distillation:
+  backend: verl_native_opd
+  divergence: reverse_kl_k1_policy_gradient
+  conditions: [full, degraded]
+  kl_target_condition: full
+  use_task_rewards: false
+  loss_mode: va_opd_k1
+  loss_aggregation: seq-mean-token-sum
+  loss_clamp: 10.0
+
+visual_advantage:
+  rectification: positive
+  rollouts_per_prompt: 4
+  rollout_standard_deviation: population
+  rollout_temperature: 1.0
+  high_token_fraction: 0.20
+  high_group_weight: 0.50
+
+training:
+  learning_rate: 1.0e-6
+  learning_rate_provenance: operational_default_not_specified_in_arxiv_v1
+  optimizer: AdamW
+  prompt_batch_size: 16
+  ppo_epochs: 1
+  default_pilot_steps: 500
+  full_epoch_steps: 2397
+  full_epochs: 5
+  temperature: 1.0
+  top_p: 0.99
+  max_prompt_length: 6144
+  max_response_length: 2048
+  actor_strategy: fsdp2
+  rollout_backend: vllm
+  actor_cpu_offload: false
+  optimizer_cpu_offload: false
+  gradient_checkpointing: true
+  calculate_entropy: true
+  dynamic_microbatch_token_limit: 10240
+  performance_provenance: operational_default
+
+hardware:
+  minimum_visible_gpus: 8
+  actor_gpus: 4
+  teacher_gpus: 4
+  teacher_tensor_parallel_size: 2
+  expected_gpu: H200_141GB
+  cuda_runtime: "12.8"
+  system_nvcc_allowed: false
+
+gates:
+  exact_sibling_group_size: 4
+  teacher_response_id_match: true
+  paired_image_dimension_match: true
+  group_weight_sum_max_error: 1.0e-5
+  finite_teacher_log_probs: true
+  finite_gradient_required: true
+  completed_update_required: true
+  va_mean_not_identically_zero: true

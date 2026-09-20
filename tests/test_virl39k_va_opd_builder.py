@@ -147,3 +147,43 @@ def test_virl39k_32b_8b_launcher_defaults_are_strict():
     assert 'TRAIN_DATA="${DATA_ROOT}/train.parquet"' in launcher
     assert "rollouts_per_prompt: 8" in config
     assert "expected_train_rows: 38348" in config
+
+
+def test_virl39k_32b_8b_paper_k4_entrypoint_is_isolated():
+    launcher = Path("scripts/hpc/run_va_opd_32b_teacher_8b_student_virl39k_paper_k4.sh").read_text()
+    config = Path("configs/experiment/qwen3vl_32b_8b_virl39k_va_opd_paper_k4.yaml").read_text()
+    base = Path("scripts/hpc/run_va_opd_32b_teacher_8b_student_virl39k.sh").read_text()
+
+    assert "export VA_OPD_ROLLOUT_N=4" in launcher
+    assert "qwen3vl_32b_8b_virl39k_va_opd_paper_k4.yaml" in launcher
+    assert "qwen3vl_32b_teacher_8b_student_virl39k_va_opd_paper_k4_v1" in launcher
+    assert "rollouts_per_prompt: 4" in config
+    assert "paper_training_contract_on_project_models" in config
+    assert "exact_sibling_group_size: 4" in config
+    # The K=8 project scaling default remains unchanged.
+    assert 'ROLLOUT_N="${VA_OPD_ROLLOUT_N:-8}"' in base
+
+
+def test_va_opd_native_performance_defaults_are_backwards_compatible():
+    script = Path("scripts/hpc/run_va_opd_native.sh").read_text()
+    perf = Path("scripts/hpc/run_va_opd_32b_teacher_8b_student_virl39k_perf_arm.sh").read_text()
+
+    assert 'PPO_MAX_TOKEN_LEN_PER_GPU="${VA_OPD_PPO_MAX_TOKEN_LEN_PER_GPU:-10240}"' in script
+    assert 'GRADIENT_CHECKPOINTING="${VA_OPD_GRADIENT_CHECKPOINTING:-true}"' in script
+    assert "enable_gradient_checkpointing=${GRADIENT_CHECKPOINTING}" in script
+    assert "ppo_max_token_len_per_gpu=${PPO_MAX_TOKEN_LEN_PER_GPU}" in script
+    assert 'VA_OPD_ROLLOUT_N=8' in perf
+    for token_limit in ("16384", "20480", "32768"):
+        assert f"TOKEN_LIMIT={token_limit};" in perf
+    assert "VA_OPD_MAX_ACTOR_CKPT_TO_KEEP:-2" in perf
+    assert "performance arms fix batch, step count, and run lineage" in perf
+
+
+def test_va_opd_best_checkpoint_protector_is_external_and_safe_by_default():
+    script = Path("scripts/hpc/protect_va_opd_best_checkpoint.py").read_text()
+    doc = Path("docs/va_opd_32b_8b_virl39k_paper_k4_and_perf_20260920.md").read_text()
+
+    assert "default is a dry run" in script
+    assert "copy_function=_hardlink" in script
+    assert "does not modify the trainer" in doc
+    assert "--watch" in doc

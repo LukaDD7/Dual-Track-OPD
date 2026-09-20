@@ -33,6 +33,8 @@ RESUME_MODE="${VA_OPD_RESUME_MODE:-disable}"
 MAX_PROMPT_LENGTH=6144
 MAX_RESPONSE_LENGTH=2048
 LEARNING_RATE=1e-6
+PPO_MAX_TOKEN_LEN_PER_GPU="${VA_OPD_PPO_MAX_TOKEN_LEN_PER_GPU:-10240}"
+GRADIENT_CHECKPOINTING="${VA_OPD_GRADIENT_CHECKPOINTING:-true}"
 ROLLOUT_GPU_MEMORY_UTILIZATION=0.55
 TEACHER_GPU_MEMORY_UTILIZATION=0.80
 PREPARE_DATA=true
@@ -118,6 +120,15 @@ case "${OBJECTIVE}" in
     va_opd) LOSS_MODE="va_opd_k1"; LOSS_AGG_MODE="seq-mean-token-sum"; VA_ENABLED=true ;;
     *) echo "FATAL: objective must be opd or va_opd" >&2; exit 2 ;;
 esac
+
+case "${GRADIENT_CHECKPOINTING}" in
+    true|false) ;;
+    *) echo "FATAL: VA_OPD_GRADIENT_CHECKPOINTING must be true or false, got: ${GRADIENT_CHECKPOINTING}" >&2; exit 2 ;;
+esac
+if ! [[ "${PPO_MAX_TOKEN_LEN_PER_GPU}" =~ ^[0-9]+$ ]] || (( PPO_MAX_TOKEN_LEN_PER_GPU < 10240 )); then
+    echo "FATAL: VA_OPD_PPO_MAX_TOKEN_LEN_PER_GPU must be an integer >= 10240, got: ${PPO_MAX_TOKEN_LEN_PER_GPU}" >&2
+    exit 2
+fi
 case "${PROFILE}" in
     smoke) ;;
     train|paper)
@@ -277,7 +288,7 @@ CUDA_VISIBLE_DEVICES="${VISIBLE_GPUS}" "${PYTHON}" -m verl.trainer.main_ppo \
     "data.custom_cls.name=FCOPDDataset" \
     "actor_rollout_ref.model.path=${STUDENT_MODEL}" \
     "actor_rollout_ref.model.use_remove_padding=true" \
-    "actor_rollout_ref.model.enable_gradient_checkpointing=true" \
+    "actor_rollout_ref.model.enable_gradient_checkpointing=${GRADIENT_CHECKPOINTING}" \
     "actor_rollout_ref.actor.optim.lr=${LEARNING_RATE}" \
     "actor_rollout_ref.actor.ppo_mini_batch_size=${PROMPT_BATCH_SIZE}" \
     "actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1" \
@@ -286,7 +297,7 @@ CUDA_VISIBLE_DEVICES="${VISIBLE_GPUS}" "${PYTHON}" -m verl.trainer.main_ppo \
     "actor_rollout_ref.actor.loss_agg_mode=${LOSS_AGG_MODE}" \
     "actor_rollout_ref.actor.calculate_entropy=true" \
     "actor_rollout_ref.actor.use_dynamic_bsz=true" \
-    "actor_rollout_ref.actor.ppo_max_token_len_per_gpu=10240" \
+    "actor_rollout_ref.actor.ppo_max_token_len_per_gpu=${PPO_MAX_TOKEN_LEN_PER_GPU}" \
     "actor_rollout_ref.actor.fsdp_config.param_offload=false" \
     "actor_rollout_ref.actor.fsdp_config.optimizer_offload=false" \
     "actor_rollout_ref.rollout.name=vllm" \
