@@ -13,6 +13,8 @@ def pinned_constraints() -> dict[str, str]:
         line = raw_line.strip()
         if not line or line.startswith("#"):
             continue
+        if "==" not in line:
+            continue
         name, version = line.split("==", 1)
         pins[name] = version
     return pins
@@ -29,6 +31,7 @@ def test_native_va_opd_matrix_matches_backend_and_vllm_metadata() -> None:
     assert pins["flashinfer-python"] == "0.5.3"
     assert pins["flash-attn"] == "2.8.3"
     assert pins["numpy"] == "2.2.6"
+    assert pins["mathruler"] == "0.1.0"
 
     # vLLM 0.12.0 publishes transformers>=4.56,<5, while the exact verl
     # backend publishes vllm>=0.8.5,<=0.12.0 and numpy>=2.0.0.
@@ -73,6 +76,8 @@ def test_preflight_requires_source_build_provenance() -> None:
 
     assert '("2.9.0", "12.8", "0.12.0+cu128", "4.57.3")' in preflight
     assert '"flash-attn": "2.8.3"' in preflight
+    assert '"mathruler": "0.1.0"' in preflight
+    assert "environment manifest is missing required package" in preflight
     assert "va_opd_environment_manifest.json" in preflight
     assert "EXPECTED_VLLM_SOURCE_COMMIT" in preflight
 

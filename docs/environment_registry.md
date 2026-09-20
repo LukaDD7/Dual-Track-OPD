@@ -308,6 +308,7 @@ Phase 1 通过后，改 `distillation_loss_mode=va_opd_k1 use_policy_gradient=Tr
 | `AssertionError: processor needed` (数据有 images 列) | 创建 text_only 版 parquet（去掉了 images/condition_inputs 列） |
 | `NotImplementedError: geometry3k reward` | 将 data_source 改为 `hiyouga/geometry3k` |
 | `ModuleNotFoundError: mathruler` (geo3k reward 打分) | 从 `${DTOPD_ROOT}/envs/vision-opd-cu128` 复制 `mathruler` + `mathruler-0.1.0.dist-info` 到 `${ENV_PREFIX}/lib/python3.12/site-packages/`（纯 Python 包，已用目标 env python 验证 `verl.utils.reward_score.geo3k` import 与 compute_score） |
+| ViRL39K VA-OPD validation | `va-opd-native-e003-cu128-r595-v1` 中的 `mathruler==0.1.0` 已写入 cu128 constraints、preflight expected versions 和环境 manifest；缺失时 preflight fail-fast |
 | `AssertionError: number of items:[0] < k_partitions:[4]` | mathruler 缺失的次生错误：reward 全部失败 → batch 为空 → `_balance_batch` 崩溃；补装 mathruler 后消除 |
 
 ### 9.5 文本数据文件

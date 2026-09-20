@@ -34,6 +34,7 @@ EXPECTED_VERSIONS_CU128 = {
     "tensordict": "0.10.0",
     "flash-attn": "2.8.3",
     "flashinfer-python": "0.5.3",
+    "mathruler": "0.1.0",
 }
 
 # ── cu132 (source-built vLLM 0.25.1) ────────────────────────────────────
@@ -53,6 +54,7 @@ EXPECTED_VERSIONS_CU132 = {
     "tensordict": "0.10.0",
     "flash-attn": "2.8.3",
     "flashinfer-python": "0.6.13",
+    "mathruler": "0.1.0",
 }
 
 # Patch SHA-256 are only validated for cu128 (exact known-good overlay).
@@ -405,7 +407,10 @@ def main() -> None:
     manifest_packages = mapping(environment_manifest.get("packages"))
     for package, expected in {"torch": manifest_torch_version, **expected_versions}.items():
         if manifest_packages.get(package) is None:
-            continue
+            raise RuntimeError(
+                f"environment manifest is missing required package {package} "
+                f"(expected {expected})"
+            )
         actual_manifest = str(manifest_packages.get(package) or "").split("+")[0]
         expected_manifest = expected.split("+")[0]
         if actual_manifest != expected_manifest:

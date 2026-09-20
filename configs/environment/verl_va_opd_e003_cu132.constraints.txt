@@ -41,6 +41,7 @@ datasets==4.4.2
 accelerate==1.12.0
 peft==0.18.0
 qwen-vl-utils==0.0.14
+mathruler==0.1.0
 # cmake >= 4.0 enables CMP0146=NEW which removes FindCUDA module required by
 # torch's Caffe2 CMake config during vLLM source build.
 cmake<4.0

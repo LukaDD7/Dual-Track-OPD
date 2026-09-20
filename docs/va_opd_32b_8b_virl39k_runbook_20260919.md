@@ -60,6 +60,10 @@ Conversion policy:
 - The validation scorer must support every retained GT type. The current
   gold-in-boxed contract audit is 0 failures over all 38,348 train rows and
   all 500 validation rows.
+- The validation environment pins `mathruler==0.1.0`.  Preflight requires it in
+  both the runtime environment and environment manifest, and the scorer uses it
+  only for single conservative LaTeX expressions (not equations, ranges,
+  `or` answers, sets, coordinates, or unit text).
 - Multi-image samples are preserved. Every image receives its own prepared
   degraded counterpart.
 - Full image paths reference the stable original ViRL image tree; only
