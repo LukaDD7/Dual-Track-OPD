@@ -19,7 +19,10 @@ NUMBER_RE = re.compile(r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)")
 YESNO_RE = re.compile(r"(yes|no|true|false)", re.IGNORECASE)
 MCQ_PREFIX_RE = re.compile(r"^\(?\s*([A-E])\s*[).:\]]\s*(.+)$", re.IGNORECASE)
 MATH_GRADER_ALLOWED_RE = re.compile(
-    r"^(?:\\(?:frac|dfrac|tfrac|sqrt|pi|circ|left|right)|[-+0-9^_{}()\s*/])+$"
+    r"^(?:\\(?:frac|dfrac|tfrac|sqrt|pi|circ|left|right)"
+    r"|[0-9]+(?:\.[0-9]*)?"
+    r"|[A-Za-z](?![A-Za-z])"
+    r"|[-+^_{}()*/]|\s)+$"
 )
 NUMERIC_WITH_OPTIONAL_UNIT_RE = re.compile(
     r"^([-+]?(?:\d+(?:\.\d*)?|\.\d+))(?:\s*[a-zA-Z°%²^]+)?$"
@@ -62,7 +65,7 @@ def _extract_answer(response_text: str) -> str | None:
     candidate = extract_final_answer_candidate(response_text)
     if not candidate:
         return None
-    yesno = YESNO_RE.fullmatch(_strip_answer_punctuation(candidate))
+    yesno = YESNO_RE.fullmatch(_strip_answer_punctuation(_unwrap_latex_text(candidate)))
     if yesno:
         return "yes" if yesno.group(1).lower() in {"yes", "true"} else "no"
     letter = LETTER_RE.search(candidate)
@@ -86,7 +89,7 @@ def _normalize_gold(answer: Any, choices: Sequence[str]) -> str | None:
         unboxed = extract_final_answer_candidate(text)
         if unboxed is not None:
             text = unboxed
-    yesno = YESNO_RE.fullmatch(_strip_answer_punctuation(text))
+    yesno = YESNO_RE.fullmatch(_strip_answer_punctuation(_unwrap_latex_text(text)))
     if yesno:
         return "yes" if yesno.group(1).lower() in {"yes", "true"} else "no"
     letter = LETTER_RE.fullmatch(_strip_answer_punctuation(text))
@@ -110,13 +113,21 @@ def _answers_match(extracted: str, gold: str, choices: Sequence[str]) -> bool:
         if extracted_letter is not None:
             return extracted_letter == gold_letter
 
-    extracted_norm = _canonical_answer(extracted)
+    extracted_value = extracted
+    # A boxed function answer often repeats the dependent variable, e.g.
+    # ``y = -x^2 + 1`` when the stored gold is the expression itself.
+    if "=" in extracted_value and "=" not in gold:
+        assignment = re.fullmatch(r"\s*[A-Za-z]\s*=\s*(.+)", extracted_value, flags=re.DOTALL)
+        if assignment:
+            extracted_value = assignment.group(1)
+
+    extracted_norm = _canonical_answer(extracted_value)
     gold_norm = _canonical_answer(gold)
     if extracted_norm == gold_norm:
         return True
     if _numeric_equal(extracted_norm, gold_norm):
         return True
-    if _math_equal(extracted, gold):
+    if _math_equal(extracted_value, gold):
         return True
     extracted_letter = _single_mcq_letter(extracted)
     if extracted_letter and gold_letter:
@@ -145,7 +156,9 @@ def _canonical_answer(text: str) -> str:
     value = _strip_answer_punctuation(text)
     value = value.replace("\\dfrac", "\\frac").replace("\\tfrac", "\\frac")
     value = value.replace("\\left", "").replace("\\right", "")
-    value = re.sub(r"\^\{?circ\}?", "°", value, flags=re.IGNORECASE)
+    value = re.sub(r"\\?\^\{?circ\}?", "°", value, flags=re.IGNORECASE)
+    value = re.sub(r"([A-Za-z0-9])_\{([A-Za-z0-9]+)\}", r"\1_\2", value)
+    value = value.replace("$", "")
     value = re.sub(r"\s+", "", value)
     return value.lower()
 
@@ -153,7 +166,7 @@ def _canonical_answer(text: str) -> str:
 def _strip_answer_punctuation(text: str) -> str:
     value = str(text).strip().strip("*_`$ ")
     value = re.sub(r"[.。;；,，]+$", "", value).strip()
-    return value
+    return value.strip().strip("*_`$ ")
 
 
 def _numeric_equal(extracted: str, gold: str) -> bool:
@@ -220,10 +233,14 @@ def _unwrap_latex_text(text: str) -> str:
 def _is_single_math_expression(text: str) -> bool:
     """Return True only for a conservative single-expression grader input."""
 
-    value = _unwrap_latex_text(str(text)).strip().strip("$")
+    value = _strip_answer_punctuation(_unwrap_latex_text(str(text))).replace("$", "")
     if not value:
         return False
     if any(token in value.lower() for token in ("or ", " and ", "but")):
+        return False
+    # Mathruler can interpret an accidental juxtaposition such as ``x0`` too
+    # permissively.  Require explicit subscripts or operators instead.
+    if re.search(r"[A-Za-z][0-9]", value):
         return False
     return MATH_GRADER_ALLOWED_RE.fullmatch(value) is not None
 

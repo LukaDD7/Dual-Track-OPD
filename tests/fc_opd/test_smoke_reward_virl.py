@@ -11,6 +11,8 @@ from dual_track_opd.fc_opd.smoke_reward import _is_single_math_expression, compu
     ("gold", "response"),
     [
         ("Yes", "\\boxed{Yes}"),
+        ("Yes", "\\boxed{\\text{yes}}"),
+        ("No", "\\boxed{\\text{no}}"),
         ("No", "The answer is No."),
         ("4:05", "\\boxed{4:05}"),
         ("1:1", "\\boxed{1:1}"),
@@ -90,6 +92,45 @@ def test_mcq_letter_with_value_rejects_wrong_letter():
     assert result == {"score": 0.0}
 
 
+@pytest.mark.parametrize(
+    ("gold", "response"),
+    [
+        ("y_{2}", "\\boxed{y_2}"),
+        ("-x^2+2x+3", "\\boxed{y = -x^2+2x+3}"),
+    ],
+)
+def test_common_virl_equivalent_answer_forms_match(gold, response):
+    result = compute_score(
+        "ViRL39K",
+        response,
+        ground_truth=gold,
+        extra_info={"answer": gold, "gt_type": "has_number"},
+    )
+
+    assert result == {"score": 1.0}
+
+
+@pytest.mark.parametrize(
+    ("gold", "response"),
+    [
+        ("3.5", "\\boxed{\\dfrac{7}{2}}"),
+        ("72", "\\boxed{72^\\circ $.}"),
+        ("\\frac{1}{2}\\left({{n}^{2}}-3n+2 \\right)", "\\boxed{\\frac{(n-1)(n-2)}{2}}"),
+    ],
+)
+def test_common_virl_math_equivalences_match_pinned_grader(gold, response):
+    pytest.importorskip("mathruler")
+
+    result = compute_score(
+        "ViRL39K",
+        response,
+        ground_truth=gold,
+        extra_info={"answer": gold, "gt_type": "has_number"},
+    )
+
+    assert result == {"score": 1.0}
+
+
 def test_extract_final_answer_preserves_nested_latex():
     text = "Reasoning. \\boxed{\\frac{10}{3}}"
 
@@ -103,7 +144,7 @@ def test_extract_final_answer_preserves_escaped_set_braces():
 
 
 def test_math_grader_is_limited_to_single_math_expressions():
-    allowed = ("\\frac{10}{3}", "\\dfrac{25\\pi}{8}", "72^\\circ", "24\\pi")
+    allowed = ("\\frac{10}{3}", "\\dfrac{25\\pi}{8}", "72^\\circ", "24\\pi", "3.5", "n^2-3n+2")
     disallowed = (
         "0/5 or 0",
         "3x = 17",
@@ -113,6 +154,7 @@ def test_math_grader_is_limited_to_single_math_expressions():
         "(4,0)",
         "4:05",
         "5.0, but perhaps 6",
+        "x0",
     )
 
     assert all(_is_single_math_expression(value) for value in allowed)

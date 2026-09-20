@@ -64,6 +64,11 @@ Conversion policy:
   both the runtime environment and environment manifest, and the scorer uses it
   only for single conservative LaTeX expressions (not equations, ranges,
   `or` answers, sets, coordinates, or unit text).
+- Offline validation rescoring must map output rows to parquet rows with a
+  double key of normalized question plus normalized gold.  A question-only key
+  can mispair duplicate questions.  The current scorer rescoring of the 4-step
+  smoke outputs is 291/500 = 0.582 for v2 (one reverse row, an unboxed vague
+  long response) and 294/500 = 0.588 for v3 with zero reverse rows.
 - Multi-image samples are preserved. Every image receives its own prepared
   degraded counterpart.
 - Full image paths reference the stable original ViRL image tree; only
