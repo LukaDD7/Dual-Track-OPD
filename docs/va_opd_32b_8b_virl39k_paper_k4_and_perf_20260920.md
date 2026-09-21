@@ -96,6 +96,102 @@ formula, but can change microbatch splitting and floating-point accumulation
 order.  A continuation using a chosen arm must record that as a new resolved
 configuration.
 
+## Performance results
+
+All performance arms used the same K=8, batch-16, ViRL39K, 32B teacher ->
+8B student contract.  They changed only execution parameters.  Raw evidence is
+outside Git under `fc-opd-storage/runs/va_opd_native`.
+
+| Arm | Token limit | Checkpointing | 4-step result | Peak actor memory | Notes |
+|---|---:|---:|---|---|---|
+| B | 16384 | true | PASS, 4/4, exit 0 | 48.93 GB alloc / 58.04 GB reserved | 54m17s total; validation 0.590 -> 0.604 |
+| C | 20480 | true | PASS, 4/4, exit 0 | 48.60 GB alloc / 58.66 GB reserved | 48m51s total; validation 0.582 -> 0.586 |
+| D | 16384 | false | FAIL, 0/4, exit 1 | not reached | Colocated vLLM wake-up OOM after validation |
+| E | 20480 | false | FAIL, 0/4, exit 1 | 134.29 GB PyTorch allocation | Actor forward OOM |
+
+Run records:
+
+```text
+B: va_opd_virl39k_perf_b_oom4_v1
+C: va_opd_virl39k_perf_c_oom4_v1
+D: va_opd_virl39k_perf_d_oom4_v1
+E: va_opd_virl39k_perf_e_oom4_v1
+```
+
+The C arm was about 10% faster than B over four steps while using effectively
+the same peak memory.  Both B and C kept VA grouping, loss, gradients, entropy,
+and response-length health gates finite and non-degenerate.  Closing gradient
+checkpointing was rejected: D failed in vLLM wake-up and E failed in actor
+forward.  F was not run because both no-checkpointing screens failed at lower
+token limits.
+
+The selected execution configuration is therefore:
+
+```text
+ppo_max_token_len_per_gpu = 20480
+enable_gradient_checkpointing = true
+max_actor_ckpt_to_keep = 2
+```
+
+This is recorded as **perfC**.  It is an execution setting, not an algorithm
+change; it can alter dynamic microbatch boundaries and floating-point
+accumulation order.
+
+## Paper-K4 full run using perfC
+
+The paper-contract full run uses the K=4 entrypoint with perfC:
+
+```text
+run ID: qwen3vl_32b_teacher_8b_student_virl39k_va_opd_paper_k4_full_perfC_v1
+run dir: /inspire/hdd/global_user/mengweicheng-240108120092/lzy/fc-opd-storage/runs/va_opd_native/qwen3vl_32b_teacher_8b_student_virl39k_va_opd_paper_k4_full_perfC_v1
+checkpoint root: /inspire/hdd/global_user/mengweicheng-240108120092/lzy/fc-opd-storage/checkpoints/va_opd_native/qwen3vl_32b_teacher_8b_student_virl39k_va_opd_paper_k4_full_perfC_v1
+```
+
+Launch:
+
+```bash
+cd /inspire/hdd/global_user/mengweicheng-240108120092/lzy/projects/Dual-Track-OPD
+
+RUN_ID=qwen3vl_32b_teacher_8b_student_virl39k_va_opd_paper_k4_full_perfC_v1
+
+setsid nohup env \
+  VA_OPD_RUN_ID="$RUN_ID" \
+  VA_OPD_PPO_MAX_TOKEN_LEN_PER_GPU=20480 \
+  VA_OPD_GRADIENT_CHECKPOINTING=true \
+  VA_OPD_MAX_ACTOR_CKPT_TO_KEEP=2 \
+  bash scripts/hpc/run_va_opd_32b_teacher_8b_student_virl39k_paper_k4.sh \
+    --full \
+    --run-id "$RUN_ID" \
+  > "/inspire/hdd/global_user/mengweicheng-240108120092/lzy/fc-opd-storage/runs/va_opd_native/${RUN_ID}/launcher.log" \
+  2>&1 &
+```
+
+Resume after GPU-instance reclamation, always with the same run ID:
+
+```bash
+setsid nohup env \
+  VA_OPD_RUN_ID="$RUN_ID" \
+  VA_OPD_PPO_MAX_TOKEN_LEN_PER_GPU=20480 \
+  VA_OPD_GRADIENT_CHECKPOINTING=true \
+  VA_OPD_MAX_ACTOR_CKPT_TO_KEEP=2 \
+  bash scripts/hpc/run_va_opd_32b_teacher_8b_student_virl39k_paper_k4.sh \
+    --full \
+    --resume \
+    --run-id "$RUN_ID" \
+  >> "/inspire/hdd/global_user/mengweicheng-240108120092/lzy/fc-opd-storage/runs/va_opd_native/${RUN_ID}/launcher.log" \
+  2>&1 &
+```
+
+Historical status on 2026-09-21:
+
+- First launch completed through step 51; the GPU instance was then reclaimed.
+- The latest complete checkpoint was `global_step_50`.
+- Resume mode found `global_step_50` and loaded model, optimizer, RNG, and LR
+  scheduler state on all four actor ranks.
+- Post-resume validation at step 50 was 0.610.
+- Best protected validation checkpoint was 0.624 at step 25.
+- The resumed run completed step 51 and continued training normally.
+
 ## Best-validation checkpoint protection
 
 The trainer writes checkpoints before validation and may prune old checkpoints.

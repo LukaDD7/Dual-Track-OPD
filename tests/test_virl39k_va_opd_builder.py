@@ -187,3 +187,19 @@ def test_va_opd_best_checkpoint_protector_is_external_and_safe_by_default():
     assert "copy_function=_hardlink" in script
     assert "does not modify the trainer" in doc
     assert "--watch" in doc
+
+
+def test_va_opd_performance_results_and_selected_perfC_are_recorded():
+    doc = Path("docs/va_opd_32b_8b_virl39k_paper_k4_and_perf_20260920.md").read_text()
+
+    assert "## Performance results" in doc
+    assert "va_opd_virl39k_perf_b_oom4_v1" in doc
+    assert "va_opd_virl39k_perf_c_oom4_v1" in doc
+    assert "va_opd_virl39k_perf_d_oom4_v1" in doc
+    assert "va_opd_virl39k_perf_e_oom4_v1" in doc
+    assert "PASS, 4/4, exit 0" in doc
+    assert "FAIL, 0/4, exit 1" in doc
+    assert "ppo_max_token_len_per_gpu = 20480" in doc
+    assert "enable_gradient_checkpointing = true" in doc
+    assert "qwen3vl_32b_teacher_8b_student_virl39k_va_opd_paper_k4_full_perfC_v1" in doc
+    assert "model, optimizer, RNG, and LR" in doc
