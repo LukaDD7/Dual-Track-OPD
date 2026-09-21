@@ -1,4 +1,5 @@
 import json
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -69,3 +70,87 @@ def test_best_checkpoint_protector_replaces_previous_best(tmp_path):
     subprocess.run(command, check=True, text=True, capture_output=True)
     assert (root / "best_val" / "global_step_3").is_dir()
     assert not (root / "best_val" / "global_step_2").exists()
+
+
+def test_best_checkpoint_protector_preserves_history_across_resume(tmp_path):
+    root = tmp_path / "checkpoints"
+    root.mkdir()
+    _write_checkpoint(root, 25)
+    _write_checkpoint(root, 100)
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    launcher_log = logs / "launcher.log"
+    launcher_log.write_text(
+        "step:25 - val-core/ViRL39K/reward/mean@1:np.float64(0.624)\n"
+        "step:100 - val-core/ViRL39K/reward/mean@1:np.float64(0.598)\n",
+        encoding="utf-8",
+    )
+    train_log = logs / "train.log"
+    train_log.write_text(
+        "step:100 - val-core/ViRL39K/reward/mean@1:np.float64(0.576)\n",
+        encoding="utf-8",
+    )
+
+    command = [
+        sys.executable,
+        str(SCRIPT),
+        "--checkpoint-root",
+        str(root),
+        "--train-log",
+        str(train_log),
+        "--apply",
+    ]
+    subprocess.run(command, check=True, text=True, capture_output=True)
+
+    marker = json.loads((root / "best_val.json").read_text(encoding="utf-8"))
+    assert marker["step"] == 25
+    assert marker["validation_score"] == 0.624
+    history = json.loads((root / "best_val_history.json").read_text(encoding="utf-8"))
+    # A repeated validation at the same step uses the newest train.log score.
+    assert history["scores"] == {"25": 0.624, "100": 0.576}
+
+
+def test_best_checkpoint_protector_updates_after_source_pruned(tmp_path):
+    root = tmp_path / "checkpoints"
+    root.mkdir()
+    _write_checkpoint(root, 25)
+    _write_checkpoint(root, 100)
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    launcher_log = logs / "launcher.log"
+    launcher_log.write_text(
+        "step:25 - val-core/ViRL39K/reward/mean@1:np.float64(0.624)\n"
+        "step:100 - val-core/ViRL39K/reward/mean@1:np.float64(0.598)\n",
+        encoding="utf-8",
+    )
+    train_log = logs / "train.log"
+    train_log.write_text(
+        "step:100 - val-core/ViRL39K/reward/mean@1:np.float64(0.598)\n",
+        encoding="utf-8",
+    )
+    command = [
+        sys.executable,
+        str(SCRIPT),
+        "--checkpoint-root",
+        str(root),
+        "--train-log",
+        str(train_log),
+        "--apply",
+    ]
+    subprocess.run(command, check=True, text=True, capture_output=True)
+
+    # Simulate trainer retention: the original step-25 source is gone, while
+    # its protected hard-link tree remains. A later higher score must replace it.
+    shutil.rmtree(root / "global_step_25")
+    _write_checkpoint(root, 125)
+    train_log.write_text(
+        "step:125 - val-core/ViRL39K/reward/mean@1:np.float64(0.630)\n",
+        encoding="utf-8",
+    )
+    subprocess.run(command, check=True, text=True, capture_output=True)
+
+    marker = json.loads((root / "best_val.json").read_text(encoding="utf-8"))
+    assert marker["step"] == 125
+    assert marker["validation_score"] == 0.630
+    assert (root / "best_val" / "global_step_125" / "actor" / "model.safetensors").is_file()
+    assert not (root / "best_val" / "global_step_25").exists()

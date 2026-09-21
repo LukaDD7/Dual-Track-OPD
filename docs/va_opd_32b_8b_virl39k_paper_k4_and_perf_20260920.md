@@ -195,19 +195,24 @@ Historical status on 2026-09-21:
 ## Best-validation checkpoint protection
 
 The trainer writes checkpoints before validation and may prune old checkpoints.
-The external protector does not modify the trainer.  It watches the shared
-training log and hard-links the best-validation checkpoint under `best_val/`:
+The external protector does not modify the trainer.  It merges the current
+training log with the append-only launcher log and persistent
+`best_val_history.json`, then hard-links the best-validation checkpoint under
+`best_val/`.  This preserves the historical best when `train.log` is rewritten
+during a resume and keeps working after the trainer prunes the original source
+checkpoint:
 
 ```bash
 cd /inspire/hdd/global_user/mengweicheng-240108120092/lzy/projects/Dual-Track-OPD
 
 setsid nohup /inspire/hdd/global_user/mengweicheng-240108120092/lzy/envs/va-opd-native-e003-cu128-r595-v1/bin/python \
   scripts/hpc/protect_va_opd_best_checkpoint.py \
-  --checkpoint-root /inspire/hdd/global_user/mengweicheng-240108120092/lzy/fc-opd-storage/checkpoints/va_opd_native/qwen3vl_32b_teacher_8b_student_virl39k_va_opd_full_until_reclaim_v2 \
-  --train-log /inspire/hdd/global_user/mengweicheng-240108120092/lzy/fc-opd-storage/runs/va_opd_native/qwen3vl_32b_teacher_8b_student_virl39k_va_opd_full_until_reclaim_v2/train.log \
+  --checkpoint-root /inspire/hdd/global_user/mengweicheng-240108120092/lzy/fc-opd-storage/checkpoints/va_opd_native/qwen3vl_32b_teacher_8b_student_virl39k_va_opd_paper_k4_full_perfC_v1 \
+  --train-log /inspire/hdd/global_user/mengweicheng-240108120092/lzy/fc-opd-storage/runs/va_opd_native/qwen3vl_32b_teacher_8b_student_virl39k_va_opd_paper_k4_full_perfC_v1/train.log \
+  --history-log /inspire/hdd/global_user/mengweicheng-240108120092/lzy/fc-opd-storage/runs/va_opd_native/qwen3vl_32b_teacher_8b_student_virl39k_va_opd_paper_k4_full_perfC_v1/launcher.log \
   --watch \
   --apply \
-  > /inspire/hdd/global_user/mengweicheng-240108120092/lzy/fc-opd-storage/runs/va_opd_native/qwen3vl_32b_teacher_8b_student_virl39k_va_opd_full_until_reclaim_v2/best_val_protector.log \
+  >> /inspire/hdd/global_user/mengweicheng-240108120092/lzy/fc-opd-storage/runs/va_opd_native/qwen3vl_32b_teacher_8b_student_virl39k_va_opd_paper_k4_full_perfC_v1/best_val_protector.log \
   2>&1 &
 ```
 
