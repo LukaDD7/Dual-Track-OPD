@@ -72,6 +72,36 @@ def test_best_checkpoint_protector_replaces_previous_best(tmp_path):
     assert not (root / "best_val" / "global_step_2").exists()
 
 
+def test_best_checkpoint_protector_prefers_latest_on_tie(tmp_path):
+    root = tmp_path / "checkpoints"
+    root.mkdir()
+    _write_checkpoint(root, 25)
+    _write_checkpoint(root, 350)
+    log = tmp_path / "train.log"
+    log.write_text(
+        "step:25 - val-core/ViRL39K/reward/mean@1:np.float64(0.624)\n"
+        "step:350 - val-core/ViRL39K/reward/mean@1:np.float64(0.624)\n",
+        encoding="utf-8",
+    )
+
+    command = [
+        sys.executable,
+        str(SCRIPT),
+        "--checkpoint-root",
+        str(root),
+        "--train-log",
+        str(log),
+        "--apply",
+    ]
+    subprocess.run(command, check=True, text=True, capture_output=True)
+
+    marker = json.loads((root / "best_val.json").read_text(encoding="utf-8"))
+    assert marker["step"] == 350
+    assert marker["validation_score"] == 0.624
+    assert (root / "best_val" / "global_step_350" / "actor" / "model.safetensors").is_file()
+    assert not (root / "best_val" / "global_step_25").exists()
+
+
 def test_best_checkpoint_protector_preserves_history_across_resume(tmp_path):
     root = tmp_path / "checkpoints"
     root.mkdir()

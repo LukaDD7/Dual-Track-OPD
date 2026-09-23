@@ -98,8 +98,9 @@ def merge_validation_scores(score_maps: list[Dict[int, float]]) -> Dict[int, flo
 def best_step(scores: Dict[int, float]) -> int | None:
     if not scores:
         return None
-    # Prefer the earliest step on a tie to reduce late-training overfit risk.
-    return max(scores, key=lambda step: (scores[step], -step))
+    # Prefer the latest step on a tie: the checkpoint has consumed the same
+    # validation budget and represents the latest model state.
+    return max(scores, key=lambda step: (scores[step], step))
 
 
 def hardlink_tree(source: Path, destination: Path) -> None:

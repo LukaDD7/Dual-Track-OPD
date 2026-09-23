@@ -202,6 +202,10 @@ training log with the append-only launcher log and persistent
 during a resume and keeps working after the trainer prunes the original source
 checkpoint:
 
+Validation ties use the later checkpoint.  On 2026-09-23, step 350 reached
+0.624 and replaced the earlier step 25 marker at the same score, matching the
+project rule that equal validation scores retain the most recent model state.
+
 ```bash
 cd /inspire/hdd/global_user/mengweicheng-240108120092/lzy/projects/Dual-Track-OPD
 
