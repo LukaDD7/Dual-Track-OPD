@@ -95,34 +95,31 @@ def merge_validation_scores(score_maps: list[Dict[int, float]]) -> Dict[int, flo
     return merged
 
 
-def best_step(scores: Dict[int, float]) -> int | None:
-    if not scores:
+def best_step(
+    scores: Dict[int, float], checkpoints: Dict[int, Path]
+) -> int | None:
+    available = [step for step in scores if step in checkpoints]
+    if not available:
         return None
-    # Prefer the latest step on a tie: the checkpoint has consumed the same
-    # validation budget and represents the latest model state.
-    return max(scores, key=lambda step: (scores[step], step))
+    # Prefer the latest available checkpoint on a validation-score tie. Older
+    # unavailable checkpoints are not selected, even if the score history says
+    # they were once the best; the trainer may have already pruned them.
+    return max(available, key=lambda step: (scores[step], step))
 
 
-def hardlink_tree(source: Path, destination: Path) -> None:
+def protected_copy(source: Path, destination: Path) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = destination.parent / f".{destination.name}.tmp"
     if temporary.exists():
         shutil.rmtree(temporary)
-    shutil.copytree(source, temporary, copy_function=_hardlink)
+    # Hard links do not protect a checkpoint from the trainer's directory
+    # replacement logic: replacing the source directory can also remove the
+    # links.  Copy the bytes so the protected best is independent of rolling
+    # checkpoint cleanup.
+    shutil.copytree(source, temporary)
     if destination.exists():
         shutil.rmtree(destination)
     temporary.replace(destination)
-
-
-def _hardlink(source: str, destination: str) -> None:
-    try:
-        import os
-
-        os.link(source, destination)
-    except OSError:
-        # A non-linkable filesystem still gets a protected copy, at the cost of
-        # actual bytes rather than directory entries.
-        shutil.copy2(source, destination)
 
 
 def protect_once(
@@ -130,7 +127,7 @@ def protect_once(
 ) -> int | None:
     history_path = root / "best_val_history.json"
     marker_path = root / "best_val.json"
-    protected_root = root / "best_val"
+    protected_root = root.parent / "protected_runs" / root.name
 
     # The current train.log is rewritten on every resume. Persistent history
     # and the append-only launcher log keep the global best validation score.
@@ -142,8 +139,8 @@ def protect_once(
             parse_validation_scores(log_path),
         ]
     )
-    chosen_step = best_step(scores)
     checkpoints = checkpoint_steps(root)
+    chosen_step = best_step(scores, checkpoints)
 
     if chosen_step is None:
         print(f"best checkpoint: no validation score found in {log_path}")
@@ -183,7 +180,7 @@ def protect_once(
     history_path.write_text(json.dumps(history_payload, indent=2) + "\n", encoding="utf-8")
 
     if not destination.exists():
-        hardlink_tree(source, destination)
+        protected_copy(source, destination)
     elif destination.name != f"global_step_{chosen_step}":
         # Unreachable by construction, retained as a defensive assertion.
         raise RuntimeError("protected destination does not match chosen step")

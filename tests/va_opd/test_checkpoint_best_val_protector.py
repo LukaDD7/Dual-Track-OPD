@@ -32,13 +32,12 @@ def test_best_checkpoint_protector_dry_run_and_apply(tmp_path):
     command = [sys.executable, str(SCRIPT), "--checkpoint-root", str(root), "--train-log", str(log)]
     dry = subprocess.run(command, check=True, text=True, capture_output=True)
     assert "step 2" in dry.stdout
-    assert not (root / "best_val").exists()
+    assert not (root.parent / "protected_runs" / root.name).exists()
 
     subprocess.run(command + ["--apply"], check=True, text=True, capture_output=True)
-    protected = root / "best_val" / "global_step_2" / "actor" / "model.safetensors"
+    protected_root = root.parent / "protected_runs" / root.name
+    protected = protected_root / "global_step_2" / "actor" / "model.safetensors"
     assert protected.read_bytes() == b"weights-2"
-    source = root / "global_step_2" / "actor" / "model.safetensors"
-    assert protected.stat().st_nlink == source.stat().st_nlink == 2
     marker = json.loads((root / "best_val.json").read_text(encoding="utf-8"))
     assert marker["step"] == 2
     assert marker["validation_score"] == 0.62
@@ -68,8 +67,9 @@ def test_best_checkpoint_protector_replaces_previous_best(tmp_path):
         "--apply",
     ]
     subprocess.run(command, check=True, text=True, capture_output=True)
-    assert (root / "best_val" / "global_step_3").is_dir()
-    assert not (root / "best_val" / "global_step_2").exists()
+    protected_root = root.parent / "protected_runs" / root.name
+    assert (protected_root / "global_step_3").is_dir()
+    assert not (protected_root / "global_step_2").exists()
 
 
 def test_best_checkpoint_protector_prefers_latest_on_tie(tmp_path):
@@ -98,8 +98,9 @@ def test_best_checkpoint_protector_prefers_latest_on_tie(tmp_path):
     marker = json.loads((root / "best_val.json").read_text(encoding="utf-8"))
     assert marker["step"] == 350
     assert marker["validation_score"] == 0.624
-    assert (root / "best_val" / "global_step_350" / "actor" / "model.safetensors").is_file()
-    assert not (root / "best_val" / "global_step_25").exists()
+    protected_root = root.parent / "protected_runs" / root.name
+    assert (protected_root / "global_step_350" / "actor" / "model.safetensors").is_file()
+    assert not (protected_root / "global_step_25").exists()
 
 
 def test_best_checkpoint_protector_preserves_history_across_resume(tmp_path):
@@ -182,5 +183,6 @@ def test_best_checkpoint_protector_updates_after_source_pruned(tmp_path):
     marker = json.loads((root / "best_val.json").read_text(encoding="utf-8"))
     assert marker["step"] == 125
     assert marker["validation_score"] == 0.630
-    assert (root / "best_val" / "global_step_125" / "actor" / "model.safetensors").is_file()
-    assert not (root / "best_val" / "global_step_25").exists()
+    protected_root = root.parent / "protected_runs" / root.name
+    assert (protected_root / "global_step_125" / "actor" / "model.safetensors").is_file()
+    assert not (protected_root / "global_step_25").exists()
