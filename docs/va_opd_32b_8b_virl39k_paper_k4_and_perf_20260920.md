@@ -224,3 +224,34 @@ Check the dry-run result first by omitting `--apply`.  The default retention in
 the K=4 and performance wrappers is small enough to avoid tens of terabytes of
 checkpoint growth, while the protected best remains available for export and
 evaluation.
+
+## Validation progress snapshot: 2026-09-23
+
+Run lineage: `qwen3vl_32b_teacher_8b_student_virl39k_va_opd_paper_k4_full_perfC_v1`.
+The validation monitor is the operational 500-example ViRL39K split and the
+metric is `val-core/ViRL39K/reward/mean@1`.  Scores are recorded every 25
+optimizer steps.
+
+| Step | Validation score |
+|-----:|-----------------:|
+| 0    | 0.584 |
+| 25   | 0.624 |
+| 50   | 0.610 |
+| 75   | 0.610 |
+| 100  | 0.576 |
+| 125  | 0.588 |
+| 150  | 0.610 |
+| 175  | 0.618 |
+| 200  | 0.592 |
+| 225  | 0.604 |
+| 250  | 0.592 |
+| 275  | 0.608 |
+| 300  | 0.620 |
+| 325  | 0.602 |
+| 350  | 0.624 |
+
+At the snapshot time (01:40 UTC), training had reached step 359 and the latest
+complete checkpoint was step 350.  Step 350 tied the historical maximum score
+of 0.624 and is retained as the current best-validation checkpoint under the
+latest-on-tie rule.  The run is healthy; recent optimizer-step time varies
+with sequence length from roughly 150 to 400 seconds.
