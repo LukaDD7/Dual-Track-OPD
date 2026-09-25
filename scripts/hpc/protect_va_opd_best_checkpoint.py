@@ -89,22 +89,45 @@ def load_marker_history(path: Path) -> Dict[int, float]:
 
 
 def merge_validation_scores(score_maps: list[Dict[int, float]]) -> Dict[int, float]:
+    """Merge maps so historical best scores survive resume-time revalidation.
+
+    Sources are ordered oldest-to-newest. For a repeated validation step, we
+    keep the maximum score: the historical score selected the checkpoint, and
+    a lower resume-time score is a different random validation draw rather than
+    evidence that the already-written checkpoint became worse.
+    """
     merged: Dict[int, float] = {}
     for scores in score_maps:
-        merged.update(scores)
+        for step, score in scores.items():
+            if step not in merged or score > merged[step]:
+                merged[step] = score
     return merged
 
 
 def best_step(
     scores: Dict[int, float], checkpoints: Dict[int, Path]
 ) -> int | None:
-    available = [step for step in scores if step in checkpoints]
+    available = [step for step in scores if step in checkpoints and _is_complete_checkpoint(checkpoints[step])]
     if not available:
         return None
     # Prefer the latest available checkpoint on a validation-score tie. Older
     # unavailable checkpoints are not selected, even if the score history says
     # they were once the best; the trainer may have already pruned them.
     return max(available, key=lambda step: (scores[step], step))
+
+
+def _is_complete_checkpoint(path: Path) -> bool:
+    """Reject trainer-retention tombstones.
+
+    VERL removes checkpoint shard files but can leave the directory and
+    ``data.pt`` behind. A protected best must contain model shards and remain
+    independently loadable, not merely have a directory named like a checkpoint.
+    """
+    actor = path / "actor"
+    if not actor.is_dir():
+        return False
+    model_shards = sorted(actor.glob("model*.pt")) or sorted(actor.glob("model*.safetensors"))
+    return bool(model_shards) and all(shard.is_file() for shard in model_shards)
 
 
 def protected_copy(source: Path, destination: Path) -> None:
@@ -146,18 +169,23 @@ def protect_once(
         print(f"best checkpoint: no validation score found in {log_path}")
         return None
 
+    complete_checkpoints = {
+        step: path for step, path in checkpoints.items() if _is_complete_checkpoint(path)
+    }
+    if chosen_step not in complete_checkpoints:
+        protected_candidate = protected_root / f"global_step_{chosen_step}"
+        if _is_complete_checkpoint(protected_candidate):
+            source = protected_candidate
+        else:
+            print(
+                f"best checkpoint: step {chosen_step} "
+                f"(score={scores[chosen_step]}) has no complete source checkpoint"
+            )
+            return None
+    else:
+        source = complete_checkpoints[chosen_step]
+
     destination = protected_root / f"global_step_{chosen_step}"
-    source = checkpoints.get(chosen_step)
-    if source is None and destination.is_dir():
-        # The trainer already pruned the original checkpoint, but the protected
-        # hard-link tree still owns the best checkpoint.
-        source = destination
-    if source is None:
-        print(
-            f"best checkpoint: step {chosen_step} (score={scores[chosen_step]}) "
-            "has no source checkpoint yet"
-        )
-        return None
 
     marker = {
         "schema_version": 1,

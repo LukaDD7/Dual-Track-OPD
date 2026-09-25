@@ -137,8 +137,8 @@ def test_best_checkpoint_protector_preserves_history_across_resume(tmp_path):
     assert marker["step"] == 25
     assert marker["validation_score"] == 0.624
     history = json.loads((root / "best_val_history.json").read_text(encoding="utf-8"))
-    # A repeated validation at the same step uses the newest train.log score.
-    assert history["scores"] == {"25": 0.624, "100": 0.576}
+    # A repeated validation at the same step keeps the historical high score.
+    assert history["scores"] == {"25": 0.624, "100": 0.598}
 
 
 def test_best_checkpoint_protector_updates_after_source_pruned(tmp_path):
@@ -186,3 +186,76 @@ def test_best_checkpoint_protector_updates_after_source_pruned(tmp_path):
     protected_root = root.parent / "protected_runs" / root.name
     assert (protected_root / "global_step_125" / "actor" / "model.safetensors").is_file()
     assert not (protected_root / "global_step_25").exists()
+
+
+def test_best_checkpoint_protector_rejects_tombstone_without_losing_best(tmp_path):
+    root = tmp_path / "checkpoints"
+    root.mkdir()
+    _write_checkpoint(root, 625)
+    _write_checkpoint(root, 575)
+    # Simulate VERL retention: shard files disappear, but the directory remains.
+    for shard in (root / "global_step_575" / "actor").glob("model.safetensors"):
+        shard.unlink()
+    log = tmp_path / "train.log"
+    log.write_text(
+        "step:575 - val-core/ViRL39K/reward/mean@1:np.float64(0.63)\n"
+        "step:625 - val-core/ViRL39K/reward/mean@1:np.float64(0.60)\n",
+        encoding="utf-8",
+    )
+
+    command = [
+        sys.executable,
+        str(SCRIPT),
+        "--checkpoint-root",
+        str(root),
+        "--train-log",
+        str(log),
+        "--apply",
+    ]
+    subprocess.run(command, check=True, text=True, capture_output=True)
+
+    marker = json.loads((root / "best_val.json").read_text(encoding="utf-8"))
+    assert marker["step"] == 625
+    assert marker["validation_score"] == 0.60
+    protected_root = root.parent / "protected_runs" / root.name
+    assert (protected_root / "global_step_625" / "actor" / "model.safetensors").is_file()
+    assert not (protected_root / "global_step_575").exists()
+
+
+def test_best_checkpoint_protector_keeps_historical_high_score_across_resume(tmp_path):
+    root = tmp_path / "checkpoints"
+    root.mkdir()
+    _write_checkpoint(root, 625)
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    launcher_log = logs / "launcher.log"
+    # Historical 0.634 selected step 625 before the GPU-instance reclamation.
+    launcher_log.write_text(
+        "step:625 - val-core/ViRL39K/reward/mean@1:np.float64(0.634)\n",
+        encoding="utf-8",
+    )
+    # The resumed run validates the restored checkpoint again and gets 0.590.
+    train_log = logs / "train.log"
+    train_log.write_text(
+        "step:625 - val-core/ViRL39K/reward/mean@1:np.float64(0.590)\n",
+        encoding="utf-8",
+    )
+
+    command = [
+        sys.executable,
+        str(SCRIPT),
+        "--checkpoint-root",
+        str(root),
+        "--train-log",
+        str(train_log),
+        "--history-log",
+        str(launcher_log),
+        "--apply",
+    ]
+    subprocess.run(command, check=True, text=True, capture_output=True)
+
+    marker = json.loads((root / "best_val.json").read_text(encoding="utf-8"))
+    assert marker["step"] == 625
+    assert marker["validation_score"] == 0.634
+    history = json.loads((root / "best_val_history.json").read_text(encoding="utf-8"))
+    assert history["scores"]["625"] == 0.634
