@@ -13,9 +13,12 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
+import traceback
+
 from transformers import PreTrainedTokenizer, ProcessorMixin
 
 from verl.utils.dataset.rl_dataset import RLHFDataset
+from verl.utils.tokenizer import build_multimodal_processor_inputs
 
 from dual_track_opd.fc_opd.prompt_contracts import (
     clean_geometry3k_question_rows,
@@ -89,15 +92,63 @@ class FCOPDDataset(RLHFDataset):
         return row_dict
 
     def maybe_filter_out_long_prompts(self, dataframe=None):
-        """Skip verl's chat-template-based length filter.
+        """Filter prompts using exact processor tokenization without multiprocessing.
 
-        Geometry3K prompts are pre-formatted and safely within the 6144-token
-        budget.  The base-class filter uses closures that fail under
-        multiprocessing pickling for our subclass.
+        The base implementation uses a closure that can fail under multiprocessing
+        pickling. This serial path keeps the exact text/multimodal length contract
+        while avoiding that failure mode.
         """
-        max_len = getattr(self, "max_prompt_length", 6144)
+        if not getattr(self, "filter_overlong_prompts", False):
+            return dataframe
+
+        keep_indices = []
+        for index in range(len(dataframe)):
+            doc = dataframe[index]
+            try:
+                messages = self._build_messages(doc, key=self.prompt_key)
+                apply_kwargs = dict(**self.apply_chat_template_kwargs)
+                if self.tool_schemas is not None:
+                    apply_kwargs["tools"] = self.tool_schemas
+
+                raw_prompt = self.processor.apply_chat_template(
+                    messages,
+                    add_generation_prompt=True,
+                    tokenize=False,
+                    **apply_kwargs,
+                )
+                images, videos, audios = self._process_multi_modal_info(
+                    messages,
+                    self.image_patch_size,
+                    self.config,
+                )
+                if images is None and videos is None and audios is None:
+                    tokenized = self.processor.tokenizer(
+                        text=raw_prompt,
+                        add_special_tokens=False,
+                        return_attention_mask=False,
+                    )
+                    token_count = len(tokenized["input_ids"])
+                else:
+                    processed = build_multimodal_processor_inputs(
+                        self.processor,
+                        text=[raw_prompt],
+                        images=images,
+                        videos=videos,
+                        audio=audios,
+                        mm_processor_kwargs=self.mm_processor_kwargs,
+                    )
+                    token_count = len(processed["input_ids"][0])
+            except Exception:
+                traceback.print_exc()
+                token_count = self.max_prompt_length + 1
+
+            if token_count <= self.max_prompt_length:
+                keep_indices.append(index)
+
+        original_count = len(dataframe)
+        filtered = dataframe.select(keep_indices)
         print(
-            f"FCOPDataset: skipping chat-template-based filter; "
-            f"keeping all {len(dataframe)} samples (pre-filtered <= {max_len})"
+            f"FCOPDataset: exact prompt filter kept {len(filtered)}/{original_count} "
+            f"samples (max_prompt_length={self.max_prompt_length})"
         )
-        return dataframe
+        return filtered

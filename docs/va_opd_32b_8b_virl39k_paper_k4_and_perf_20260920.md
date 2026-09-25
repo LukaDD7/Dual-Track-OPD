@@ -255,3 +255,20 @@ complete checkpoint was step 350.  Step 350 tied the historical maximum score
 of 0.624 and is retained as the current best-validation checkpoint under the
 latest-on-tie rule.  The run is healthy; recent optimizer-step time varies
 with sequence length from roughly 150 to 400 seconds.
+
+## 2026-09-25 overlong-prompt incident
+
+The run reached step 649 and then failed in the actor update with a
+`teacher_logprobs` padding assertion.  The direct cause was not the VA loss;
+it was an upstream multimodal prompt that exceeded the 6144-token budget:
+
+```text
+ViRL39K:MMMath-3435  11887 tokens  image 4382x2764
+ViRL39K:MMMath-3669   8082 tokens  image 3857x2120
+```
+
+`FCOPDDataset` had been skipping the base-class prompt-length filter because
+the filter used a multiprocessing closure that could fail to pickle.  The
+subclass now performs exact serial text/multimodal tokenization and filters
+these two rows before training.  The filtered dataset still floors to the same
+2396 steps per epoch, so the 5-epoch contract remains 11980 total steps.
