@@ -234,6 +234,52 @@ def test_best_checkpoint_protector_keeps_protected_best_after_rolling_source_pru
     assert not (protected_root / "global_step_775").exists()
 
 
+def test_best_checkpoint_protector_uses_protected_best_when_rolling_source_is_tombstone(tmp_path):
+    root = tmp_path / "checkpoints"
+    root.mkdir()
+    _write_checkpoint(root, 800)
+    _write_checkpoint(root, 850)
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    history_log = logs / "launcher.log"
+    history_log.write_text(
+        "step:800 - val-core/ViRL39K/reward/mean@1:np.float64(0.638)\n"
+        "step:850 - val-core/ViRL39K/reward/mean@1:np.float64(0.616)\n",
+        encoding="utf-8",
+    )
+    train_log = logs / "train.log"
+    train_log.write_text(
+        "step:850 - val-core/ViRL39K/reward/mean@1:np.float64(0.616)\n",
+        encoding="utf-8",
+    )
+    command = [
+        sys.executable,
+        str(SCRIPT),
+        "--checkpoint-root",
+        str(root),
+        "--train-log",
+        str(train_log),
+        "--history-log",
+        str(history_log),
+        "--apply",
+    ]
+    subprocess.run(command, check=True, text=True, capture_output=True)
+
+    # VERL retention leaves a directory tombstone rather than removing the
+    # whole step directory. The protected best must still win over a newer,
+    # lower-scoring rolling checkpoint.
+    (root / "global_step_800" / "actor" / "model.safetensors").unlink()
+    subprocess.run(command, check=True, text=True, capture_output=True)
+
+    marker = json.loads((root / "best_val.json").read_text(encoding="utf-8"))
+    assert marker["step"] == 800
+    assert marker["validation_score"] == 0.638
+    protected_root = root.parent / "protected_runs" / root.name
+    assert (protected_root / "global_step_800" / "actor" / "model.safetensors").is_file()
+    assert marker["source"] == str(protected_root / "global_step_800")
+    assert not (protected_root / "global_step_850").exists()
+
+
 def test_best_checkpoint_protector_rejects_tombstone_without_losing_best(tmp_path):
     root = tmp_path / "checkpoints"
     root.mkdir()

@@ -106,11 +106,14 @@ def merge_validation_scores(score_maps: list[Dict[int, float]]) -> Dict[int, flo
 def best_step(
     scores: Dict[int, float], checkpoints: Dict[int, Path], protected_root: Path
 ) -> int | None:
-    available = [
-        step
-        for step in scores
-        if _is_complete_checkpoint(checkpoints.get(step, protected_root / f"global_step_{step}"))
-    ]
+    available = []
+    for step in scores:
+        candidates = []
+        if step in checkpoints:
+            candidates.append(checkpoints[step])
+        candidates.append(protected_root / f"global_step_{step}")
+        if any(_is_complete_checkpoint(candidate) for candidate in candidates):
+            available.append(step)
     if not available:
         return None
     # Prefer the latest available checkpoint on a validation-score tie. A
