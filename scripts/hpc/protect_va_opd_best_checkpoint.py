@@ -2,10 +2,9 @@
 """Protect the best-validation VA-OPD checkpoint without changing training.
 
 The trainer may retain only the most recent checkpoints.  This utility watches
-the training log, identifies the best validation score, and hard-links that
-checkpoint under ``best_val/`` after validation completes.  Hard links add
-negligible disk usage while the source exists, and preserve the files after the
-trainer prunes the source directory.
+the training log, identifies the best validation score, and copies that
+checkpoint under ``protected_runs`` after validation completes.  The protected
+copy is independent of rolling-checkpoint cleanup.
 
 The default is a dry run.  Pass ``--apply`` to write the protected copy.
 """
@@ -105,14 +104,19 @@ def merge_validation_scores(score_maps: list[Dict[int, float]]) -> Dict[int, flo
 
 
 def best_step(
-    scores: Dict[int, float], checkpoints: Dict[int, Path]
+    scores: Dict[int, float], checkpoints: Dict[int, Path], protected_root: Path
 ) -> int | None:
-    available = [step for step in scores if step in checkpoints and _is_complete_checkpoint(checkpoints[step])]
+    available = [
+        step
+        for step in scores
+        if _is_complete_checkpoint(checkpoints.get(step, protected_root / f"global_step_{step}"))
+    ]
     if not available:
         return None
-    # Prefer the latest available checkpoint on a validation-score tie. Older
-    # unavailable checkpoints are not selected, even if the score history says
-    # they were once the best; the trainer may have already pruned them.
+    # Prefer the latest available checkpoint on a validation-score tie. A
+    # protected copy remains available after the trainer prunes its rolling
+    # source, so a historical best must not be silently replaced by a newer,
+    # lower-scoring checkpoint.
     return max(available, key=lambda step: (scores[step], step))
 
 
@@ -163,7 +167,7 @@ def protect_once(
         ]
     )
     checkpoints = checkpoint_steps(root)
-    chosen_step = best_step(scores, checkpoints)
+    chosen_step = best_step(scores, checkpoints, protected_root)
 
     if chosen_step is None:
         print(f"best checkpoint: no validation score found in {log_path}")
