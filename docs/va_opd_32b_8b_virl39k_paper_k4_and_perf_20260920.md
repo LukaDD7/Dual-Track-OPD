@@ -272,3 +272,100 @@ the filter used a multiprocessing closure that could fail to pickle.  The
 subclass now performs exact serial text/multimodal tokenization and filters
 these two rows before training.  The filtered dataset still floors to the same
 2396 steps per epoch, so the 5-epoch contract remains 11980 total steps.
+
+## Validation curve update: 2026-09-29
+
+Run lineage:
+
+```text
+qwen3vl_32b_teacher_8b_student_virl39k_va_opd_paper_k4_full_perfC_v1
+```
+
+This snapshot combines the append-only launcher history, the persisted
+`best_val_history.json`, and the current `train.log`.  It supersedes the
+2026-09-23 table without changing that historical snapshot.  The monitor remains
+the operational 500-example ViRL39K split, and the metric remains
+`val-core/ViRL39K/reward/mean@1` with validation every 25 optimizer steps.
+
+The curve is noisy but has an upward trend: the baseline is 0.584, the mean of
+all 44 recorded validation points is 0.6163, and the historical best is 0.644.
+
+| Step | Validation score |
+|-----:|-----------------:|
+| 0    | 0.584 |
+| 25   | 0.624 |
+| 50   | 0.610 |
+| 75   | 0.610 |
+| 100  | 0.576 |
+| 125  | 0.588 |
+| 150  | 0.610 |
+| 175  | 0.618 |
+| 200  | 0.592 |
+| 225  | 0.604 |
+| 250  | 0.592 |
+| 275  | 0.608 |
+| 300  | 0.620 |
+| 325  | 0.602 |
+| 350  | 0.624 |
+| 375  | 0.616 |
+| 400  | 0.620 |
+| 425  | 0.618 |
+| 450  | 0.628 |
+| 475  | 0.630 |
+| 500  | 0.610 |
+| 525  | 0.618 |
+| 550  | 0.606 |
+| 575  | 0.630 |
+| 600  | 0.626 |
+| 625  | 0.634 |
+| 650  | 0.606 |
+| 675  | 0.616 |
+| 700  | 0.630 |
+| 725  | 0.614 |
+| 750  | 0.630 |
+| 775  | 0.624 |
+| 800  | 0.638 |
+| 825  | 0.612 |
+| 850  | 0.616 |
+| 875  | 0.602 |
+| 900  | 0.644 |
+| 925  | 0.610 |
+| 950  | 0.630 |
+| 975  | 0.638 |
+| 1000 | 0.640 |
+| 1025 | 0.624 |
+| 1050 | 0.628 |
+| 1075 | 0.616 |
+
+Validation means by 100-step bins:
+
+| Step interval | Mean validation score |
+|---|---:|
+| 0–75 | 0.607 |
+| 100–175 | 0.598 |
+| 200–275 | 0.599 |
+| 300–375 | 0.6155 |
+| 400–475 | 0.624 |
+| 500–575 | 0.616 |
+| 600–675 | 0.6205 |
+| 700–775 | 0.6245 |
+| 800–875 | 0.617 |
+| 900–975 | 0.6305 |
+| 1000–1075 | 0.627 |
+
+Current state at the last GPU-instance reclamation:
+
+- Training last reached step 1077.
+- The latest complete checkpoint is `global_step_1075`.
+- `latest_checkpointed_iteration.txt` is 1075.
+- The historical best-validation checkpoint is step 900 with score 0.644.
+- The protected best is independently stored under
+  `checkpoints/va_opd_native/protected_runs/qwen3vl_32b_teacher_8b_student_virl39k_va_opd_paper_k4_full_perfC_v1/global_step_900`.
+- The active rolling checkpoint at reclamation was
+  `global_step_1075`; the two unsaved steps after its validation are the only
+  progress not recoverable from that checkpoint.
+
+Interpretation: after the early jump at step 25, validation oscillates in the
+0.60–0.64 range.  The strongest region so far is steps 900–975, with step 900
+at 0.644.  The 1000–1075 region remains above the earlier 0.60–0.62 plateau,
+but its last three points (0.624, 0.628, 0.616) do not establish a new best.
