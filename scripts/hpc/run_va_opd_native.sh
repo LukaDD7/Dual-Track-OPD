@@ -226,6 +226,10 @@ fi
 
 IFS=',' read -r -a GPU_ARRAY <<< "${VISIBLE_GPUS}"
 if ! ${ALLOW_BUSY_GPUS}; then
+    command -v nvidia-smi >/dev/null 2>&1 || {
+        echo "FATAL: nvidia-smi not found; launch from the GPU instance (or set VA_OPD_ALLOW_BUSY_GPUS=1)" >&2
+        exit 1
+    }
     for gpu in "${GPU_ARRAY[@]}"; do
         PIDS="$(nvidia-smi -i "${gpu}" --query-compute-apps=pid --format=csv,noheader,nounits 2>/dev/null | sed '/^[[:space:]]*$/d' || true)"
         if [[ -n "${PIDS}" ]]; then
