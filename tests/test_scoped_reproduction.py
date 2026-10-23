@@ -55,8 +55,11 @@ def test_dataset_manifest_verification_rejects_wrong_hash(tmp_path):
 def test_repo_dirty_check_ignores_only_python_runtime_cache():
     source = MODULE_PATH.read_text(encoding="utf-8")
 
-    assert 'line.startswith("?? ") and "__pycache__/" in line' in source
-    assert 'git_output(repo, "status", "--short", "--untracked-files=all")' in source
+    assert ":(exclude)**/__pycache__/**" in source
+    assert 'git_output(' in source
+    assert '":(exclude).venv-rl"' in source
+    assert '":(exclude).venv-scoped"' in source
+    assert '":(exclude)**/*.egg-info/**"' in source
 
 
 def test_pair_runner_uses_two_isolated_ray_directories_and_all_four_caps():
@@ -71,6 +74,12 @@ def test_pair_runner_uses_two_isolated_ray_directories_and_all_four_caps():
     assert '--capability all --output "$DATA_DIR" --offline' in source
     assert "bash \"$REPO_ROOT/scripts/train.sh\"" in source
     assert "bash scripts/train.sh opd" not in source
+    assert 'SAVE_MODEL_ONLY="${SCOPED_SAVE_MODEL_ONLY:-true}"' in source
+    assert 'SAVE_LIMIT="${SCOPED_SAVE_LIMIT:-1}"' in source
+    assert '"trainer.save_model_only=$SAVE_MODEL_ONLY"' in source
+    assert '"trainer.save_limit=$SAVE_LIMIT"' in source
+    assert 'SCOPED_CUDA12_RUNTIME="$REPO_ROOT/.venv-scoped/lib/python3.12/site-packages/nvidia/cuda_runtime/lib"' in source
+    assert 'LD_LIBRARY_PATH="$SCOPED_CUDA12_RUNTIME${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"' in source
 
 
 def test_setup_pins_commit_and_refuses_dirty_checkout_without_reset():
@@ -80,6 +89,19 @@ def test_setup_pins_commit_and_refuses_dirty_checkout_without_reset():
     assert "git reset --hard" not in source
     assert "git clean" not in source
     assert 'git -C "$REPO_ROOT" status --short' in source
+    assert "':(exclude).venv-rl'" in source
+    assert "':(exclude).venv-scoped'" in source
+    assert "':(exclude)**/__pycache__/**'" in source
+    assert "':(exclude)**/*.egg-info/**'" in source
+    assert 'RL_COMPAT="$STORAGE_ROOT/requirements-rl.compat.txt"' in source
+    assert '.replace("packaging==24.2", "packaging==25.0")' in source
+    assert '(cd "$REPO_ROOT" && "$REPO_ROOT/.venv-rl/bin/python" -m pip install -r "$RL_COMPAT")' in source
+    assert 'SCOPED_COMPAT="$STORAGE_ROOT/requirements-scoped.compat.txt"' in source
+    assert '.replace("flash-attn==2.8.3.post1", "flash-attn==2.8.3")' in source
+    assert "FLASH_ATTN_WHEEL=" in source
+    assert "torch==2.11.0 torchvision==0.26.0 torchaudio==2.11.0" in source
+    assert "nvidia-cuda-runtime-cu12==12.8.90" in source
+    assert '(cd "$REPO_ROOT" && "$REPO_ROOT/.venv-scoped/bin/python" -m pip install -r "$SCOPED_COMPAT")' in source
     assert "requirements-rl.txt" in source
     assert "requirements.txt" in source
 
@@ -92,6 +114,10 @@ def test_single_expert_runner_supports_separate_four_gpu_allocations():
     assert "RAY_TMPDIR=\"/tmp/scoped-ray-${CAPABILITY}-${STAMP}\"" in source
     assert '--capability all --output "$DATA_DIR" --offline' in source
     assert "bash \"$REPO_ROOT/scripts/train.sh\" \"$CAPABILITY\"" in source
+    assert 'SAVE_MODEL_ONLY="${SCOPED_SAVE_MODEL_ONLY:-true}"' in source
+    assert 'SAVE_LIMIT="${SCOPED_SAVE_LIMIT:-1}"' in source
+    assert '"trainer.save_model_only=$SAVE_MODEL_ONLY"' in source
+    assert '"trainer.save_limit=$SAVE_LIMIT"' in source
     assert "scripts/train.sh skill" not in source
 
 

@@ -8,6 +8,8 @@ STORAGE_ROOT="${SCOPED_STORAGE_ROOT:-$ROOT/fc-opd-storage/external/scoped/storag
 GPU_GROUP="${SCOPED_GPU_GROUP:-0,1,2,3}"
 BASE_MODEL="${BASE_MODEL:-/inspire/hdd/global_user/mengweicheng-240108120092/lzy/models/Qwen3-VL-8B-Instruct}"
 AUTO_DOWNLOAD_DATA="${AUTO_DOWNLOAD_DATA:-1}"
+SAVE_MODEL_ONLY="${SCOPED_SAVE_MODEL_ONLY:-true}"
+SAVE_LIMIT="${SCOPED_SAVE_LIMIT:-1}"
 CAPABILITY=""
 DRY_RUN=0
 
@@ -59,7 +61,9 @@ if [[ "$DRY_RUN" == 1 ]]; then
     printf '%q ' env CUDA_VISIBLE_DEVICES="$GPU_GROUP" RAY_TMPDIR="$RAY_TMPDIR" \
         SCOPED_STORAGE="$STORAGE_ROOT" DATA_DIR="$DATA_DIR" OUTPUT_DIR="$OUTPUT_DIR" \
         BASE_MODEL="$BASE_MODEL" AUTO_DOWNLOAD_DATA="$AUTO_DOWNLOAD_DATA" \
-        bash "$REPO_ROOT/scripts/train.sh" "$CAPABILITY" >&2
+        bash "$REPO_ROOT/scripts/train.sh" "$CAPABILITY" \
+            "trainer.save_model_only=$SAVE_MODEL_ONLY" \
+            "trainer.save_limit=$SAVE_LIMIT" >&2
     printf '\n' >&2
     exit 0
 fi
@@ -91,6 +95,8 @@ echo "Launching $CAPABILITY on GPUs $GPU_GROUP; log: $LOG" >&2
 env CUDA_VISIBLE_DEVICES="$GPU_GROUP" RAY_TMPDIR="$RAY_TMPDIR" \
     SCOPED_STORAGE="$STORAGE_ROOT" DATA_DIR="$DATA_DIR" OUTPUT_DIR="$OUTPUT_DIR" \
     BASE_MODEL="$BASE_MODEL" AUTO_DOWNLOAD_DATA="$AUTO_DOWNLOAD_DATA" \
-    bash "$REPO_ROOT/scripts/train.sh" "$CAPABILITY" >"$LOG" 2>&1
+    bash "$REPO_ROOT/scripts/train.sh" "$CAPABILITY" \
+        "trainer.save_model_only=$SAVE_MODEL_ONLY" \
+        "trainer.save_limit=$SAVE_LIMIT" >"$LOG" 2>&1
 
 echo "SCOPED RL expert complete: $CAPABILITY" >&2

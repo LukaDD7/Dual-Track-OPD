@@ -42,9 +42,12 @@ else
     git -C "$REPO_ROOT" fetch origin
 fi
 
-if [[ -n "$(git -C "$REPO_ROOT" status --short)" ]]; then
+DIRTY=$(git -C "$REPO_ROOT" status --short --untracked-files=all -- \
+    ':(exclude).venv-rl' ':(exclude).venv-scoped' \
+    ':(exclude)**/__pycache__/**' ':(exclude)**/*.egg-info/**')
+if [[ -n "$DIRTY" ]]; then
     echo "SCOPED checkout is dirty; refusing to reset or overwrite it:" >&2
-    git -C "$REPO_ROOT" status --short >&2
+    printf '%s\n' "$DIRTY" >&2
     exit 1
 fi
 
@@ -60,9 +63,21 @@ if [[ "$INSTALL" == 1 ]]; then
         exit 1
     fi
     python3.12 -m venv "$REPO_ROOT/.venv-rl"
-    "$REPO_ROOT/.venv-rl/bin/python" -m pip install -r "$REPO_ROOT/requirements-rl.txt"
+    RL_COMPAT="$STORAGE_ROOT/requirements-rl.compat.txt"
+    python -c 'import sys; from pathlib import Path; p=Path(sys.argv[1]); q=Path(sys.argv[2]); q.write_text(p.read_text().replace("packaging==24.2", "packaging==25.0"))' \
+        "$REPO_ROOT/requirements-rl.txt" "$RL_COMPAT"
+    (cd "$REPO_ROOT" && "$REPO_ROOT/.venv-rl/bin/python" -m pip install -r "$RL_COMPAT")
     python3.12 -m venv "$REPO_ROOT/.venv-scoped"
-    "$REPO_ROOT/.venv-scoped/bin/python" -m pip install -r "$REPO_ROOT/requirements.txt"
+    SCOPED_COMPAT="$STORAGE_ROOT/requirements-scoped.compat.txt"
+    python -c 'import sys; from pathlib import Path; p=Path(sys.argv[1]); q=Path(sys.argv[2]); q.write_text(p.read_text().replace("flash-attn==2.8.3.post1", "flash-attn==2.8.3"))' \
+        "$REPO_ROOT/requirements.txt" "$SCOPED_COMPAT"
+    FLASH_ATTN_WHEEL="${FLASH_ATTN_WHEEL:-https://github.com/lesj0610/flash-attention/releases/download/v2.8.3-cu12-torch2.11/flash_attn-2.8.3%2Bcu12torch2.11cxx11abiTRUE-cp312-cp312-linux_x86_64.whl}"
+    (cd "$REPO_ROOT" && "$REPO_ROOT/.venv-scoped/bin/python" -m pip install \
+        torch==2.11.0 torchvision==0.26.0 torchaudio==2.11.0)
+    (cd "$REPO_ROOT" && "$REPO_ROOT/.venv-scoped/bin/python" -m pip install "$FLASH_ATTN_WHEEL")
+    (cd "$REPO_ROOT" && "$REPO_ROOT/.venv-scoped/bin/python" -m pip install \
+        nvidia-cuda-runtime-cu12==12.8.90)
+    (cd "$REPO_ROOT" && "$REPO_ROOT/.venv-scoped/bin/python" -m pip install -r "$SCOPED_COMPAT")
 fi
 
 python "$ROOT/scripts/hpc/scoped_reproduction.py" \

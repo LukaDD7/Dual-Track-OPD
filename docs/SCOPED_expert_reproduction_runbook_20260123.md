@@ -49,6 +49,28 @@ The checkout, virtualenvs, dataset, checkpoints, logs, and records live under
 Override `SCOPED_REPO_ROOT` and `SCOPED_STORAGE_ROOT` if the HPC layout differs.
 The setup script refuses to reset or overwrite a dirty upstream checkout.
 
+## Environment status
+
+Both offline-ready virtualenvs are installed in the external checkout:
+
+- `.venv-rl`: `torch 2.8.0+cu128`, `vllm 0.11.0`, `transformers 4.57.1`,
+  `flash-attn 2.8.3.post1`, `ray 2.51.1`.
+- `.venv-scoped`: `torch 2.11.0+cu130`, `vllm 0.24.0`,
+  `transformers 5.10.4`, `flash-attn 2.8.3`, `ray 2.56.0`.
+
+The two environment-only compatibility changes are:
+
+- `requirements-rl.txt` uses `packaging==25.0` instead of `24.2`; the pinned
+  `tensordict`/`pyvers` combination requires it.
+- `.venv-scoped` uses the available prebuilt `flash-attn 2.8.3` wheel for
+  torch 2.11/cp312 rather than `2.8.3.post1`, and installs
+  `nvidia-cuda-runtime-cu12==12.8.90` so that the cu12 flash-attention
+  extension can find `libcudart.so.12`.  The pair runner exports that library
+  path automatically for export and skill stages.
+
+CPU import/version checks passed in both environments.  GPU kernel execution
+and distributed training still require verification on the GPU instance.
+
 ## Data status
 
 The four-capability dataset is prepared at
@@ -84,6 +106,13 @@ The runner uses separate Ray temporary directories and writes per-capability
 logs under `fc-opd-storage/external/scoped/storage/logs/`.  The dataset is
 prepared before GPU launch; set `AUTO_DOWNLOAD_DATA=0` because GPU instances
 are expected to have no network access.
+
+To fit the remaining shared-storage budget, the local wrappers default to
+`trainer.save_model_only=true` and `trainer.save_limit=1`.  This preserves the
+upstream training hyperparameters and the latest exportable actor model while
+avoiding upstream's five full model-plus-optimizer checkpoints per expert.
+Set `SCOPED_SAVE_MODEL_ONLY=false` and `SCOPED_SAVE_LIMIT=5` to reproduce the
+upstream checkpoint retention policy, but only with sufficient disk capacity.
 
 If the 4-GPU allocations are on separate nodes, launch one expert per node
 with `scripts/hpc/run_scoped_expert.sh`.  For example, on the first node:
@@ -126,10 +155,11 @@ The export writes `storage/outputs/teachers.env`.  Skill extraction writes one
 - The launch scripts use upstream `scripts/train.sh` and the paper's four
   capability configurations without vendoring SCOPED.
 - Shell syntax and targeted Python tests pass locally.
+- Both virtualenvs are installed and key imports/version checks pass locally.
+- The 14GB pinned dataset and 17GB local Qwen3-VL-8B base model are present.
 
 `REQUIRES SERVER VERIFICATION`
 
-- Environment installation for `.venv-rl` and `.venv-scoped`.
-- Full dataset download and manifest hash verification on HPC.
+- CUDA kernel and distributed execution in both installed environments.
 - RL throughput and completion for all four experts.
 - Teacher export and skill extraction.

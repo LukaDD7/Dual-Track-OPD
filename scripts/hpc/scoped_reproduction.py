@@ -51,15 +51,21 @@ def inspect_repo(repo: Path, expected_commit: str) -> dict[str, Any]:
         raise ValueError(
             f"SCOPED checkout is {commit}, expected {expected_commit}"
         )
-    status = git_output(repo, "status", "--short", "--untracked-files=all")
-    # Running upstream helpers can create __pycache__ directories.  Those are
-    # runtime caches, not source changes; every other form of dirtiness is
-    # fatal.
-    material_status = [
-        line
-        for line in status.splitlines()
-        if not (line.startswith("?? ") and "__pycache__/" in line)
-    ]
+    status = git_output(
+        repo,
+        "status",
+        "--short",
+        "--untracked-files=all",
+        "--",
+        ":(exclude).venv-rl",
+        ":(exclude).venv-scoped",
+        ":(exclude)**/__pycache__/**",
+        ":(exclude)**/*.egg-info/**",
+    )
+    # Running upstream helpers can create caches, virtualenvs, and editable
+    # egg metadata.  Those are runtime artifacts, not source changes; every
+    # other form of dirtiness is fatal.
+    material_status = status.splitlines()
     if material_status:
         preview = "\n".join(material_status[:20])
         raise ValueError(f"SCOPED checkout is dirty:\n{preview}")

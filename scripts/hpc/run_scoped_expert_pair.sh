@@ -10,6 +10,8 @@ GPU_B="${SCOPED_GPU_GROUP_B:-4,5,6,7}"
 BASE_MODEL="${BASE_MODEL:-/inspire/hdd/global_user/mengweicheng-240108120092/lzy/models/Qwen3-VL-8B-Instruct}"
 STUDENT_MODEL="${STUDENT_MODEL:-$BASE_MODEL}"
 AUTO_DOWNLOAD_DATA="${AUTO_DOWNLOAD_DATA:-1}"
+SAVE_MODEL_ONLY="${SCOPED_SAVE_MODEL_ONLY:-true}"
+SAVE_LIMIT="${SCOPED_SAVE_LIMIT:-1}"
 PAIR=a
 STAGE=rl
 DRY_RUN=0
@@ -52,6 +54,7 @@ case "$STAGE" in rl|export|skill) ;; *) echo "Stage must be rl, export, or skill
 
 RL_PYTHON="${RL_PYTHON:-$REPO_ROOT/.venv-rl/bin/python}"
 SCOPED_PYTHON="${SCOPED_PYTHON:-$REPO_ROOT/.venv-scoped/bin/python}"
+SCOPED_CUDA12_RUNTIME="$REPO_ROOT/.venv-scoped/lib/python3.12/site-packages/nvidia/cuda_runtime/lib"
 if [[ "$DRY_RUN" != 1 ]]; then
     if [[ "$STAGE" == rl ]]; then
         [[ -x "$RL_PYTHON" ]] || { echo "Missing executable: $RL_PYTHON" >&2; exit 1; }
@@ -92,7 +95,9 @@ run_expert() {
         BASE_MODEL="$BASE_MODEL"
         STUDENT_MODEL="$STUDENT_MODEL"
         AUTO_DOWNLOAD_DATA="$AUTO_DOWNLOAD_DATA"
-        bash "$REPO_ROOT/scripts/train.sh" "$capability"
+        bash "$REPO_ROOT/scripts/train.sh" "$capability" \
+            "trainer.save_model_only=$SAVE_MODEL_ONLY" \
+            "trainer.save_limit=$SAVE_LIMIT"
     )
     if [[ "$DRY_RUN" == 1 ]]; then
         printf '%q ' "${command[@]}" >&2
@@ -130,27 +135,31 @@ case "$STAGE" in
         ;;
     export)
         if [[ "$DRY_RUN" == 1 ]]; then
-            printf '%q ' env SCOPED_STORAGE="$STORAGE_ROOT" OUTPUT_DIR="$OUTPUT_DIR" \
+            printf '%q ' env LD_LIBRARY_PATH="$SCOPED_CUDA12_RUNTIME${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+                SCOPED_STORAGE="$STORAGE_ROOT" OUTPUT_DIR="$OUTPUT_DIR" \
                 "$SCOPED_PYTHON" "$REPO_ROOT/scripts/lib/export_teachers.py" \
                 --checkpoint-root "$OUTPUT_DIR/rl" --env-file "$OUTPUT_DIR/teachers.env"
             printf '\n'
             exit 0
         fi
         record_contract "export_teachers"
-        env SCOPED_STORAGE="$STORAGE_ROOT" OUTPUT_DIR="$OUTPUT_DIR" \
+        env LD_LIBRARY_PATH="$SCOPED_CUDA12_RUNTIME${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+            SCOPED_STORAGE="$STORAGE_ROOT" OUTPUT_DIR="$OUTPUT_DIR" \
             "$SCOPED_PYTHON" "$REPO_ROOT/scripts/lib/export_teachers.py" \
             --checkpoint-root "$OUTPUT_DIR/rl" --env-file "$OUTPUT_DIR/teachers.env"
         ;;
     skill)
         if [[ "$DRY_RUN" == 1 ]]; then
-            printf '%q ' env CUDA_VISIBLE_DEVICES="$GPU_A" RAY_TMPDIR="/tmp/scoped-skill-$STAMP" \
+            printf '%q ' env LD_LIBRARY_PATH="$SCOPED_CUDA12_RUNTIME${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+                CUDA_VISIBLE_DEVICES="$GPU_A" RAY_TMPDIR="/tmp/scoped-skill-$STAMP" \
                 SCOPED_STORAGE="$STORAGE_ROOT" DATA_DIR="$DATA_DIR" OUTPUT_DIR="$OUTPUT_DIR" \
                 AUTO_DOWNLOAD_DATA=0 bash "$REPO_ROOT/scripts/train.sh" skill all
             printf '\n'
             exit 0
         fi
         record_contract "skill_extraction"
-        env CUDA_VISIBLE_DEVICES="$GPU_A" RAY_TMPDIR="/tmp/scoped-skill-$STAMP" \
+        env LD_LIBRARY_PATH="$SCOPED_CUDA12_RUNTIME${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+            CUDA_VISIBLE_DEVICES="$GPU_A" RAY_TMPDIR="/tmp/scoped-skill-$STAMP" \
             SCOPED_STORAGE="$STORAGE_ROOT" DATA_DIR="$DATA_DIR" OUTPUT_DIR="$OUTPUT_DIR" \
             AUTO_DOWNLOAD_DATA=0 bash "$REPO_ROOT/scripts/train.sh" skill all
         ;;
