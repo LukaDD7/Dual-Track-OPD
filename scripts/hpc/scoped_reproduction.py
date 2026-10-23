@@ -51,9 +51,17 @@ def inspect_repo(repo: Path, expected_commit: str) -> dict[str, Any]:
         raise ValueError(
             f"SCOPED checkout is {commit}, expected {expected_commit}"
         )
-    status = git_output(repo, "status", "--short")
-    if status:
-        preview = "\n".join(status.splitlines()[:20])
+    status = git_output(repo, "status", "--short", "--untracked-files=all")
+    # Running upstream helpers can create __pycache__ directories.  Those are
+    # runtime caches, not source changes; every other form of dirtiness is
+    # fatal.
+    material_status = [
+        line
+        for line in status.splitlines()
+        if not (line.startswith("?? ") and "__pycache__/" in line)
+    ]
+    if material_status:
+        preview = "\n".join(material_status[:20])
         raise ValueError(f"SCOPED checkout is dirty:\n{preview}")
     return {
         "commit": commit,

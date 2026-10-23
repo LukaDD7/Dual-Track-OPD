@@ -9,7 +9,7 @@ scoped_reproduction:
     revision: 912185f76295f847c09bc44f379cf85513472ebb
     manifest_sha256: bc3340721edddbd869259cb1db50ca54446f8379deb4078067eb83896e47ca96
   defaults:
-    base_model: Qwen/Qwen3-VL-8B-Instruct
+    base_model: /inspire/hdd/global_user/mengweicheng-240108120092/lzy/models/Qwen3-VL-8B-Instruct
     storage_root: fc-opd-storage/external/scoped
     auto_download_data: "1"
     gpu_group_a: 0,1,2,3

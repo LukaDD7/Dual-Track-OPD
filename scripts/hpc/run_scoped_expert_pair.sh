@@ -7,7 +7,7 @@ REPO_ROOT="${SCOPED_REPO_ROOT:-$ROOT/fc-opd-storage/external/scoped/repo}"
 STORAGE_ROOT="${SCOPED_STORAGE_ROOT:-$ROOT/fc-opd-storage/external/scoped/storage}"
 GPU_A="${SCOPED_GPU_GROUP_A:-0,1,2,3}"
 GPU_B="${SCOPED_GPU_GROUP_B:-4,5,6,7}"
-BASE_MODEL="${BASE_MODEL:-Qwen/Qwen3-VL-8B-Instruct}"
+BASE_MODEL="${BASE_MODEL:-/inspire/hdd/global_user/mengweicheng-240108120092/lzy/models/Qwen3-VL-8B-Instruct}"
 STUDENT_MODEL="${STUDENT_MODEL:-$BASE_MODEL}"
 AUTO_DOWNLOAD_DATA="${AUTO_DOWNLOAD_DATA:-1}"
 PAIR=a
@@ -108,7 +108,7 @@ case "$STAGE" in
         if [[ "$DRY_RUN" != 1 ]]; then
             record_contract "rl_pair_${PAIR}_planned"
             "$RL_PYTHON" "$REPO_ROOT/scripts/lib/prepare_data.py" \
-                --capability all --output "$DATA_DIR"
+                --capability all --output "$DATA_DIR" --offline
             record_contract "rl_pair_${PAIR}_data_ready"
         fi
 

@@ -31,6 +31,10 @@ def test_contract_pins_upstream_and_four_expert_shapes():
     assert config["dataset"]["manifest_sha256"] == (
         "bc3340721edddbd869259cb1db50ca54446f8379deb4078067eb83896e47ca96"
     )
+    assert config["defaults"]["base_model"] == (
+        "/inspire/hdd/global_user/mengweicheng-240108120092/lzy/models/"
+        "Qwen3-VL-8B-Instruct"
+    )
     assert config["execution_plan"]["moped_stage"].startswith("deferred")
 
 
@@ -48,6 +52,13 @@ def test_dataset_manifest_verification_rejects_wrong_hash(tmp_path):
         )
 
 
+def test_repo_dirty_check_ignores_only_python_runtime_cache():
+    source = MODULE_PATH.read_text(encoding="utf-8")
+
+    assert 'line.startswith("?? ") and "__pycache__/" in line' in source
+    assert 'git_output(repo, "status", "--short", "--untracked-files=all")' in source
+
+
 def test_pair_runner_uses_two_isolated_ray_directories_and_all_four_caps():
     source = PAIR_RUNNER.read_text(encoding="utf-8")
 
@@ -57,6 +68,7 @@ def test_pair_runner_uses_two_isolated_ray_directories_and_all_four_caps():
     assert "/tmp/scoped-ray-$STAMP-b" in source
     assert "SCOPED_STORAGE=" in source
     assert "AUTO_DOWNLOAD_DATA=" in source
+    assert '--capability all --output "$DATA_DIR" --offline' in source
     assert "bash \"$REPO_ROOT/scripts/train.sh\"" in source
     assert "bash scripts/train.sh opd" not in source
 
@@ -78,6 +90,7 @@ def test_single_expert_runner_supports_separate_four_gpu_allocations():
     assert "capability1|capability2|capability3|capability4" in source
     assert "SCOPED_GPU_GROUP" in source
     assert "RAY_TMPDIR=\"/tmp/scoped-ray-${CAPABILITY}-${STAMP}\"" in source
+    assert '--capability all --output "$DATA_DIR" --offline' in source
     assert "bash \"$REPO_ROOT/scripts/train.sh\" \"$CAPABILITY\"" in source
     assert "scripts/train.sh skill" not in source
 

@@ -6,7 +6,7 @@ CONFIG="${SCOPED_CONFIG:-$ROOT/configs/external/scoped_expert_reproduction.yaml}
 REPO_ROOT="${SCOPED_REPO_ROOT:-$ROOT/fc-opd-storage/external/scoped/repo}"
 STORAGE_ROOT="${SCOPED_STORAGE_ROOT:-$ROOT/fc-opd-storage/external/scoped/storage}"
 GPU_GROUP="${SCOPED_GPU_GROUP:-0,1,2,3}"
-BASE_MODEL="${BASE_MODEL:-Qwen/Qwen3-VL-8B-Instruct}"
+BASE_MODEL="${BASE_MODEL:-/inspire/hdd/global_user/mengweicheng-240108120092/lzy/models/Qwen3-VL-8B-Instruct}"
 AUTO_DOWNLOAD_DATA="${AUTO_DOWNLOAD_DATA:-1}"
 CAPABILITY=""
 DRY_RUN=0
@@ -75,7 +75,7 @@ python "$ROOT/scripts/hpc/scoped_reproduction.py" \
     --output "$RECORD_DIR/rl_${CAPABILITY}_${STAMP}_planned.json"
 
 "$RL_PYTHON" "$REPO_ROOT/scripts/lib/prepare_data.py" \
-    --capability all --output "$DATA_DIR"
+    --capability all --output "$DATA_DIR" --offline
 
 python "$ROOT/scripts/hpc/scoped_reproduction.py" \
     --config "$CONFIG" \

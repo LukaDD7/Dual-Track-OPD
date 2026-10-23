@@ -49,12 +49,24 @@ The checkout, virtualenvs, dataset, checkpoints, logs, and records live under
 Override `SCOPED_REPO_ROOT` and `SCOPED_STORAGE_ROOT` if the HPC layout differs.
 The setup script refuses to reset or overwrite a dirty upstream checkout.
 
+## Data status
+
+The four-capability dataset is prepared at
+`fc-opd-storage/external/scoped/storage/data/hf_dataset` (about 14GB, 8 parquet
+shards).  It was downloaded with the pinned revision and verified twice: during
+download and with `--offline`.  The dataset-ready provenance is recorded at
+`fc-opd-storage/external/scoped/storage/records/dataset_ready.json`.
+
+The local base model is
+`/inspire/hdd/global_user/mengweicheng-240108120092/lzy/models/Qwen3-VL-8B-Instruct`.
+
 ## RL experts
 
 If both four-GPU groups are visible on one node, run Pair A first:
 
 ```bash
 SCOPED_GPU_GROUP_A=0,1,2,3 \
+AUTO_DOWNLOAD_DATA=0 \
 SCOPED_GPU_GROUP_B=4,5,6,7 \
 bash scripts/hpc/run_scoped_expert_pair.sh --stage rl --pair a
 ```
@@ -63,19 +75,22 @@ After Pair A succeeds, run Pair B:
 
 ```bash
 SCOPED_GPU_GROUP_A=0,1,2,3 \
+AUTO_DOWNLOAD_DATA=0 \
 SCOPED_GPU_GROUP_B=4,5,6,7 \
 bash scripts/hpc/run_scoped_expert_pair.sh --stage rl --pair b
 ```
 
-The runner downloads and verifies the dataset once, uses separate Ray temporary
-directories, and writes per-capability logs under
-`fc-opd-storage/external/scoped/storage/logs/`.
+The runner uses separate Ray temporary directories and writes per-capability
+logs under `fc-opd-storage/external/scoped/storage/logs/`.  The dataset is
+prepared before GPU launch; set `AUTO_DOWNLOAD_DATA=0` because GPU instances
+are expected to have no network access.
 
 If the 4-GPU allocations are on separate nodes, launch one expert per node
 with `scripts/hpc/run_scoped_expert.sh`.  For example, on the first node:
 
 ```bash
 SCOPED_GPU_GROUP=0,1,2,3 \
+AUTO_DOWNLOAD_DATA=0 \
 bash scripts/hpc/run_scoped_expert.sh --capability capability2
 ```
 
@@ -83,6 +98,7 @@ On the second node:
 
 ```bash
 SCOPED_GPU_GROUP=0,1,2,3 \
+AUTO_DOWNLOAD_DATA=0 \
 bash scripts/hpc/run_scoped_expert.sh --capability capability3
 ```
 
