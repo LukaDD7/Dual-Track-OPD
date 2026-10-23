@@ -10,6 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 CONFIG = ROOT / "configs/external/scoped_expert_reproduction.yaml"
 SETUP = ROOT / "scripts/hpc/setup_scoped_reproduction.sh"
 PAIR_RUNNER = ROOT / "scripts/hpc/run_scoped_expert_pair.sh"
+EXPERT_RUNNER = ROOT / "scripts/hpc/run_scoped_expert.sh"
 MODULE_PATH = ROOT / "scripts/hpc/scoped_reproduction.py"
 
 
@@ -69,6 +70,16 @@ def test_setup_pins_commit_and_refuses_dirty_checkout_without_reset():
     assert 'git -C "$REPO_ROOT" status --short' in source
     assert "requirements-rl.txt" in source
     assert "requirements.txt" in source
+
+
+def test_single_expert_runner_supports_separate_four_gpu_allocations():
+    source = EXPERT_RUNNER.read_text(encoding="utf-8")
+
+    assert "capability1|capability2|capability3|capability4" in source
+    assert "SCOPED_GPU_GROUP" in source
+    assert "RAY_TMPDIR=\"/tmp/scoped-ray-${CAPABILITY}-${STAMP}\"" in source
+    assert "bash \"$REPO_ROOT/scripts/train.sh\" \"$CAPABILITY\"" in source
+    assert "scripts/train.sh skill" not in source
 
 
 def test_record_writer_is_atomic(tmp_path):

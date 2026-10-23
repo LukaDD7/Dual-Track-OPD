@@ -51,7 +51,7 @@ The setup script refuses to reset or overwrite a dirty upstream checkout.
 
 ## RL experts
 
-Run Pair A first:
+If both four-GPU groups are visible on one node, run Pair A first:
 
 ```bash
 SCOPED_GPU_GROUP_A=0,1,2,3 \
@@ -70,6 +70,25 @@ bash scripts/hpc/run_scoped_expert_pair.sh --stage rl --pair b
 The runner downloads and verifies the dataset once, uses separate Ray temporary
 directories, and writes per-capability logs under
 `fc-opd-storage/external/scoped/storage/logs/`.
+
+If the 4-GPU allocations are on separate nodes, launch one expert per node
+with `scripts/hpc/run_scoped_expert.sh`.  For example, on the first node:
+
+```bash
+SCOPED_GPU_GROUP=0,1,2,3 \
+bash scripts/hpc/run_scoped_expert.sh --capability capability2
+```
+
+On the second node:
+
+```bash
+SCOPED_GPU_GROUP=0,1,2,3 \
+bash scripts/hpc/run_scoped_expert.sh --capability capability3
+```
+
+Both jobs must point to the same external storage layout if the filesystem is
+shared.  Otherwise keep separate storage roots and copy only the completed
+checkpoint directories into the common `outputs/rl/` tree before export.
 
 ## Export teachers and extract skills
 
