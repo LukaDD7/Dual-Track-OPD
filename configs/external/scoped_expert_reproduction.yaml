@@ -1,0 +1,58 @@
+scoped_reproduction:
+  name: scoped-four-expert-reproduction
+  paper: arXiv:2610.22217
+  upstream:
+    repo_url: https://github.com/NEUIR/SCOPED.git
+    commit: 74e112e29e2be0657d1d521c1ecc3be53df99e44
+  dataset:
+    repo_id: xiongyq/SCOPED-Train
+    revision: 912185f76295f847c09bc44f379cf85513472ebb
+    manifest_sha256: bc3340721edddbd869259cb1db50ca54446f8379deb4078067eb83896e47ca96
+  defaults:
+    base_model: Qwen/Qwen3-VL-8B-Instruct
+    storage_root: fc-opd-storage/external/scoped
+    auto_download_data: "1"
+    gpu_group_a: 0,1,2,3
+    gpu_group_b: 4,5,6,7
+  capabilities:
+    - name: capability1
+      task: fine-grained perception, counting, and grounding
+      train_rows: 9499
+      val_rows: 501
+      total_epochs: 5
+      rollout_n: 8
+      rollout_batch_size: 128
+      max_response_length: 4096
+    - name: capability2
+      task: OCR, charts, tables, and documents
+      train_rows: 9500
+      val_rows: 500
+      total_epochs: 3
+      rollout_n: 8
+      rollout_batch_size: 128
+      max_response_length: 4096
+    - name: capability3
+      task: multimodal mathematical and symbolic reasoning
+      train_rows: 9500
+      val_rows: 500
+      total_epochs: 3
+      rollout_n: 8
+      rollout_batch_size: 128
+      max_response_length: 8192
+    - name: capability4
+      task: multi-image and spatial reasoning
+      train_rows: 9500
+      val_rows: 500
+      total_epochs: 3
+      rollout_n: 8
+      rollout_batch_size: 64
+      max_response_length: 4096
+  execution_plan:
+    parallel_pairs:
+      a: [capability2, capability3]
+      b: [capability1, capability4]
+    rationale: >-
+      Pair A first covers the two capabilities closest to the project's later
+      data-strategy experiments. Pair B completes the four-expert contract.
+    skill_stage: extract after all four exported teachers exist
+    moped_stage: deferred until the benchmark-driven data strategy is selected

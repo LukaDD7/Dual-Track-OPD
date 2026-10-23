@@ -37,6 +37,8 @@ data/downloads/
 
 # External and runtime directories
 external/
+!configs/external/
+!configs/external/**
 runs/
 third_party_runtime/
 raw_logs/
@@ -49,4 +51,3 @@ artifacts/vaopd_blockwise/raw/
 .DS_Store
 .idea/
 .vscode/
-
