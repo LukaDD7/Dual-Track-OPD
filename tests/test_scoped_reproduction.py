@@ -67,8 +67,7 @@ def test_pair_runner_uses_two_isolated_ray_directories_and_all_four_caps():
 
     assert "CAP_A=capability2; CAP_B=capability3" in source
     assert "CAP_A=capability1; CAP_B=capability4" in source
-    assert "/tmp/scoped-ray-$STAMP-a" in source
-    assert "/tmp/scoped-ray-$STAMP-b" in source
+    assert "/tmp/scoped-ray-$STAMP-head" in source
     assert "SCOPED_STORAGE=" in source
     assert "AUTO_DOWNLOAD_DATA=" in source
     assert '--capability all --output "$DATA_DIR" --offline' in source
@@ -78,8 +77,8 @@ def test_pair_runner_uses_two_isolated_ray_directories_and_all_four_caps():
     # around run_expert would create a subshell and make wait always fail.
     assert "PID_A=$(run_expert" not in source
     assert "PID_B=$(run_expert" not in source
-    assert 'run_expert "$CAP_A" "$GPU_A" "/tmp/scoped-ray-$STAMP-a" "$LOG_DIR/rl_${CAP_A}_${STAMP}.log" &' in source
-    assert 'run_expert "$CAP_B" "$GPU_B" "/tmp/scoped-ray-$STAMP-b" "$LOG_DIR/rl_${CAP_B}_${STAMP}.log" &' in source
+    assert 'run_expert "$CAP_A" "$GPU_A" "$RAY_HEAD_TMP" "$LOG_DIR/rl_${CAP_A}_${STAMP}.log" &' in source
+    assert 'run_expert "$CAP_B" "$GPU_B" "$RAY_HEAD_TMP" "$LOG_DIR/rl_${CAP_B}_${STAMP}.log" &' in source
     assert "PID_A=$!" in source
     assert "PID_B=$!" in source
     assert 'SAVE_MODEL_ONLY="${SCOPED_SAVE_MODEL_ONLY:-true}"' in source
@@ -93,6 +92,13 @@ def test_pair_runner_uses_two_isolated_ray_directories_and_all_four_caps():
     assert 'RUNTIME_PYTHONPATH="$ROOT/src:$ROOT/src/dual_track_opd/scoped_runtime"' in source
     assert 'PYTHONPATH="$RUNTIME_PYTHONPATH${PYTHONPATH:+:$PYTHONPATH}"' in source
     assert '[[ "$STAGE" == rl && ! -f "$PYTHON_INCLUDE_DIR/Python.h" ]]' in source
+    assert 'RAY_HEAD_PORT="${SCOPED_RAY_PORT:-6379}"' in source
+    assert 'RAY_HEAD_TMP="/tmp/scoped-ray-$STAMP-head"' in source
+    assert 'RAY_BIN="$REPO_ROOT/.venv-rl/bin/ray"' in source
+    assert 'CLEAN_RAY="${SCOPED_CLEAN_RAY:-1}"' in source
+    assert '"$RAY_BIN" start --head' in source
+    assert 'RAY_ADDRESS="127.0.0.1:$RAY_HEAD_PORT"' in source
+    assert 'trap cleanup_ray EXIT' in source
 
 
 def test_setup_pins_commit_and_refuses_dirty_checkout_without_reset():

@@ -75,6 +75,17 @@ LOG_DIR="$STORAGE_ROOT/logs"
 RECORD_DIR="$STORAGE_ROOT/records"
 mkdir -p "$DATA_DIR" "$OUTPUT_DIR" "$LOG_DIR" "$RECORD_DIR"
 STAMP=$(date -u +%Y%m%dT%H%M%SZ)
+RAY_HEAD_PORT="${SCOPED_RAY_PORT:-6379}"
+RAY_HEAD_TMP="/tmp/scoped-ray-$STAMP-head"
+RAY_BIN="$REPO_ROOT/.venv-rl/bin/ray"
+CLEAN_RAY="${SCOPED_CLEAN_RAY:-1}"
+
+cleanup_ray() {
+    if [[ "$STAGE" == rl && "$CLEAN_RAY" == 1 ]]; then
+        "$RAY_BIN" stop --force >/dev/null 2>&1 || true
+    fi
+}
+trap cleanup_ray EXIT
 
 record_contract() {
     local stage=$1
@@ -95,6 +106,7 @@ run_expert() {
         env
         CUDA_VISIBLE_DEVICES="$gpu_group"
         RAY_TMPDIR="$ray_tmp"
+        RAY_ADDRESS="127.0.0.1:$RAY_HEAD_PORT"
         SCOPED_STORAGE="$STORAGE_ROOT"
         DATA_DIR="$DATA_DIR"
         OUTPUT_DIR="$OUTPUT_DIR"
@@ -118,6 +130,16 @@ run_expert() {
 case "$STAGE" in
     rl)
         if [[ "$DRY_RUN" != 1 ]]; then
+            if [[ "$CLEAN_RAY" == 1 ]]; then
+                "$RAY_BIN" stop --force >/dev/null 2>&1 || true
+            fi
+            mkdir -p "$RAY_HEAD_TMP"
+            "$RAY_BIN" start --head \
+                --port "$RAY_HEAD_PORT" \
+                --temp-dir "$RAY_HEAD_TMP" \
+                --disable-usage-stats \
+                --include-dashboard=false \
+                >"$LOG_DIR/ray_head_$STAMP.log" 2>&1
             record_contract "rl_pair_${PAIR}_planned"
             "$RL_PYTHON" "$REPO_ROOT/scripts/lib/prepare_data.py" \
                 --capability all --output "$DATA_DIR" --offline
@@ -125,13 +147,13 @@ case "$STAGE" in
         fi
 
         if [[ "$DRY_RUN" == 1 ]]; then
-            run_expert "$CAP_A" "$GPU_A" "/tmp/scoped-ray-$STAMP-a" "$LOG_DIR/rl_${CAP_A}_${STAMP}.log"
-            run_expert "$CAP_B" "$GPU_B" "/tmp/scoped-ray-$STAMP-b" "$LOG_DIR/rl_${CAP_B}_${STAMP}.log"
+            run_expert "$CAP_A" "$GPU_A" "$RAY_HEAD_TMP" "$LOG_DIR/rl_${CAP_A}_${STAMP}.log"
+            run_expert "$CAP_B" "$GPU_B" "$RAY_HEAD_TMP" "$LOG_DIR/rl_${CAP_B}_${STAMP}.log"
             exit 0
         fi
-        run_expert "$CAP_A" "$GPU_A" "/tmp/scoped-ray-$STAMP-a" "$LOG_DIR/rl_${CAP_A}_${STAMP}.log" &
+        run_expert "$CAP_A" "$GPU_A" "$RAY_HEAD_TMP" "$LOG_DIR/rl_${CAP_A}_${STAMP}.log" &
         PID_A=$!
-        run_expert "$CAP_B" "$GPU_B" "/tmp/scoped-ray-$STAMP-b" "$LOG_DIR/rl_${CAP_B}_${STAMP}.log" &
+        run_expert "$CAP_B" "$GPU_B" "$RAY_HEAD_TMP" "$LOG_DIR/rl_${CAP_B}_${STAMP}.log" &
         PID_B=$!
         echo "Launched $CAP_A on GPUs $GPU_A (pid $PID_A)" >&2
         echo "Launched $CAP_B on GPUs $GPU_B (pid $PID_B)" >&2
