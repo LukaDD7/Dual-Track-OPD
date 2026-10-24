@@ -84,6 +84,9 @@ The local base model is
 
 ## RL experts
 
+Run the RL stage on the GPU instance.  The CPU control node may see zero
+CUDA devices even when shared storage is visible.
+
 If both four-GPU groups are visible on one node, run Pair A first:
 
 ```bash

@@ -72,14 +72,27 @@ def test_pair_runner_uses_two_isolated_ray_directories_and_all_four_caps():
     assert "SCOPED_STORAGE=" in source
     assert "AUTO_DOWNLOAD_DATA=" in source
     assert '--capability all --output "$DATA_DIR" --offline' in source
-    assert "bash \"$REPO_ROOT/scripts/train.sh\"" in source
+    assert "bash \"$REPO_ROOT/scripts/lib/train_capability.sh\"" in source
     assert "bash scripts/train.sh opd" not in source
+    # Background jobs must be children of this shell.  A command substitution
+    # around run_expert would create a subshell and make wait always fail.
+    assert "PID_A=$(run_expert" not in source
+    assert "PID_B=$(run_expert" not in source
+    assert 'run_expert "$CAP_A" "$GPU_A" "/tmp/scoped-ray-$STAMP-a" "$LOG_DIR/rl_${CAP_A}_${STAMP}.log" &' in source
+    assert 'run_expert "$CAP_B" "$GPU_B" "/tmp/scoped-ray-$STAMP-b" "$LOG_DIR/rl_${CAP_B}_${STAMP}.log" &' in source
+    assert "PID_A=$!" in source
+    assert "PID_B=$!" in source
     assert 'SAVE_MODEL_ONLY="${SCOPED_SAVE_MODEL_ONLY:-true}"' in source
     assert 'SAVE_LIMIT="${SCOPED_SAVE_LIMIT:-1}"' in source
     assert '"trainer.save_model_only=$SAVE_MODEL_ONLY"' in source
     assert '"trainer.save_limit=$SAVE_LIMIT"' in source
     assert 'SCOPED_CUDA12_RUNTIME="$REPO_ROOT/.venv-scoped/lib/python3.12/site-packages/nvidia/cuda_runtime/lib"' in source
     assert 'LD_LIBRARY_PATH="$SCOPED_CUDA12_RUNTIME${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"' in source
+    assert 'PYTHON_INCLUDE_DIR="${SCOPED_PYTHON_INCLUDE_DIR:-$STORAGE_ROOT/runtime/python3.12-include}"' in source
+    assert 'CPATH="$PYTHON_INCLUDE_DIR${CPATH:+:$CPATH}"' in source
+    assert 'RUNTIME_PYTHONPATH="$ROOT/src:$ROOT/src/dual_track_opd/scoped_runtime"' in source
+    assert 'PYTHONPATH="$RUNTIME_PYTHONPATH${PYTHONPATH:+:$PYTHONPATH}"' in source
+    assert '[[ "$STAGE" == rl && ! -f "$PYTHON_INCLUDE_DIR/Python.h" ]]' in source
 
 
 def test_setup_pins_commit_and_refuses_dirty_checkout_without_reset():
@@ -113,11 +126,16 @@ def test_single_expert_runner_supports_separate_four_gpu_allocations():
     assert "SCOPED_GPU_GROUP" in source
     assert "RAY_TMPDIR=\"/tmp/scoped-ray-${CAPABILITY}-${STAMP}\"" in source
     assert '--capability all --output "$DATA_DIR" --offline' in source
-    assert "bash \"$REPO_ROOT/scripts/train.sh\" \"$CAPABILITY\"" in source
+    assert "bash \"$REPO_ROOT/scripts/lib/train_capability.sh\" \"$CAPABILITY\"" in source
     assert 'SAVE_MODEL_ONLY="${SCOPED_SAVE_MODEL_ONLY:-true}"' in source
     assert 'SAVE_LIMIT="${SCOPED_SAVE_LIMIT:-1}"' in source
     assert '"trainer.save_model_only=$SAVE_MODEL_ONLY"' in source
     assert '"trainer.save_limit=$SAVE_LIMIT"' in source
+    assert 'PYTHON_INCLUDE_DIR="${SCOPED_PYTHON_INCLUDE_DIR:-$STORAGE_ROOT/runtime/python3.12-include}"' in source
+    assert 'CPATH="$PYTHON_INCLUDE_DIR${CPATH:+:$CPATH}"' in source
+    assert 'RUNTIME_PYTHONPATH="$ROOT/src:$ROOT/src/dual_track_opd/scoped_runtime"' in source
+    assert 'PYTHONPATH="$RUNTIME_PYTHONPATH${PYTHONPATH:+:$PYTHONPATH}"' in source
+    assert '[[ -f "$PYTHON_INCLUDE_DIR/Python.h" ]]' in source
     assert "scripts/train.sh skill" not in source
 
 

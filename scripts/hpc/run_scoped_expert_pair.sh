@@ -12,6 +12,8 @@ STUDENT_MODEL="${STUDENT_MODEL:-$BASE_MODEL}"
 AUTO_DOWNLOAD_DATA="${AUTO_DOWNLOAD_DATA:-1}"
 SAVE_MODEL_ONLY="${SCOPED_SAVE_MODEL_ONLY:-true}"
 SAVE_LIMIT="${SCOPED_SAVE_LIMIT:-1}"
+PYTHON_INCLUDE_DIR="${SCOPED_PYTHON_INCLUDE_DIR:-$STORAGE_ROOT/runtime/python3.12-include}"
+RUNTIME_PYTHONPATH="$ROOT/src:$ROOT/src/dual_track_opd/scoped_runtime"
 PAIR=a
 STAGE=rl
 DRY_RUN=0
@@ -56,6 +58,10 @@ RL_PYTHON="${RL_PYTHON:-$REPO_ROOT/.venv-rl/bin/python}"
 SCOPED_PYTHON="${SCOPED_PYTHON:-$REPO_ROOT/.venv-scoped/bin/python}"
 SCOPED_CUDA12_RUNTIME="$REPO_ROOT/.venv-scoped/lib/python3.12/site-packages/nvidia/cuda_runtime/lib"
 if [[ "$DRY_RUN" != 1 ]]; then
+    if [[ "$STAGE" == rl && ! -f "$PYTHON_INCLUDE_DIR/Python.h" ]]; then
+        echo "Missing Python 3.12 headers: $PYTHON_INCLUDE_DIR" >&2
+        exit 1
+    fi
     if [[ "$STAGE" == rl ]]; then
         [[ -x "$RL_PYTHON" ]] || { echo "Missing executable: $RL_PYTHON" >&2; exit 1; }
     else
@@ -95,7 +101,9 @@ run_expert() {
         BASE_MODEL="$BASE_MODEL"
         STUDENT_MODEL="$STUDENT_MODEL"
         AUTO_DOWNLOAD_DATA="$AUTO_DOWNLOAD_DATA"
-        bash "$REPO_ROOT/scripts/train.sh" "$capability" \
+        CPATH="$PYTHON_INCLUDE_DIR${CPATH:+:$CPATH}"
+        PYTHONPATH="$RUNTIME_PYTHONPATH${PYTHONPATH:+:$PYTHONPATH}"
+        bash "$REPO_ROOT/scripts/lib/train_capability.sh" "$capability" \
             "trainer.save_model_only=$SAVE_MODEL_ONLY" \
             "trainer.save_limit=$SAVE_LIMIT"
     )
@@ -103,8 +111,7 @@ run_expert() {
         printf '%q ' "${command[@]}" >&2
         printf '\n' >&2
     else
-        "${command[@]}" >"$log" 2>&1 &
-        echo $!
+        "${command[@]}" >"$log" 2>&1
     fi
 }
 
@@ -117,11 +124,15 @@ case "$STAGE" in
             record_contract "rl_pair_${PAIR}_data_ready"
         fi
 
-        PID_A=$(run_expert "$CAP_A" "$GPU_A" "/tmp/scoped-ray-$STAMP-a" "$LOG_DIR/rl_${CAP_A}_${STAMP}.log")
-        PID_B=$(run_expert "$CAP_B" "$GPU_B" "/tmp/scoped-ray-$STAMP-b" "$LOG_DIR/rl_${CAP_B}_${STAMP}.log")
         if [[ "$DRY_RUN" == 1 ]]; then
+            run_expert "$CAP_A" "$GPU_A" "/tmp/scoped-ray-$STAMP-a" "$LOG_DIR/rl_${CAP_A}_${STAMP}.log"
+            run_expert "$CAP_B" "$GPU_B" "/tmp/scoped-ray-$STAMP-b" "$LOG_DIR/rl_${CAP_B}_${STAMP}.log"
             exit 0
         fi
+        run_expert "$CAP_A" "$GPU_A" "/tmp/scoped-ray-$STAMP-a" "$LOG_DIR/rl_${CAP_A}_${STAMP}.log" &
+        PID_A=$!
+        run_expert "$CAP_B" "$GPU_B" "/tmp/scoped-ray-$STAMP-b" "$LOG_DIR/rl_${CAP_B}_${STAMP}.log" &
+        PID_B=$!
         echo "Launched $CAP_A on GPUs $GPU_A (pid $PID_A)" >&2
         echo "Launched $CAP_B on GPUs $GPU_B (pid $PID_B)" >&2
         STATUS_A=0
