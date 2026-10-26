@@ -99,6 +99,9 @@ def test_pair_runner_uses_two_isolated_ray_directories_and_all_four_caps():
     assert '"$RAY_BIN" start --head' in source
     assert 'RAY_ADDRESS="127.0.0.1:$RAY_HEAD_PORT"' in source
     assert 'trap cleanup_ray EXIT' in source
+    assert 'MODEL_PATH="$BASE_MODEL"' in source
+    assert "HF_HUB_OFFLINE=1" in source
+    assert "TRANSFORMERS_OFFLINE=1" in source
 
 
 def test_setup_pins_commit_and_refuses_dirty_checkout_without_reset():
@@ -142,6 +145,9 @@ def test_single_expert_runner_supports_separate_four_gpu_allocations():
     assert 'RUNTIME_PYTHONPATH="$ROOT/src:$ROOT/src/dual_track_opd/scoped_runtime"' in source
     assert 'PYTHONPATH="$RUNTIME_PYTHONPATH${PYTHONPATH:+:$PYTHONPATH}"' in source
     assert '[[ -f "$PYTHON_INCLUDE_DIR/Python.h" ]]' in source
+    assert 'MODEL_PATH="$BASE_MODEL"' in source
+    assert "HF_HUB_OFFLINE=1" in source
+    assert "TRANSFORMERS_OFFLINE=1" in source
     assert "scripts/train.sh skill" not in source
 
 

@@ -111,8 +111,11 @@ run_expert() {
         DATA_DIR="$DATA_DIR"
         OUTPUT_DIR="$OUTPUT_DIR"
         BASE_MODEL="$BASE_MODEL"
+        MODEL_PATH="$BASE_MODEL"
         STUDENT_MODEL="$STUDENT_MODEL"
         AUTO_DOWNLOAD_DATA="$AUTO_DOWNLOAD_DATA"
+        HF_HUB_OFFLINE=1
+        TRANSFORMERS_OFFLINE=1
         CPATH="$PYTHON_INCLUDE_DIR${CPATH:+:$CPATH}"
         PYTHONPATH="$RUNTIME_PYTHONPATH${PYTHONPATH:+:$PYTHONPATH}"
         bash "$REPO_ROOT/scripts/lib/train_capability.sh" "$capability" \
