@@ -22,3 +22,21 @@ def as_sample_object_array(value: Any) -> np.ndarray:
         for item in items
     ]
     return result
+
+
+def normalize_non_tensor_batch(mapping: dict[str, Any]) -> dict[str, Any]:
+    """Normalize object-valued DataProto fields to one sample axis.
+
+    This is deliberately conservative: numeric arrays keep their shape, while
+    object arrays are reduced to the DataProto sample axis.  Equal-length
+    Python lists can otherwise be inferred as a rectangular 2-D object array
+    by NumPy, which breaks concatenation against batches whose entries have
+    different lengths.
+    """
+    normalized = {}
+    for key, value in mapping.items():
+        if isinstance(value, np.ndarray) and value.dtype == np.dtype(object):
+            normalized[key] = as_sample_object_array(value)
+        else:
+            normalized[key] = value
+    return normalized
