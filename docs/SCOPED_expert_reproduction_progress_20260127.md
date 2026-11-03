@@ -1,5 +1,95 @@
 # SCOPED Four-Expert Reproduction Progress — 2026-10-27
 
+## Reporting details: dataset, epochs, and resolved training configuration
+
+The following text describes the intended reproduction contract and the actual
+resolved configuration captured by the runs. It is a reporting summary, not a
+substitute for the pinned dataset/configuration artifacts. Raw parquet files,
+images, logs, and checkpoints are deliberately not committed to Git.
+
+### Dataset and expert-specific schedule
+
+- Dataset: **Hugging Face `xiongyq/SCOPED-Train`**, pinned at revision
+  **`912185f76295f847c09bc44f379cf85513472ebb`**. The local export manifest
+  SHA256 is `bc3340721edddbd869259cb1db50ca54446f8379deb4078067eb83896e47ca96`.
+  The manifest records `complete=true`, `limited_export=false`, and one
+  `train.parquet` plus one `test.parquet` per capability. Its per-shard hashes
+  are the reproducibility reference for the exported data; this summary does
+  not assert that those large files were re-hashed during this documentation
+  update.
+- All four experts are independent **reinforcement-learning** runs initialized
+  from the same **Qwen3-VL-8B-Instruct** base model. They are not four SFT
+  specialists trained on separately constructed supervised targets.
+- “Validation rows” below are the held-out rows in the corresponding dataset
+  split; they are not an external benchmark leaderboard. Dataset row counts,
+  nominal epochs, and rollout/length settings are:
+
+| Expert | Capability and data sources recorded in the local export manifest | Train / validation rows | Epochs | Rollout batch × samples per prompt | Max prompt / response tokens | Validation frequency |
+|---|---|---:|---:|---:|---:|---:|
+| C1 | Perception, counting, grounding; `Orsta-Data-47k`, `RL_train` | 9,499 / 501 | **5** | 128 × 8 | 8,192 / 4,096 | every 50 steps |
+| C2 | OCR, charts, tables, documents; `Orsta-Data-47k`, `RL_train` | 9,500 / 500 | **3** | 128 × 8 | 8,192 / 4,096 | every 50 steps |
+| C3 | Mathematical and symbolic reasoning; `images`, `data` | 9,500 / 500 | **3** | 128 × 8 | 8,192 / 8,192 | every 50 steps |
+| C4 | Multi-image and spatial reasoning; `mantis_instruct`, `m4_instruct_data` | 9,500 / 500 | **3** | **64** × 8 | **6,144** / 4,096 | every 20 steps |
+
+- Nominal endpoints are **C1=370, C2=222, C3=222, C4=444 optimizer steps**.
+  The first three follow `floor(train_rows / rollout_batch_size) * epochs`;
+  C4 is 444 because its rollout batch size is 64 rather than 128.
+- `rollout_n=8` means eight sampled responses per training prompt during RL
+  rollout; it does **not** mean eight epochs or an SFT batch multiplier.
+- Online filtering is enabled (`filter_key=overall`, `filter_low=0.01`,
+  `filter_high=0.99`, `max_try_make_batch=20`). Filtered-out examples can cause
+  extra source batches to be consumed, so nominal epochs/steps must not be
+  described as a guarantee of exactly three or five passes over every unique
+  training example.
+- Data source names in the table are the directory/source categories recorded
+  by the local export manifest, not a claim that each capability is a clean
+  benchmark-level train/test split. No downstream benchmark evaluation is
+  implied.
+
+### Common optimization and rollout settings
+
+- Algorithm: **GRPO**, with online filtering. The resolved configuration sets
+  `gamma=1.0`, `lam=1.0`, and `adv_estimator=grpo`.
+- Actor optimizer: **AdamW bf16**, learning rate **1e-6**, constant scheduler,
+  warmup ratio **0.0**, betas **(0.9, 0.999)**, weight decay **0.01**, one PPO
+  epoch per collected rollout, and maximum gradient norm **1.0**.
+- Actor update global batch size is **64**, update micro-batch per device is
+  **1**, experience micro-batch per device is **2**. Padding-free and dynamic
+  batching are enabled.
+- The configuration enables `use_kl_loss=true`, `kl_penalty=low_var_kl`, and
+  `kl_coef=0.01`, while `disable_kl=true`. Do not describe this run as an
+  approximate-KL-free method without explaining the actual resolved settings.
+  PPO clipping settings are `clip_ratio_low=0.2`, `clip_ratio_high=0.28`, and
+  `clip_ratio_dual=10.0`; loss averaging is `token`.
+- Rollout uses **vLLM**, bf16, sampling temperature **1.0**, top-p **1.0**, and
+  eight samples per training prompt. Validation uses **temperature 0.0 and one
+  generation**. vLLM tensor parallel size is **2**; GPU memory utilization is
+  configured as **0.85**.
+- C1/C2/C4 set vLLM `max_num_batched_tokens=15000`; C3 sets **150000**.
+  Training data are shuffled with seed **1**. Image pixel bounds are
+  **262,144–524,288**.
+- Each run uses **one node with four GPUs**, FSDP full sharding, and a private
+  local-Ray driver. Actor parameter/optimizer offloading is enabled; the
+  vision tower is frozen and LoRA rank is **0** (not a LoRA fine-tune).
+- Validation runs every 50 steps for C1–C3 and every 20 steps for C4. The
+  launch override saves model-only checkpoints every **25** steps for all four
+  experts, with `save_limit=1`, rather than the upstream YAML's default
+  checkpoint retention. The old best checkpoint can also be retained; the
+  table above lists the actually retained checkpoints, not an assumed
+  retention policy.
+- C1/C2/C3/C4 reward functions are respectively the upstream
+  `capability1.py:compute_score`, `r1v_f1.py:compute_score`,
+  `format_acc.py:compute_score`, and `capability4_multimage_acc.py:compute_score`.
+  The reported `reward_score` values therefore use the corresponding training
+  run's validation reward definition; they should not be compared as though
+  all four capabilities shared one metric.
+
+These settings are summarized from the pinned upstream capability YAMLs and
+`storage/outputs/rl/capability*/experiment_config.json`, with each active or
+final run's `resolved_config_receipt.json` identifying the resolved file and
+its SHA256. They are **configuration facts**, not a claim of exact trajectory
+reproducibility after model-only continuation.
+
 ## Current progress snapshot — 2026-11-03 01:40 UTC
 
 This is a read-only snapshot of the shared run records, metrics, bounded trainer
